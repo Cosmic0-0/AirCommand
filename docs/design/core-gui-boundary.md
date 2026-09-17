@@ -79,7 +79,7 @@ def test_discovery_persists_and_publishes_networks():
     engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
                      proc=FakeProcRunner(script=AIRODUMP_3_NETWORKS))
     seen: list[Network] = []
-    engine.subscribe(NetworkDiscovered, lambda e: seen.append(e.network))
+    engine.subscribe(lambda e: seen.append(e.network), NetworkDiscovered)
 
     handle = engine.discovery.start()
     handle.wait_for_test(timeout=2.0)          # test-only helper: block until N events or timeout
@@ -247,12 +247,27 @@ class AdapterMode(Enum): MONITOR_HOPPING = "monitor_hopping"; MONITOR_LOCKED = "
 class AdapterBusy(Exception):
     def __init__(self, requested: AdapterMode, holder: JobKind): ...
 
+@dataclass(frozen=True)
+class AdapterReservation:
+    """Carries the adapter name too, not just mode/holder: RadioController is the
+    only thing that knows the interface string (Discovery/Capture/Enumerator never
+    take one directly), and each driver's _drive() needs it to build argv for the
+    tool it spawns. Added during the headless-Discovery-flow slice, after the
+    original sketch below turned out to have no way for a driver to learn its
+    interface name at all."""
+    mode: AdapterMode
+    holder: JobKind
+    adapter: str
+
 class RadioController:
     """Single writer for adapter mode. reserve() is synchronous and either succeeds
     immediately (mode switch via airmon-ng, blocking, ~1s) or raises AdapterBusy —
-    it never queues. release() is called by the job-driver thread on any StopReason."""
-    def reserve(self, mode: AdapterMode, holder: JobKind) -> "AdapterReservation": raise NotImplementedError
-    def release(self, reservation: "AdapterReservation") -> None: raise NotImplementedError
+    it never queues. release() is called by the job-driver thread on any StopReason.
+    As of the headless-Discovery-flow slice, reserve()/release() only do the
+    in-memory arbitration below — the real airmon-ng mode switch is still deferred
+    until SubprocessRunner exists (see 'Next implementation step')."""
+    def reserve(self, mode: AdapterMode, holder: JobKind) -> AdapterReservation: raise NotImplementedError
+    def release(self, reservation: AdapterReservation) -> None: raise NotImplementedError
 ```
 
 `discovery.start()`, `capture.start_passive()`/`start_deauth_assisted()`, and `enumerate.start_scan()` each call `reserve()` before spawning anything; `AdapterBusy` is raised synchronously to the caller (the job never starts, no event fires) rather than surfacing as a job failure — the GUI call site above catches it directly, per the Usage section.
@@ -399,4 +414,8 @@ Rejected: the polling candidate's single generic `Job[R]` + `poll()`/`subscribe(
 
 ## Next implementation step
 
-Write `core/domain.py` and `core/events.py` first — the two files everything else depends on, and the only two fully specifiable without touching a subprocess — with a unit test suite for `EventBus` alone (multi-subscriber fan-out, unsubscribe, failure isolation when one subscriber raises) proving the synchronous-dispatch/write-then-emit ordering guarantee the rest of the design leans on. Then wire the headless `Discovery` flow (`FakeProcRunner` → parse → `NetworkDiscovered` → SQLite) end to end, per the Usage section's headless call site, before any real subprocess or sudo code exists.
+Done: `core/domain.py` and `core/events.py` (with the `EventBus` unit test suite), and the headless `Discovery` flow end to end (`FakeProcRunner` → parse → `NetworkDiscovered` → SQLite), per the Usage section's headless call site — including the full SQLite schema (`persistence/db.py`), which this design doc left as a TODO and which turned out to need `JobRepository` alongside `JobRegistry` so ADR-0004's orphan detection has somewhere durable to read from. Still no real subprocess or sudo code exists anywhere in the tree.
+
+Next: `core/allowlist.py` — small (four methods: `add`/`remove`/`list`/`require_target`) and fully headless-testable like the last two slices, but it's the shared prerequisite both remaining gated facades need (`Capture`/`Enumerator` both call `require_target` at Action-start, per 'Allowlist gate' above). Do it before either of them rather than letting one implement a throwaway stand-in.
+
+After that: `core/capture.py` — the next real milestone, not another small slice. It's the only `Handshake` mint site, drives two tools (`airodump-ng` + `aireplay-ng`) instead of Discovery's one, and is where ADR-0001's audit requirement actually bites (`DeauthFired` must be logged before the event fires, per 'SQLite and the event stream' above) — worth planning its own headless test fixtures (scripted deauth-then-handshake CSV output) before dispatching implementation, the same way the Discovery slice's CSV field-layout contract was pinned up front rather than left to whoever implemented it. `core/crack.py` naturally follows once `Capture` can produce a real `Handshake` to feed it. `core/enumerate.py` only depends on `Allowlist`, so it can happen in either order relative to `Capture`/`Crack`. `core/privilege.py` (real `sudo` invocation) and `core/reconciliation.py` stay last — both need genuine subprocess/sudo code, which every prior slice has deliberately deferred, and reconciliation specifically needs `Capture` to exist first for its "unlogged deauth bursts" scenario to mean anything.
