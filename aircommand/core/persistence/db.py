@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from aircommand.core.domain import (
+    _TARGET_MINT,  # module-private; see TargetRepository's own docstring for why
     AuditLogEntry,
     BSSID,
     CrackResultRow,
@@ -213,21 +214,69 @@ class NetworkRepository:
         self._conn.commit()
 
 
+def _row_to_target(row: sqlite3.Row) -> Target:
+    return Target(
+        id=row["id"],
+        bssid=BSSID(value=row["bssid"]),
+        ssid=row["ssid"],
+        label=row["label"],
+        date_added=datetime.fromisoformat(row["date_added"]),
+        _proof=_TARGET_MINT,
+    )
+
+
 class TargetRepository:
+    """Mints Target here (using _TARGET_MINT), not in allowlist.py: Allowlist's
+    own methods stay thin one-line delegations, matching how NetworkRepository/
+    JobRepository already construct their own full domain objects rather than
+    handing raw rows back for the facade to assemble. "Only Allowlist can
+    construct a Target" (domain.py) means the only REACHABLE path through the
+    running system is via Allowlist's own methods, which is still true here:
+    nothing outside allowlist.py ever touches a TargetRepository (Engine wires
+    self._db.targets to Allowlist alone) -- it isn't a security boundary between
+    this file and that one, just a documentation convenience for callers further
+    out (the GUI, future facades) who'd otherwise need to know where the one
+    legitimate mint site is."""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def upsert(self, bssid: BSSID, ssid: str, label: str) -> Target:
-        raise NotImplementedError
+        existing = self._conn.execute(
+            "SELECT 1 FROM targets WHERE bssid = ?", (str(bssid),)
+        ).fetchone()
+        if existing is not None:
+            # date_added is deliberately absent from this SET list: it means "when
+            # this became a Target", not "when last renamed" -- same preserve-the-
+            # original rule as Network.first_seen's _update above.
+            self._conn.execute(
+                "UPDATE targets SET ssid = ?, label = ? WHERE bssid = ?",
+                (ssid, label, str(bssid)),
+            )
+        else:
+            self._conn.execute(
+                "INSERT INTO targets (bssid, ssid, label, date_added) VALUES (?, ?, ?, ?)",
+                (str(bssid), ssid, label, datetime.now().isoformat()),
+            )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM targets WHERE bssid = ?", (str(bssid),)
+        ).fetchone()
+        return _row_to_target(row)
 
     def delete(self, bssid: BSSID) -> None:
-        raise NotImplementedError
+        self._conn.execute("DELETE FROM targets WHERE bssid = ?", (str(bssid),))
+        self._conn.commit()
 
     def all(self) -> list[Target]:
-        raise NotImplementedError
+        rows = self._conn.execute("SELECT * FROM targets").fetchall()
+        return [_row_to_target(row) for row in rows]
 
     def get(self, bssid: BSSID) -> Optional[Target]:
-        raise NotImplementedError
+        row = self._conn.execute(
+            "SELECT * FROM targets WHERE bssid = ?", (str(bssid),)
+        ).fetchone()
+        return _row_to_target(row) if row is not None else None
 
 
 class HandshakeRepository:

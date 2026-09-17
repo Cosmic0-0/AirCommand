@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
-from aircommand.core.domain import _TARGET_MINT  # module-private; Allowlist is the one authorized user
+import uuid
+from datetime import datetime
+
 from aircommand.core.domain import BSSID, Target
 from aircommand.core.events import EventBus, TargetAdded, TargetRemoved
 from aircommand.core.persistence.db import TargetRepository
@@ -23,25 +25,36 @@ class Allowlist:
         self._repo = repo
         self._bus = bus
 
-    def add(self, bssid: BSSID, label: str) -> Target:
-        raise NotImplementedError
-        # TODO: idempotent upsert into targets table -> row; mint Target(..., _proof=_TARGET_MINT);
-        # bus.publish(TargetAdded(target=...)) after the write commits.
+    def add(self, bssid: BSSID, ssid: str, label: str) -> Target:
+        """Idempotent upsert: calling this again for an already-Target bssid
+        updates its ssid/label (e.g. a rename) rather than erroring — there's no
+        separate rename method. `ssid` is a required param, not looked up here
+        from NetworkRepository: that would force "must already be Discovered"
+        as a precondition, which nothing in CONTEXT.md or the ADRs requires, and
+        the GUI already has the ssid on hand (the row the user clicked, or a
+        manual-entry field) either way."""
+        target = self._repo.upsert(bssid, ssid, label)
+        self._bus.publish(TargetAdded(event_id=uuid.uuid4(), occurred_at=datetime.now(), target=target))
+        return target
 
     def remove(self, bssid: BSSID) -> None:
-        raise NotImplementedError
-        # TODO: idempotent delete (no-op if absent); bus.publish(TargetRemoved(bssid=...)) after commit.
+        existing = self._repo.get(bssid)
+        if existing is None:
+            return
+        self._repo.delete(bssid)
+        self._bus.publish(TargetRemoved(event_id=uuid.uuid4(), occurred_at=datetime.now(), bssid=bssid))
 
     def list(self) -> list[Target]:
-        raise NotImplementedError
+        return self._repo.all()
 
     def get(self, bssid: BSSID) -> Target | None:
-        raise NotImplementedError
+        return self._repo.get(bssid)
 
     def require_target(self, bssid: BSSID) -> Target:
         """The gate. Called by Capture/Enumerator at the moment an Action actually
         starts — never trust a Target handed in from a picker without re-deriving
         it here, since the allowlist may have changed since it was fetched."""
-        raise NotImplementedError
-        # TODO: SELECT by bssid; raise NotATargetError(bssid) if absent;
-        # else return Target(..., _proof=_TARGET_MINT).
+        target = self._repo.get(bssid)
+        if target is None:
+            raise NotATargetError(bssid)
+        return target

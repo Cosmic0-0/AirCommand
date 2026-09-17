@@ -44,9 +44,12 @@ class App(ctk.CTk):
 
         self.engine.discovery.start()                   # returns a JobHandle; runs until stopped
 
-    def on_add_target_clicked(self, bssid_str: str, label: str):
-        self.engine.targets.add(BSSID.parse(bssid_str), label)
+    def on_add_target_clicked(self, bssid_str: str, ssid: str, label: str):
+        self.engine.targets.add(BSSID.parse(bssid_str), ssid, label)
         # TargetAdded arrives via the pump; the picker updates from that event, not this return value.
+        # ssid comes from the Network row the user clicked (or a manual-entry field) —
+        # Allowlist doesn't look it up itself, so a Target can be added without
+        # requiring the bssid to already be a Discovered Network.
 
     def on_start_capture_clicked(self, target: Target, deauth: bool):
         try:
@@ -225,12 +228,13 @@ Each job-driver thread owns its own `sqlite3` connection (WAL mode, short `busy_
 
 ```python
 class Allowlist:
-    def add(self, bssid: BSSID, label: str) -> Target: raise NotImplementedError      # idempotent upsert
+    def add(self, bssid: BSSID, ssid: str, label: str) -> Target: raise NotImplementedError  # idempotent upsert
     def remove(self, bssid: BSSID) -> None: raise NotImplementedError                  # idempotent if absent
     def list(self) -> list[Target]: raise NotImplementedError
     def require_target(self, bssid: BSSID) -> Target:
         raise NotImplementedError
-        # TODO: SELECT by bssid; raise NotATargetError(bssid) if absent; else Target(..., _proof=_MINT)
+        # TODO: SELECT by bssid; raise NotATargetError(bssid) if absent; else return the
+        # (already-minted, by TargetRepository) Target row
 ```
 
 Every gated entry point takes a `Target` object, never a bare BSSID/str: `Capture.start_passive(target, ...)`, `Capture.start_deauth_assisted(target, ...)`, `Enumerator.start_scan(target, ...)`. Because `Target.__post_init__` rejects construction without `Allowlist`'s private sentinel, there is no code path into a gated method that didn't originate from `Allowlist` — that answers "before any Action fires" structurally, not via a checklist of call sites to remember.
