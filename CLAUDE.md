@@ -23,3 +23,12 @@ This repo deliberately splits work across model strength:
 - **Every dispatched implementation gets reviewed before being called done.** Read the actual diff, not just the subagent's summary — check it against the interface that was planned, fix or redo anything that drifted.
 
 Rule of thumb: if the task requires deciding *how* something should be structured, do it directly. If the structure is already decided and the task is just *writing it*, dispatch it.
+
+## Dev workflow: commits and pushes
+
+Claude does not run `git add`, `git commit`, `git push`, or anything else that would create a commit or push to a remote in this repo — not even when explicitly asked to commit. Whenever a commit or push would otherwise happen, instead:
+
+1. Give a short summary of the change and a suggested commit message.
+2. Give the exact command(s) to run, staging included (e.g. `git add <files>`, `git commit -m "..."`, `git push` as applicable).
+
+The user runs the command(s) themselves and reports back when done — treat the change as uncommitted until they do.
