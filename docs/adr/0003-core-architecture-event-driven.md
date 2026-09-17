@@ -1,0 +1,16 @@
+# Core architecture: event-driven pub/sub over a polling facade
+
+AirCommand's core-engine/GUI boundary needed a concrete shape for streaming live progress (Networks appearing, Capture/Handshake status, Crack hashrate) out of long-running subprocess-backed operations without blocking CustomTkinter's single-threaded mainloop, while keeping the Target allowlist gate structurally unbypassable and Handshake→Target provenance traceable so Crack can trust it without a separate check. Two structurally distinct candidates were designed independently (a synchronous facade returning pollable `Job` handles, and an event-driven core publishing domain events to subscribers) and synthesized: **the core is event-driven**. `Engine` exposes five gated sub-facades (`targets`/`discovery`/`capture`/`enumerate`/`crack`) that return immediately with a `JobHandle`; all state changes and progress arrive as domain events on an in-process `EventBus`, which a `GuiEventPump` drains onto Tk's mainloop via a thread-safe queue. See `docs/design/core-gui-boundary.md` for the full type sketch, module map, and rationale.
+
+## Why
+
+An event bus naturally supports multiple independent subscribers reacting to the same stream (a network table, a target picker, an audit log view, a future v2 report generator) without one consumer's read draining data another consumer still needs — a real requirement once the GUI has more than one panel. This was also the load-bearing weakness found in the polling-facade candidate: its `Job.poll()` drains its own event buffer, so two independent readers of the same job would silently split a shared feed instead of each seeing the whole thing. The event-driven shape also lets privilege loss (`SudoKeepaliveFailed`, per ADR-0002's requirement to "surface clearly") and audit-relevant facts (`DeauthFired`) get pushed the moment they're durable, rather than waiting for a GUI's next poll tick.
+
+## Considered Options
+
+- **Synchronous facade + pollable `Job[R]` handles**, worker-thread pool internal to the facade, single consumer per job. Strong on testability and on cleanly separating coalescible progress from must-not-miss events within one job's stream — but assumes one reader per job, which doesn't fit a GUI with multiple panels watching the same operation, and privilege/keepalive status would need its own separate poll loop outside any job.
+- **Shared mutable state polled by the GUI on a timer.** Rejected outright by the original task framing, and independently weak here: a poll-and-diff approach can collapse two audit-relevant events (e.g. two deauth bursts) landing between ticks into one observed change, which conflicts with "every firing must be audit-logged."
+
+## Consequences
+
+Every subscriber callback runs synchronously on the publishing thread (per event, in subscription order) until it returns, so subscribers must stay fast — genuinely slow work (e.g. batched DB writes for high-frequency telemetry) has to hand off to its own thread inside the callback rather than run inline. Testability (core must run without a GUI, per CLAUDE.md) isn't automatic the way `Job.wait()` made it in the polling candidate — it has to be deliberately preserved via a constructor-injected subprocess seam, which the design doc and skeleton make explicit rather than assumed.

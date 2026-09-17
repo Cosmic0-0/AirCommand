@@ -1,1 +1,3 @@
 NetworkAddresses.txt
+__pycache__/
+*.pyc
