@@ -26,22 +26,29 @@ class SightingBatcher:
         self._flush_thread: threading.Thread | None = None
 
     def start(self) -> None:
-        raise NotImplementedError
-        # TODO: self._subscription = self._bus.subscribe(self._on_event, NetworkSightingUpdated)
-        # start self._flush_thread running self._flush_loop (daemon=True).
+        self._subscription = self._bus.subscribe(self._on_event, NetworkSightingUpdated)
+        self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._flush_thread.start()
 
     def stop(self) -> None:
-        raise NotImplementedError
-        # TODO: set self._stop, join the flush thread, do one final flush so
-        # shutdown doesn't lose the last few seconds. Called from Engine.shutdown().
+        self._stop.set()
+        if self._flush_thread is not None:
+            self._flush_thread.join()
+        # The loop thread is guaranteed dead by the join above, but it may have
+        # exited between its own last flush and the wait() that would've caught
+        # _stop -- flush directly here so shutdown never drops the last update.
+        with self._lock:
+            pending, self._pending = self._pending, {}
+        for network in pending.values():
+            self._repo.update_sighting(network)
 
     def _on_event(self, event: NetworkSightingUpdated) -> None:
-        raise NotImplementedError
-        # TODO: with self._lock: self._pending[event.network.bssid] = event.network
-        # Must stay O(1) — this runs ON THE PUBLISHER'S THREAD inside EventBus.publish().
+        with self._lock:
+            self._pending[event.network.bssid] = event.network
 
     def _flush_loop(self) -> None:
-        raise NotImplementedError
-        # TODO: while not self._stop.wait(self._flush_interval_s):
-        #   with self._lock: batch, self._pending = self._pending, {}
-        #   for network in batch.values(): self._repo.update_sighting(network)  # one batched UPDATE ideally
+        while not self._stop.wait(self._flush_interval_s):
+            with self._lock:
+                batch, self._pending = self._pending, {}
+            for network in batch.values():
+                self._repo.update_sighting(network)

@@ -6,7 +6,10 @@ via Engine's constructor injection; none construct one itself.
 
 from __future__ import annotations
 
+import itertools
 from typing import Callable, Iterator, Protocol
+
+_fake_pid_counter = itertools.count(90000)  # high enough not to collide with anything real
 
 
 class ProcHandle(Protocol):
@@ -67,6 +70,25 @@ class SubprocessRunner:
         # process GROUP (os.killpg) on terminate()/kill().
 
 
+class _FakeProcHandle:
+    def __init__(self, scripted_lines: list[str]) -> None:
+        self._scripted_lines = scripted_lines
+        self.pid = next(_fake_pid_counter)
+        self.pgid = self.pid  # ProcHandle.pgid's own contract: == pid, one session per spawn
+
+    def lines(self) -> Iterator[str]:
+        yield from self._scripted_lines
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return 0
+
+
 class FakeProcRunner:
     """Test ProcRunner: replays a scripted line stream, no process, no sudo, no
     adapter. This is what makes the headless call site in
@@ -79,9 +101,9 @@ class FakeProcRunner:
         self._script = script
 
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
-        raise NotImplementedError
-        # TODO: look up self._script[argv[0]], return a ProcHandle-like fake that
-        # yields those lines from lines() and no-ops on terminate()/kill().
+        # A KeyError here means the test scripted the wrong argv[0] -- a test-author
+        # bug, not something this fake should paper over.
+        return _FakeProcHandle(self._script[argv[0]])
 
 
 # --- Startup orphan reconciliation (ADR-0004) -------------------------------------

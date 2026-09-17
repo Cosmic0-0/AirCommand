@@ -148,6 +148,27 @@ class JobKind(Enum):
 
 
 @dataclass(frozen=True)
+class StaleJob:
+    """A job row left behind by a prior process (crash, kill -9). See
+    core/reconciliation.py and ADR-0004. pid/pgid/fingerprint are None if the
+    driver thread crashed before ever reaching record_process() — e.g. mid-RF-
+    reservation, before any subprocess was spawned — in which case there is
+    nothing for reconciliation to check or kill, only the row to clear.
+
+    Lives here rather than in jobs.py so persistence/db.py (which constructs
+    these) and jobs.py (which takes a JobRepository) don't import each other.
+    """
+
+    job_id: JobId
+    kind: JobKind
+    target_id: Optional[int]
+    pid: Optional[int]
+    pgid: Optional[int]
+    process_fingerprint: Optional[str]  # e.g. "airodump-ng ... wlan0mon"; checked
+    # against /proc/<pid>/cmdline before signaling anything — see procutil.py.
+
+
+@dataclass(frozen=True)
 class AuditLogEntry:
     """Every deauth firing, append-only, independent of capture outcome."""
 
