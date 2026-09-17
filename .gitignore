@@ -1,3 +1,5 @@
 NetworkAddresses.txt
 __pycache__/
 *.pyc
+.pytest_cache/
+*.egg-info/

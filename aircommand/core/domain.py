@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
 from typing import NewType, Optional
+import string
 import uuid
 
 # Module-private mint sentinels. Not exported from aircommand.core. Distinct per
@@ -32,9 +33,25 @@ class MacAddress:
 
     @staticmethod
     def parse(raw: str) -> "MacAddress":
-        raise NotImplementedError
-        # TODO: normalize case/separators (accept '-' or ':' or bare hex), validate
-        # 6 octets, raise ValueError with the offending input on failure.
+        has_colon = ":" in raw
+        has_dash = "-" in raw
+        if has_colon and has_dash:
+            raise ValueError(f"invalid MAC address (mixed separators): {raw!r}")
+
+        if has_colon:
+            octets = raw.split(":")
+        elif has_dash:
+            octets = raw.split("-")
+        else:
+            octets = [raw[i : i + 2] for i in range(0, len(raw), 2)]
+
+        valid = len(octets) == 6 and all(
+            len(o) == 2 and all(c in string.hexdigits for c in o) for o in octets
+        )
+        if not valid:
+            raise ValueError(f"invalid MAC address: {raw!r}")
+
+        return MacAddress(value=":".join(o.upper() for o in octets))
 
     def __str__(self) -> str:
         return self.value
