@@ -45,6 +45,24 @@ or fold them into one honest commit that says what it actually contains. Present
 every pending commit at the end if you don't stop earlier. If you hit something only
 the user can decide (see the flagged items below), stop and ask rather than guessing.
 
+Make sure this doc (and any ADR/design-doc update you make) is actually committed
+before a session ends or a new chat starts — a fresh session's only way to inherit
+what you learned is by reading what's committed. An update sitting uncommitted in
+the working tree might as well not exist to the next chat.
+
+**Why this is one doc updated in place, not a fully-detailed plan written far in
+advance:** this exact question — "should we front-load full detail for every
+remaining phase in one big planning chat before touching any of it?" — was run past
+a 5-advisor LLM council. Unanimous verdict: no. The reasoning: every real interface
+gap found in this project so far (see the entries below) surfaced only once someone
+was hands-on with the actual code, immediately before dispatching it — never from
+reading stubs or docs cold, however carefully. A planning-only chat, by definition,
+only reads cold. Worse than being merely useless, a confidently-written phase spec
+around a gap nobody's actually verified reads as *decided* to whoever executes it
+later, making the error harder to catch, not easier. So: keep this doc thin, resolve
+each slice's real gaps immediately before dispatching *that* slice (step 2 above),
+and don't try to pre-solve Phase 2 or Phase 3 problems from inside a Phase 1 mindset.
+
 ## Conventions established so far (not written down anywhere else — follow them)
 
 - **SQLite**: `MacAddress`/`BSSID` → `str(x)` to store, `BSSID(value=row["..."])` back.
@@ -74,6 +92,14 @@ the user can decide (see the flagged items below), stop and ask rather than gues
 - **Thin facade, fat repository.** Facade methods are 1-4 line delegations; the
   repository holds the actual SQL and constructs the actual domain object. Keep
   following this rather than letting SQL creep into `capture.py`/`crack.py`/etc.
+- **Record real decisions where the project already records them, not in a new
+  place.** When you resolve one of the gaps flagged below (or find a new one),
+  don't just fix the code and move on — if it's a genuine architectural
+  tradeoff (multiple real options, a reason one was chosen), write it as an ADR
+  in `docs/adr/`, matching ADR-0001 through 0004. If it's smaller than that,
+  update this roadmap or `docs/design/core-gui-boundary.md` in place. Either way
+  it needs to be committed (see above) — a decision that only exists in one
+  session's chat transcript doesn't exist for the next one.
 
 ## Phase 1 — core engine, headless-testable (do these via FakeProcRunner, same as Discovery)
 
@@ -87,7 +113,7 @@ keep it). Depends on `Allowlist` (done) and needs `HandshakeRepository` +
 
 **Not actually scoped yet — resolve before implementing, don't guess:**
 
-- **How is a handshake actually detected?** The stub's `parse_airodump_handshake_flag(csv_block: str) -> bool` in `parse.py` assumes airodump-ng's own CSV output carries a handshake indicator. Verify this against real airodump-ng behavior before implementing it — the more common real-world approach (used by aircrack-ng-suite tooling generally) is checking the *captured `.cap` file itself* (e.g. via `aircrack-ng` against it, or inspecting EAPOL message pairs), not the live CSV stream. If the CSV-flag approach doesn't hold up, the function's whole signature may need to change — that's a legitimate finding, not scope creep, if you verify it first.
+- **How is a handshake actually detected?** The stub's `parse_airodump_handshake_flag(csv_block: str) -> bool` in `parse.py` assumes airodump-ng's own CSV output carries a handshake indicator. This is an *external* fact (about aircrack-ng-suite's real behavior), not an internal one — you can make real progress on it without hardware, by reading aircrack-ng's actual documentation/source/community references (that's research, not "reading the stub cold" — it can genuinely reduce the uncertainty). The more common real-world approach is checking the *captured `.cap` file itself* (e.g. via `aircrack-ng` against it, or inspecting EAPOL message pairs), not the live CSV stream. But full confidence may not be reachable until Phase 2, when real hardware exists to check actual tool output against — if research alone doesn't settle it, implement your best-researched version now, mark it explicitly (in a code comment and in this doc) as "unverified against real tool output, re-check in Phase 2," and don't let implementation pressure turn a marked assumption into a silently-trusted fact.
 - **Mint site for `Handshake`**: repository-mints (matching `Target`'s precedent) or facade-mints (matching the existing `capture.py` TODO's own pseudocode)? Pick one deliberately and say why in a comment, the way `TargetRepository`'s docstring does.
 - Needs realistic `FakeProcRunner` fixtures for *two* tools in one flow: airodump-ng (streamed lines, same shape as Discovery's) and aireplay-ng (fire-and-wait, probably no meaningful `.lines()` output to parse — mostly just needs `.wait()`).
 
@@ -107,17 +133,32 @@ rather than guessing at JSON keys. `CrackResultRepository` needs implementing
 Independent of Capture/Crack (only needs `Allowlist`), but has a real open design
 gap, not just an implementation detail:
 
-**Not actually scoped yet — this one needs a real decision, possibly worth a short
-back-and-forth with the user rather than guessing:** the `_drive` TODO references a
-`target_subnet` that's never defined anywhere. A `Target` only carries a wifi
-`bssid`/`ssid` — nmap needs an IP/subnet, and nothing in the current design says how
-to get from one to the other. The likely intent is "scan whatever subnet this
-machine is currently associated to, assuming it already joined the target's network
-in managed mode" — but *joining* a specific network (as opposed to just switching
-`AdapterMode` to `MANAGED`) needs credentials and isn't modeled anywhere in `rf.py`
-today. Don't invent an answer under implementation pressure; if it's not obvious
-once you dig in, surface it and ask rather than shipping a `target_subnet` that's
-quietly wrong.
+**Not actually scoped yet — this one needs the user, don't resolve it solo:** the
+`_drive` TODO references a `target_subnet` that's never defined anywhere. A `Target`
+only carries a wifi `bssid`/`ssid` — nmap needs an IP/subnet, and nothing in the
+current design says how to get from one to the other. Unlike Capture's gap above,
+this one doesn't need hardware or research — it's a genuine design fork, answerable
+today by thinking it through, but it's bigger than it first looks and touches
+security-sensitive territory, so ask rather than deciding solo:
+
+- **Option A**: AirCommand never joins a network itself. It assumes the operator
+  already associated to the target network through their OS's normal wifi settings
+  before clicking "Enumerate," and just reads whatever subnet the currently-active
+  interface is on (stdlib-only — no new domain fields, no credential storage).
+  Smaller scope, matches this project's minimal-scope posture, but means Enumerate
+  silently finds nothing if the operator hasn't manually joined first.
+  Recommended for exactly that reason.
+- **Option B**: AirCommand manages the join itself — which means storing a
+  network's credentials somewhere (a new field on `Target`? a separate secret
+  store?) and giving `RadioController`'s `AdapterMode.MANAGED` a real "associate to
+  this specific network" operation it doesn't have today. Real scope increase
+  across `domain.py`/`allowlist.py`/`rf.py`, and "should this tool store wifi
+  passwords at rest" is a security-posture decision worth an ADR of its own, not a
+  quiet default.
+
+Whichever way the user goes, write it down — as an ADR if it's Option B (real
+tradeoff, real scope), as a note in this doc if it's Option A (confirms an
+assumption, doesn't add anything new).
 
 ## Phase 2 — first real subprocess/hardware code
 
@@ -145,6 +186,10 @@ validate it, not just `pytest`.
   `procutil.py`'s `is_process_group_alive`/`terminate_process_group`/
   `_send_signal_unprivileged` (Linux `/proc` parsing — already well-specified via
   existing TODOs, lower risk than the items above).
+- **Re-check Capture's handshake-detection assumption against real output**, once
+  real hardware exists to check it against — see the flag in Phase 1's `capture.py`
+  entry. If it was implemented from research alone without full confidence, this is
+  where that gets settled for real, not guessed at again.
 
 ## Phase 3 — GUI
 
