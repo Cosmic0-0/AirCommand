@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable, Optional
+import logging
+import threading
 import uuid
 
 from aircommand.core.domain import (
@@ -167,9 +169,25 @@ class StartupReconciliationCompleted(DurableEvent):
 
 # --- Bus -------------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
+
+class _Registration:
+    """Identity-compared (no __eq__/dataclass): two registrations for the same
+    callback+event_type must stay individually removable by their own Subscription."""
+
+    def __init__(self, callback: Callable[[Event], None], event_type: Optional[type]) -> None:
+        self.callback = callback
+        self.event_type = event_type
+
+
 class Subscription:
+    def __init__(self, bus: "EventBus", registration: _Registration) -> None:
+        self._bus = bus
+        self._registration = registration
+
     def unsubscribe(self) -> None:
-        raise NotImplementedError
+        self._bus._unsubscribe(self._registration)
 
 
 class EventBus:
@@ -185,13 +203,33 @@ class EventBus:
     and only does an in-memory append inline.
     """
 
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: list[_Registration] = []
+
     def subscribe(
         self, callback: Callable[[Event], None], event_type: Optional[type] = None
     ) -> Subscription:
-        raise NotImplementedError
+        registration = _Registration(callback, event_type)
+        with self._lock:
+            self._subscribers.append(registration)
+        return Subscription(self, registration)
 
     def publish(self, event: Event) -> None:
-        raise NotImplementedError
-        # TODO: snapshot the subscriber list under a short lock, then invoke
-        # callbacks outside the lock (so a slow subscriber can't block subscribe()
-        # calls from other threads); wrap each callback in try/except, log failures.
+        with self._lock:
+            snapshot = list(self._subscribers)
+
+        for registration in snapshot:
+            if registration.event_type is not None and not isinstance(event, registration.event_type):
+                continue
+            try:
+                registration.callback(event)
+            except Exception:
+                logger.exception("Subscriber raised while handling %s", type(event).__name__)
+
+    def _unsubscribe(self, registration: _Registration) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(registration)
+            except ValueError:
+                pass
