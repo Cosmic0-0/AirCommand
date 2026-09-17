@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+import uuid
 from typing import Optional
 
-from aircommand.core.domain import JobId, JobKind
+from aircommand.core.domain import JobId, JobKind, StaleJob
+from aircommand.core.persistence.db import JobRepository
 
 
 class CancellationToken:
@@ -40,40 +42,35 @@ class JobHandle:
     def wait_for_test(self, timeout: Optional[float] = None) -> None:
         """Test-only helper: blocks until the job reaches a terminal state. Not
         part of the GUI's interface — the GUI observes termination via events."""
-        raise NotImplementedError
-
-
-@dataclass(frozen=True)
-class StaleJob:
-    """A job row left RUNNING by a prior process (crash, kill -9). See
-    core/reconciliation.py and ADR-0004. pid/pgid/fingerprint are None if the
-    driver thread crashed before ever reaching record_process() — e.g. mid-RF-
-    reservation, before any subprocess was spawned — in which case there is
-    nothing for reconciliation to check or kill, only the row to mark terminal."""
-
-    job_id: JobId
-    kind: JobKind
-    target_id: Optional[int]
-    pid: Optional[int]
-    pgid: Optional[int]
-    process_fingerprint: Optional[str]  # e.g. "airodump-ng ... wlan0mon"; checked
-    # against /proc/<pid>/cmdline before signaling anything — see procutil.py.
+        self._registry.wait_for_terminal(self.job_id, timeout)
 
 
 class JobRegistry:
-    """One entry per in-flight (or recently-terminal) job. Tracks each job's
-    CancellationToken so cancel()/shutdown()/startup reconciliation have
-    something to act on."""
+    """One entry per in-flight job. Tracks each job's CancellationToken (so
+    cancel() has something to signal) and a terminal-state threading.Event (so
+    wait_for_test() has something to block on) purely in memory — neither is
+    reconstructable after a crash, which is fine: startup reconciliation
+    (ADR-0004) works from `repo`'s persisted state, not from these. Durable job
+    bookkeeping (enough to find an orphan after a crash) goes through `repo`, a
+    JobRepository (persistence/db.py) — this class never touches SQL directly,
+    matching every other facade's split from its repository.
+    """
 
-    def __init__(self) -> None:
+    def __init__(self, repo: JobRepository) -> None:
+        self._repo = repo
         self._lock = threading.Lock()
         self._tokens: dict[JobId, CancellationToken] = {}
+        self._terminal_events: dict[JobId, threading.Event] = {}
 
     def new_job(self, kind: JobKind, target_id: Optional[int] = None) -> tuple[JobId, CancellationToken]:
-        raise NotImplementedError
-        # TODO: mint a JobId (uuid4), create+store a CancellationToken, insert a
-        # RUNNING row in the jobs table (target_id, pid/pgid/fingerprint all NULL
-        # until record_process() is called), return both.
+        job_id = JobId(uuid.uuid4())
+        token = CancellationToken()
+        terminal = threading.Event()
+        with self._lock:
+            self._tokens[job_id] = token
+            self._terminal_events[job_id] = terminal
+        self._repo.insert_running(job_id, kind, target_id)
+        return job_id, token
 
     def record_process(self, job_id: JobId, pid: int, pgid: int, fingerprint: str) -> None:
         """Called by a driver thread right after ProcRunner.spawn() succeeds — not
@@ -83,21 +80,37 @@ class JobRegistry:
         (see ADR-0004). Jobs with no privileged subprocess (e.g. between RF
         reservation and spawn) simply never call this — their StaleJob will have
         pid=None, and reconciliation just marks them terminal with nothing to kill."""
-        raise NotImplementedError
+        self._repo.record_process(job_id, pid, pgid, fingerprint)
 
     def cancel(self, job_id: JobId) -> None:
-        raise NotImplementedError
-        # TODO: look up the token, call .cancel() — no-op if job_id is unknown or
-        # already terminal (idempotent). Does NOT wait for cleanup; the driver
-        # thread's own loop observes is_cancelled() and publishes the terminal event.
+        with self._lock:
+            token = self._tokens.get(job_id)
+        if token is not None:
+            token.cancel()
 
     def mark_terminal(self, job_id: JobId) -> None:
-        raise NotImplementedError
-        # TODO: drop the token, update the jobs row. Called by a driver thread
-        # right before it publishes its terminal event.
+        with self._lock:
+            self._tokens.pop(job_id, None)
+            event = self._terminal_events.get(job_id)
+            if event is not None:
+                event.set()
+        self._repo.mark_terminal(job_id)
 
     def find_stale_jobs(self) -> list[StaleJob]:
-        """DB-only read: job rows still RUNNING from a prior process. Does not
-        touch the OS or mark anything terminal — see core/reconciliation.py,
+        """DB-only read: job rows left behind by a prior process. This process's
+        own jobs are only ever inserted AFTER reconcile_startup() runs (see
+        Engine.reconcile_startup's docstring), so every row found here predates
+        this process — no session/process id needed to tell stale from live.
+        Does not touch the OS or clear anything — see core/reconciliation.py,
         which must run only after privilege is re-established (ADR-0004)."""
-        raise NotImplementedError
+        return self._repo.find_stale()
+
+    def wait_for_terminal(self, job_id: JobId, timeout: Optional[float] = None) -> None:
+        """Test-only (see JobHandle.wait_for_test). Blocks until mark_terminal()
+        has been called for job_id. Returns immediately if job_id was never
+        tracked here, rather than hanging forever on a typo'd or unknown id."""
+        with self._lock:
+            event = self._terminal_events.get(job_id)
+        if event is None:
+            return
+        event.wait(timeout)

@@ -33,7 +33,7 @@ class Engine:
     ) -> None:
         self._db = Database(db_path)
         self._bus = EventBus()
-        self._jobs = JobRegistry()
+        self._jobs = JobRegistry(self._db.jobs)
         self._work_dir = Path(work_dir)
         self._work_dir.mkdir(parents=True, exist_ok=True)
 

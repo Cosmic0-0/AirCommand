@@ -32,8 +32,16 @@ class AdapterBusy(Exception):
 
 @dataclass(frozen=True)
 class AdapterReservation:
+    """Carries the adapter name too, not just mode/holder: RadioController is the
+    only thing that knows the interface string (Discovery/Capture/Enumerator never
+    take one directly), and each driver's _drive() needs it to build argv for the
+    tool it spawns. The reservation is already the proof a driver is allowed to
+    touch the adapter, so it's the natural place to hand that name over too,
+    rather than duplicating an `adapter: str` constructor param onto every facade."""
+
     mode: AdapterMode
     holder: JobKind
+    adapter: str
 
 
 class RadioController:
@@ -43,12 +51,20 @@ class RadioController:
         self._current: AdapterReservation | None = None
 
     def reserve(self, mode: AdapterMode, holder: JobKind) -> AdapterReservation:
-        raise NotImplementedError
-        # TODO: if self._current is not None: raise AdapterBusy(mode, self._current.holder)
-        # else: switch adapter mode via airmon-ng (blocking, ~1s) through self._proc,
-        # set self._current, return the reservation.
+        # Deliberately NOT invoking airmon-ng via self._proc yet: this milestone
+        # (docs/design/core-gui-boundary.md 'Next implementation step') wires the
+        # headless Discovery flow before any real subprocess code exists, and
+        # FakeProcRunner has nothing to say about an "airmon-ng" argv. The real
+        # mode-switch belongs here once SubprocessRunner is implemented — self._proc
+        # stays a constructor param (unused for now) so that later change doesn't
+        # touch any caller.
+        if self._current is not None:
+            raise AdapterBusy(mode, self._current.holder)
+        self._current = AdapterReservation(mode, holder, self._adapter)
+        return self._current
 
     def release(self, reservation: AdapterReservation) -> None:
-        raise NotImplementedError
-        # TODO: called by the job-driver thread on ANY StopReason (including ERROR/
-        # CANCELLED) — must not leak a reservation on the unhappy path. Clears self._current.
+        # Must be called by the job-driver thread on ANY StopReason, including
+        # ERROR/CANCELLED, or this reservation leaks and the adapter looks busy
+        # forever.
+        self._current = None
