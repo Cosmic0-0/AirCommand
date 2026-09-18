@@ -7,12 +7,38 @@ reconciliation possible. See docs/design/core-gui-boundary.md 'Cancellation'.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 import threading
+import time
 import uuid
 from typing import Optional
 
 from aircommand.core.domain import JobId, JobKind, StaleJob
 from aircommand.core.persistence.db import JobRepository
+
+
+class Pacer:
+    """Rate-gates a periodic check inside a driver loop that iterates far faster
+    than the interval actually wanted (e.g. once per redrawn stdout line, not
+    once every 2-3s) -- shared by Discovery's CSV poll and Capture's deauth-burst
+    and handshake-check timers (see docs/roadmap.md Phase 1 items 0 and 1, and
+    docs/design/core-gui-boundary.md's "poll a clean on-disk artifact instead of
+    a live stream" idiom). due() returns True at most once per interval, measured
+    from construction (or the last True) -- never on the very first call, since a
+    freshly-spawned tool needs at least one interval to produce anything worth
+    checking.
+    """
+
+    def __init__(self, interval: timedelta) -> None:
+        self._interval_s = interval.total_seconds()
+        self._last_fired = time.monotonic()
+
+    def due(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_fired >= self._interval_s:
+            self._last_fired = now
+            return True
+        return False
 
 
 class CancellationToken:
