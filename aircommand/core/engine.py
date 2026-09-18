@@ -5,13 +5,14 @@ pieces together and holds no domain logic of its own.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 from aircommand.core.allowlist import Allowlist
-from aircommand.core.capture import Capture
+from aircommand.core.capture import DEFAULT_HANDSHAKE_CHECK_INTERVAL, Capture
 from aircommand.core.crack import Crack
-from aircommand.core.discovery import Discovery
+from aircommand.core.discovery import DEFAULT_DISCOVERY_POLL_INTERVAL, Discovery
 from aircommand.core.enumerate import Enumerator
 from aircommand.core.events import Event, EventBus, Subscription
 from aircommand.core.jobs import JobId, JobRegistry
@@ -30,6 +31,8 @@ class Engine:
         work_dir: "str | Path",
         adapter: str,
         proc: Optional[ProcRunner] = None,
+        discovery_poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
+        capture_handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
     ) -> None:
         self._db = Database(db_path)
         self._bus = EventBus()
@@ -45,10 +48,14 @@ class Engine:
         self._rf = RadioController(adapter, self._proc)
 
         self.targets = Allowlist(self._db.targets, self._bus)
-        self.discovery = Discovery(self._db.networks, self._bus, self._jobs, self._rf, self._proc)
+        self.discovery = Discovery(
+            self._db.networks, self._bus, self._jobs, self._rf, self._proc,
+            self._work_dir, discovery_poll_interval,
+        )
         self.capture = Capture(
             self.targets, self._db.handshakes, self._db.audit_log, self._bus,
             self._jobs, self._rf, self._proc, self._work_dir,
+            capture_handshake_check_interval,
         )
         self.enumerate = Enumerator(
             self.targets, self._db.enum_results, self._bus, self._jobs, self._rf, self._proc,
