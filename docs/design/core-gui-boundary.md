@@ -44,10 +44,10 @@ class App(ctk.CTk):
 
         self.engine.discovery.start()                   # returns a JobHandle; runs until stopped
 
-    def on_add_target_clicked(self, bssid_str: str, ssid: str, label: str):
-        self.engine.targets.add(BSSID.parse(bssid_str), ssid, label)
+    def on_add_target_clicked(self, bssid_str: str, ssid: str, channel: int, label: str):
+        self.engine.targets.add(BSSID.parse(bssid_str), ssid, channel, label)
         # TargetAdded arrives via the pump; the picker updates from that event, not this return value.
-        # ssid comes from the Network row the user clicked (or a manual-entry field) —
+        # ssid/channel come from the Network row the user clicked (or manual-entry fields) —
         # Allowlist doesn't look it up itself, so a Target can be added without
         # requiring the bssid to already be a Discovered Network.
 
@@ -228,7 +228,7 @@ Each job-driver thread owns its own `sqlite3` connection (WAL mode, short `busy_
 
 ```python
 class Allowlist:
-    def add(self, bssid: BSSID, ssid: str, label: str) -> Target: raise NotImplementedError  # idempotent upsert
+    def add(self, bssid: BSSID, ssid: str, channel: int, label: str) -> Target: raise NotImplementedError  # idempotent upsert
     def remove(self, bssid: BSSID) -> None: raise NotImplementedError                  # idempotent if absent
     def list(self) -> list[Target]: raise NotImplementedError
     def require_target(self, bssid: BSSID) -> Target:

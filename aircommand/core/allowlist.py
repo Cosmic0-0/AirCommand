@@ -25,15 +25,17 @@ class Allowlist:
         self._repo = repo
         self._bus = bus
 
-    def add(self, bssid: BSSID, ssid: str, label: str) -> Target:
+    def add(self, bssid: BSSID, ssid: str, channel: int, label: str) -> Target:
         """Idempotent upsert: calling this again for an already-Target bssid
-        updates its ssid/label (e.g. a rename) rather than erroring — there's no
-        separate rename method. `ssid` is a required param, not looked up here
-        from NetworkRepository: that would force "must already be Discovered"
-        as a precondition, which nothing in CONTEXT.md or the ADRs requires, and
-        the GUI already has the ssid on hand (the row the user clicked, or a
-        manual-entry field) either way."""
-        target = self._repo.upsert(bssid, ssid, label)
+        updates its ssid/channel/label (e.g. a rename) rather than erroring —
+        there's no separate rename method. `ssid`/`channel` are required params,
+        not looked up here from NetworkRepository: that would force "must already
+        be Discovered" as a precondition, which nothing in CONTEXT.md or the ADRs
+        requires, and the GUI already has both on hand (the row the user clicked,
+        or manual-entry fields) either way. `channel` exists on Target at all
+        because Capture needs it to lock the adapter (airodump-ng -c) and nothing
+        else on Target could supply it."""
+        target = self._repo.upsert(bssid, ssid, channel, label)
         self._bus.publish(TargetAdded(event_id=uuid.uuid4(), occurred_at=datetime.now(), target=target))
         return target
 

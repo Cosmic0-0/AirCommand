@@ -144,24 +144,26 @@ def test_job_mark_terminal_twice_does_not_raise():
 def test_target_upsert_on_new_bssid_returns_target_with_id_and_date_added():
     db = Database(":memory:")
 
-    target = db.targets.upsert(MacAddress(value="AA:BB:CC:DD:EE:01"), "Home-WiFi", "My house")
+    target = db.targets.upsert(MacAddress(value="AA:BB:CC:DD:EE:01"), "Home-WiFi", 6, "My house")
 
     assert isinstance(target.id, int)
     assert target.date_added is not None
     assert target.bssid == MacAddress(value="AA:BB:CC:DD:EE:01")
     assert target.ssid == "Home-WiFi"
+    assert target.channel == 6
     assert target.label == "My house"
 
 
 def test_target_upsert_again_on_same_bssid_updates_fields_but_preserves_date_added():
     db = Database(":memory:")
     bssid = MacAddress(value="AA:BB:CC:DD:EE:01")
-    first = db.targets.upsert(bssid, "Home-WiFi", "My house")
+    first = db.targets.upsert(bssid, "Home-WiFi", 6, "My house")
 
-    second = db.targets.upsert(bssid, "Renamed-SSID", "New label")
+    second = db.targets.upsert(bssid, "Renamed-SSID", 11, "New label")
 
     assert second.id == first.id
     assert second.ssid == "Renamed-SSID"
+    assert second.channel == 11
     assert second.label == "New label"
     assert second.date_added == first.date_added
 
@@ -169,7 +171,7 @@ def test_target_upsert_again_on_same_bssid_updates_fields_but_preserves_date_add
 def test_target_delete_then_get_returns_none():
     db = Database(":memory:")
     bssid = MacAddress(value="AA:BB:CC:DD:EE:01")
-    db.targets.upsert(bssid, "Home-WiFi", "My house")
+    db.targets.upsert(bssid, "Home-WiFi", 6, "My house")
 
     db.targets.delete(bssid)
 
@@ -186,7 +188,7 @@ def test_target_get_and_all_round_trip_every_field():
     db = Database(":memory:")
     bssid = MacAddress(value="11:22:33:44:55:66")
 
-    upserted = db.targets.upsert(bssid, "my-network", "Test label")
+    upserted = db.targets.upsert(bssid, "my-network", 6, "Test label")
 
     assert db.targets.get(bssid) == upserted
     assert db.targets.all() == [upserted]
