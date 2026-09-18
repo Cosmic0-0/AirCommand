@@ -13,17 +13,25 @@ from pathlib import Path
 from typing import Optional
 
 from aircommand.core.domain import (
+    _HANDSHAKE_MINT,  # module-private; see HandshakeRepository's own docstring for why
     _TARGET_MINT,  # module-private; see TargetRepository's own docstring for why
+    Aborted,
     AuditLogEntry,
     BSSID,
+    CrackOutcome,
     CrackResultRow,
     EncryptionType,
     EnumHost,
+    Exhausted,
+    Found,
     Handshake,
+    HandshakeKind,
     JobId,
     JobKind,
+    MacAddress,
     Network,
     StaleJob,
+    StopReason,
     Target,
 )
 
@@ -281,48 +289,171 @@ class TargetRepository:
         return _row_to_target(row) if row is not None else None
 
 
+def _row_to_handshake(row: sqlite3.Row) -> Handshake:
+    return Handshake(
+        id=row["id"], target_id=row["target_id"], bssid=BSSID(value=row["bssid"]),
+        capture_job_id=JobId(uuid.UUID(row["capture_job_id"])),
+        cap_file_path=Path(row["cap_file_path"]), cap_file_sha256=row["cap_file_sha256"],
+        kind=HandshakeKind(row["kind"]), captured_at=datetime.fromisoformat(row["captured_at"]),
+        _proof=_HANDSHAKE_MINT,
+    )
+
+
 class HandshakeRepository:
+    """Mints Handshake here (using _HANDSHAKE_MINT), not in capture.py -- same
+    repository-mints convention TargetRepository already established. This is a
+    deliberate decision, not a default: the original capture.py TODO sketch
+    showed the opposite (facade mints from a raw row), but that was never
+    actually implemented, so there was no shipped code to reconcile -- see
+    docs/roadmap.md Phase 1 item 1."""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def insert(self, **fields) -> Handshake:
-        raise NotImplementedError
+    def insert(
+        self,
+        target_id: int,
+        bssid: BSSID,
+        capture_job_id: JobId,
+        cap_file_path: Path,
+        cap_file_sha256: str,
+        kind: HandshakeKind,
+    ) -> Handshake:
+        cursor = self._conn.execute(
+            """INSERT INTO handshakes
+               (target_id, bssid, capture_job_id, cap_file_path, cap_file_sha256, kind, captured_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (target_id, str(bssid), str(capture_job_id), str(cap_file_path), cap_file_sha256,
+             kind.value, datetime.now().isoformat()))
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM handshakes WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_handshake(row)
 
     def for_target(self, target_id: int) -> list[Handshake]:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT * FROM handshakes WHERE target_id = ?", (target_id,)).fetchall()
+        return [_row_to_handshake(row) for row in rows]
 
     def all(self) -> list[Handshake]:
-        raise NotImplementedError
+        rows = self._conn.execute("SELECT * FROM handshakes").fetchall()
+        return [_row_to_handshake(row) for row in rows]
+
+
+def _row_to_audit_log_entry(row: sqlite3.Row) -> AuditLogEntry:
+    return AuditLogEntry(
+        id=row["id"], target_id=row["target_id"],
+        capture_job_id=JobId(uuid.UUID(row["capture_job_id"])),
+        client_mac=MacAddress(value=row["client_mac"]) if row["client_mac"] is not None else None,
+        fired_at=datetime.fromisoformat(row["fired_at"]), frame_count=row["frame_count"],
+    )
 
 
 class AuditLogRepository:
+    """Not mint-restricted (AuditLogEntry is a plain dataclass, no _proof field)
+    -- append-only by convention (nothing ever updates/deletes a row here), not
+    by a type guard. See ADR-0001."""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def record(self, **fields) -> AuditLogEntry:
-        raise NotImplementedError
+    def record(
+        self,
+        target_id: int,
+        capture_job_id: JobId,
+        client_mac: Optional[MacAddress],
+        frame_count: int,
+    ) -> AuditLogEntry:
+        # ADR-0001: this write must complete before capture.py publishes
+        # DeauthFired. Enforcing that order is capture.py's job (call this, then
+        # bus.publish(...), never the reverse) -- this method can't enforce its
+        # own caller's ordering.
+        cursor = self._conn.execute(
+            """INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count)
+               VALUES (?, ?, ?, ?, ?)""",
+            (target_id, str(capture_job_id), str(client_mac) if client_mac is not None else None,
+             datetime.now().isoformat(), frame_count))
+        self._conn.commit()
+        row = self._conn.execute("SELECT * FROM audit_log WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_audit_log_entry(row)
 
     def for_target(self, target_id: Optional[int]) -> list[AuditLogEntry]:
-        raise NotImplementedError
+        if target_id is None:
+            rows = self._conn.execute("SELECT * FROM audit_log").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM audit_log WHERE target_id = ?", (target_id,)).fetchall()
+        return [_row_to_audit_log_entry(row) for row in rows]
+
+
+def _row_to_crack_result(row: sqlite3.Row) -> CrackResultRow:
+    outcome: CrackOutcome = (
+        Found(key=row["outcome_key"]) if row["outcome"] == "found"
+        else Exhausted() if row["outcome"] == "exhausted"
+        else Aborted())
+    return CrackResultRow(
+        id=row["id"], handshake_id=row["handshake_id"], outcome=outcome,
+        wordlist_path=Path(row["wordlist_path"]), started_at=datetime.fromisoformat(row["started_at"]),
+        finished_at=datetime.fromisoformat(row["finished_at"]) if row["finished_at"] is not None else None,
+        stop_reason=StopReason(row["stop_reason"]),
+    )
 
 
 class CrackResultRepository:
+    """Not mint-restricted (CrackResultRow is a plain dataclass) — lower-stakes
+    than Handshake/Target, per docs/roadmap.md Phase 1 item 2."""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def insert(self, **fields) -> CrackResultRow:
-        raise NotImplementedError
+    def insert(
+        self,
+        handshake_id: int,
+        outcome: CrackOutcome,
+        wordlist_path: Path,
+        started_at: datetime,
+        finished_at: Optional[datetime],
+        stop_reason: StopReason,
+    ) -> CrackResultRow:
+        outcome_name = ("found" if isinstance(outcome, Found)
+            else "exhausted" if isinstance(outcome, Exhausted) else "aborted")
+        outcome_key = outcome.key if isinstance(outcome, Found) else None
+        cursor = self._conn.execute(
+            """INSERT INTO crack_results
+               (handshake_id, outcome, outcome_key, wordlist_path, started_at, finished_at, stop_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (handshake_id, outcome_name, outcome_key, str(wordlist_path), started_at.isoformat(),
+             finished_at.isoformat() if finished_at is not None else None, stop_reason.value))
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT * FROM crack_results WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _row_to_crack_result(row)
 
     def for_handshake(self, handshake_id: Optional[int]) -> list[CrackResultRow]:
-        raise NotImplementedError
+        if handshake_id is None:
+            rows = self._conn.execute("SELECT * FROM crack_results").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM crack_results WHERE handshake_id = ?", (handshake_id,)).fetchall()
+        return [_row_to_crack_result(row) for row in rows]
 
 
 class EnumResultRepository:
+    """No mint restriction, no reader method (yet): nothing in Enumerator's
+    facade surface exposes a list_results()-equivalent today, so there's
+    nothing to read this back for -- see docs/roadmap.md Phase 1 item 3."""
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def insert(self, target_id: int, job_id: JobId, hosts: tuple[EnumHost, ...]) -> None:
         raise NotImplementedError
+        # TODO: for host in hosts:
+        #   self._conn.execute(
+        #     "INSERT INTO enum_results (target_id, job_id, ip, hostname, open_ports) VALUES (?, ?, ?, ?, ?)",
+        #     (target_id, str(job_id), host.ip, host.hostname,
+        #      ",".join(str(p) for p in host.open_ports)))
+        # self._conn.commit()
 
 
 class JobRepository:
