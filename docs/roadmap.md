@@ -6,14 +6,32 @@ that and doesn't repeat it. It tells you what's done, what's left, what order to
 in, and — for the parts that aren't actually scoped yet, just stubbed — says so
 explicitly rather than pretending a TODO comment is a finished design.
 
-## Current state
+## Current state — read this whole section before doing anything
 
 Committed, in order: core scaffolding + GUI shell + ADRs/design doc — `domain.py` +
 `events.py` — the headless Discovery flow end to end (schema, `NetworkRepository`,
 `JobRepository`, `SightingBatcher`, `JobRegistry`, `RadioController`'s in-memory
-arbitration, the airodump-ng CSV parser, `Discovery` itself) — `Allowlist` +
-`TargetRepository`. 76 tests passing. Nothing has touched a real subprocess, real
-`sudo`, or real hardware yet — every slice so far runs against `FakeProcRunner`.
+arbitration, an airodump-ng CSV parser, `Discovery` itself) — `Allowlist` +
+`TargetRepository`. Nothing has touched a real subprocess, real `sudo`, or real
+hardware yet — every slice so far runs against `FakeProcRunner`.
+
+**Uncommitted right now, in the working tree, not yet reviewed by the user — commit
+this first, before anything else:** `Target` was missing a `channel` field. Capture
+needs it to lock the adapter (`airodump-ng -c <channel>`), and nothing else on
+`Target` could supply it — same shape of gap as the missing `ssid` found in the
+Allowlist slice, just caught later because it surfaced while scoping Capture, after
+Allowlist had already shipped. Fixed the same way `ssid` was: `channel: int` added
+to `Target` (`domain.py`), the `targets` table gained a `channel` column, and
+`Allowlist.add`/`TargetRepository.upsert` both became 4-arg
+`(bssid, ssid, channel, label)`. Existing tests updated to match. 76 tests pass.
+Touched: `domain.py`, `persistence/db.py`, `allowlist.py`,
+`docs/design/core-gui-boundary.md`, `tests/test_allowlist.py`,
+`tests/test_persistence_db.py`. Review this diff yourself (small, mechanical,
+mirrors the `ssid` fix exactly) before building anything on top of it.
+
+**Discovery has a confirmed real bug, found while researching Capture below, not
+yet fixed — see the top of Phase 1.** It currently passes all 76 tests but would
+not work against a real adapter.
 
 ## The process (already in CLAUDE.md — restated briefly because it matters)
 
@@ -92,6 +110,16 @@ and don't try to pre-solve Phase 2 or Phase 3 problems from inside a Phase 1 min
 - **Thin facade, fat repository.** Facade methods are 1-4 line delegations; the
   repository holds the actual SQL and constructs the actual domain object. Keep
   following this rather than letting SQL creep into `capture.py`/`crack.py`/etc.
+- **Poll a clean on-disk artifact after the fact; don't trust a live
+  stdout/terminal stream for a correctness-critical fact.** This recurs three
+  times now: Discovery's network data (read the CSV file airodump-ng writes, not
+  its stdout), Capture's handshake detection (check the `.cap` file via a separate
+  `aircrack-ng` invocation, not airodump's live "WPA handshake:" display line), and
+  Crack's found-key (check hashcat's `--outfile` after it exits, not the numeric
+  `status` field in a live `--status-json` tick). A tool's live interactive display
+  is for humans watching a terminal, not for a subprocess-driven caller to parse —
+  assume that's true again for anything not yet verified (nmap's `-oX -` streaming
+  clean XML to stdout is a confirmed exception, not the default to assume).
 - **Record real decisions where the project already records them, not in a new
   place.** When you resolve one of the gaps flagged below (or find a new one),
   don't just fix the code and move on — if it's a genuine architectural
@@ -103,30 +131,154 @@ and don't try to pre-solve Phase 2 or Phase 3 problems from inside a Phase 1 min
 
 ## Phase 1 — core engine, headless-testable (do these via FakeProcRunner, same as Discovery)
 
-### 1. `capture.py` — next, and the biggest slice so far
+### 0. Fix Discovery — confirmed bug, do this before anything else in this phase
 
-The only `Handshake` mint site; drives two tools instead of Discovery's one; is
+`airodump-ng --write-csv <prefix>` writes CSV data to **files on disk**
+(`<prefix>-01.csv` etc.) — confirmed against the aircrack-ng manual and independent
+discussion of the same problem from another tool's maintainers. It does **not**
+write CSV to stdout. Airodump-ng's stdout carries its live, redrawing interactive
+display instead (a `CH 6 ][ Elapsed: ... ][ WPA handshake: ...` header over a
+constantly-updated table) — not comma-separated data, and not reliably line-by-line
+parseable the way the current code assumes.
+
+`Discovery._drive` (shipped, tested, committed) reads `handle.lines()` — the
+process's **stdout** — and feeds each line to `parse_airodump_csv_line()`. Against
+real airodump-ng this receives interactive-display text, not CSV rows, and would
+successfully parse essentially nothing. All existing tests pass only because
+`FakeProcRunner`'s fixtures hand-construct CSV-looking lines and feed them in as
+stdout, which isn't what the real tool actually does. Discovery currently works in
+tests and would discover nothing against real hardware.
+
+**The fix**: spawn airodump-ng with `--write-csv <path>` as today, but stop reading
+`handle.lines()` for network data. Instead, on a timer (decoupled from stdout
+entirely — a `Pacer`-style periodic check, e.g. every 2-3s), read and re-parse
+`<path>-01.csv`'s *current full contents* from disk — airodump-ng rewrites the file
+in place each refresh cycle rather than appending, so each read should replace the
+previously-known network set for this scan cycle, not accumulate duplicates.
+`parse_airodump_csv_line()` itself is still correct and reusable (it's a pure
+function over one CSV line; the bug is entirely in *what stream `_drive` reads it
+from*, not in the parser). `FakeProcRunner`'s fixtures need to change to match:
+either give it a way to also fake a file being written to `work_dir` (simplest:
+`FakeProcRunner`/`_FakeProcHandle` could write the scripted CSV content straight to
+the expected file path on `spawn()`, since the test doesn't need to simulate
+real-time incremental writes to prove the read-and-reparse loop works), or inject
+the file path/read mechanism as its own seam. Still keep `handle.lines()` in the
+loop for what it's actually good for: detecting cancellation and detecting that the
+underlying process died (the for-loop ends naturally either way) — just don't trust
+its *content* for network data anymore.
+
+This is the same "poll a well-defined on-disk artifact instead of scraping a live
+terminal" pattern Capture needs below for handshake detection — fix them with the
+same idiom, and note that idiom as a convention (see "Conventions established so
+far") once both are done, since it'll likely recur (nmap doesn't have this problem —
+`-oX -` genuinely streams clean XML to stdout — but any other aircrack-ng-suite tool
+driven this way should be checked against real behavior before assuming stdout
+carries what you'd expect).
+
+Update `tests/test_discovery_acceptance.py` accordingly — it currently scripts
+`FakeProcRunner` with CSV lines as scripted stdout, which will need to change to
+match whatever the fixed `_drive` actually reads.
+
+### 1. `capture.py`
+
+The only `Handshake` mint site; drives **three** tools, not two (see below); is
 where ADR-0001's audit requirement actually bites (`DeauthFired` must be written to
-`audit_log` *before* the event publishes — the TODO already shows this ordering,
-keep it). Depends on `Allowlist` (done) and needs `HandshakeRepository` +
+`audit_log` *before* the event publishes). Depends on `Allowlist` (done — including
+the now-available `Target.channel`) and needs `HandshakeRepository` +
 `AuditLogRepository` implemented in `persistence/db.py` (currently bare stubs).
 
-**Not actually scoped yet — resolve before implementing, don't guess:**
+**Handshake detection — researched, mostly resolved, one residual gap flagged
+below.** The original stub's premise (`parse_airodump_handshake_flag(csv_block)` —
+a handshake flag inside airodump's CSV) is confirmed wrong: there is no such flag
+in the CSV. Two real mechanisms exist, verified against the aircrack-ng manual,
+docs, and community references (not hardware — this was resolvable via research
+alone, as Phase 1's own gap-triage predicted):
 
-- **How is a handshake actually detected?** The stub's `parse_airodump_handshake_flag(csv_block: str) -> bool` in `parse.py` assumes airodump-ng's own CSV output carries a handshake indicator. This is an *external* fact (about aircrack-ng-suite's real behavior), not an internal one — you can make real progress on it without hardware, by reading aircrack-ng's actual documentation/source/community references (that's research, not "reading the stub cold" — it can genuinely reduce the uncertainty). The more common real-world approach is checking the *captured `.cap` file itself* (e.g. via `aircrack-ng` against it, or inspecting EAPOL message pairs), not the live CSV stream. But full confidence may not be reachable until Phase 2, when real hardware exists to check actual tool output against — if research alone doesn't settle it, implement your best-researched version now, mark it explicitly (in a code comment and in this doc) as "unverified against real tool output, re-check in Phase 2," and don't let implementation pressure turn a marked assumption into a silently-trusted fact.
-- **Mint site for `Handshake`**: repository-mints (matching `Target`'s precedent) or facade-mints (matching the existing `capture.py` TODO's own pseudocode)? Pick one deliberately and say why in a comment, the way `TargetRepository`'s docstring does.
-- Needs realistic `FakeProcRunner` fixtures for *two* tools in one flow: airodump-ng (streamed lines, same shape as Discovery's) and aireplay-ng (fire-and-wait, probably no meaningful `.lines()` output to parse — mostly just needs `.wait()`).
+1. Airodump-ng's own **stdout**, while running interactively, redraws a header line
+   `CH <n> ][ Elapsed: <t> ][ <timestamp> ][ WPA handshake: <BSSID>` once it detects
+   one. Rejected as the primary mechanism: it's part of the same
+   constantly-redrawing live display discussed in the Discovery fix above, with the
+   same fragility, and mixing "is this a real capture event" with "scrape a TUI" is
+   exactly the failure mode that bit Discovery.
+2. **Post-hoc check against the `.cap` file itself**, using a *separate* one-shot
+   `aircrack-ng` invocation — the standard, well-documented approach. Run
+   `aircrack-ng -b <target.bssid> -w /dev/null <cap_path>` (`-b` targets the BSSID
+   directly, skipping the interactive network-selection prompt that appears with
+   ambiguous capture files; `-w /dev/null` gives it an instantly-exhausted wordlist
+   so the process completes non-interactively regardless of whether a handshake is
+   present — genuinely confirmed live-tested behavior would still be worth a Phase 2
+   check, since this specific flag combination wasn't verified by running it, only
+   researched). Its stdout prints a table row ending in `(1 handshake)` when a valid
+   handshake is present, or `No valid WPA handshakes found` when not. Since `-b`
+   restricts output to one BSSID, a plain substring check for `"handshake)"` in the
+   full output is enough — no need to parse the table structure.
+
+   **This changes `_drive`'s shape**: handshake detection is no longer something
+   checked per airodump CSV line (there's nothing useful to check per line for this
+   purpose anymore, matching Phase 1 item 0's finding that CSV-stream content isn't
+   trustworthy for per-event facts anyway) — it's a periodic check, same `Pacer`
+   idiom as the deauth timer, e.g. every 3-5s: spawn the `aircrack-ng` check,
+   `.wait()` for it (it's fast and one-shot, no need to stream `.lines()`), inspect
+   its output. Add a pure parser in `parse.py` for this, e.g.
+   `parse_aircrack_handshake_check(output: str) -> bool`, keeping the same
+   "pure function over tool output text" shape as the CSV parser.
+
+**Mint site for `Handshake`**: **repository-mints**, matching `Target`'s
+established precedent (`HandshakeRepository.insert` imports `_HANDSHAKE_MINT` and
+constructs the full `Handshake` itself; `capture.py` stays a thin caller) — the
+original `capture.py` TODO's own pseudocode showed the opposite (facade-mints from
+a raw `row`), which was never actually implemented, so there's no shipped code to
+reconcile; just follow the pattern that's already real and tested.
+
+**`FakeProcRunner` fixtures needed for three tools**, not two:
+airodump-ng (still spawned to write the `.cap` file — no longer read line-by-line
+for handshake detection, same file-writing pattern as Phase 1 item 0's Discovery
+fix, just producing a `.cap` capture instead of a `.csv`), aireplay-ng
+(fire-and-wait per deauth burst, no meaningful output to parse, just `.wait()`),
+and now aircrack-ng (one-shot, `.wait()`, check stdout text per above).
 
 ### 2. `crack.py`
 
 Depends on a real `Handshake` — since `Handshake` is mint-restricted, you can't
 hand-construct one for an isolated Crack unit test, so this naturally wants Capture
 done first and its own test fixtures reused to produce a real `Handshake` to feed
-Crack's tests. Needs `parse_hashcat_status_line`/`HashcatStatus` in `parse.py` —
-verify hashcat's actual `--status-json` field names/shape before implementing
-rather than guessing at JSON keys. `CrackResultRepository` needs implementing
-(same mint-in-repository question as above, for `CrackResultRow` — though note
-`CrackResultRow` itself isn't mint-restricted, so this one's lower-stakes).
+Crack's tests. `CrackResultRepository` needs implementing (same mint-in-repository
+question as above, for `CrackResultRow` — though note `CrackResultRow` itself isn't
+mint-restricted, so this one's lower-stakes).
+
+**`parse_hashcat_status_line`/`HashcatStatus` — researched, real field shape found**
+(via a third-party typed Go binding built against real hashcat output, cross-checked
+against hashcat's own GitHub issue discussion — not hand-run against real hashcat,
+so treat the exact field names below as strong-confidence research, still worth a
+quick sanity check against a real run before fully trusting it). Each `--status-json`
+line is one JSON object, not wrapped in an array or newline-delimited differently
+than one-object-per-line:
+
+```json
+{
+  "session": "...", "status": <int status code>, "target": "...",
+  "progress": [<current>, <total>],
+  "recovered_hashes": [<recovered>, <total>], "recovered_salts": [<r>, <t>],
+  "rejected": <int>, "restore_point": <int>,
+  "guess": {"guess_base": "...", "guess_base_percent": <float>, "...": "..."},
+  "devices": [{"device_id": <int>, "device_name": "...", "speed": <int H/s>, "util": <int>, "temp": <int>}],
+  "time_start": <unix ts>, "estimated_stop": <unix ts>
+}
+```
+
+Map to `CrackProgress`: `percent` = `progress[0] / progress[1] * 100` when
+`progress[1] > 0`; `hashrate` = format `sum(d["speed"] for d in devices)` as a
+human string (raw value is H/s as an int — needs unit scaling, e.g. `12.3 MH/s`);
+`eta` = `timedelta(seconds=estimated_stop - time.time())` when `estimated_stop` is
+present and in the future, else `None`. The exact integer meaning of `status` codes
+(e.g. which value means "cracked" vs "exhausted" vs "running") wasn't confirmed with
+full confidence — **don't branch outcome logic on the numeric `status` value**.
+Instead, pass `--outfile <path>` explicitly to hashcat and, after the process exits,
+check whether that file has content: non-empty means `Found(key)` (read the
+plaintext from it), empty means `Exhausted` (if the process ran to completion) or
+`Aborted` (if cancelled) — this avoids needing to trust an unverified enum and
+matches the same "check a clean on-disk artifact after the fact, not a live stream
+value" idiom used for Discovery's CSV and Capture's handshake check above.
 
 ### 3. `enumerate.py`
 
