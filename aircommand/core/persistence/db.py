@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bssid TEXT NOT NULL UNIQUE,
     ssid TEXT NOT NULL,
+    channel INTEGER NOT NULL,
     label TEXT NOT NULL,
     date_added TEXT NOT NULL
 );
@@ -219,6 +220,7 @@ def _row_to_target(row: sqlite3.Row) -> Target:
         id=row["id"],
         bssid=BSSID(value=row["bssid"]),
         ssid=row["ssid"],
+        channel=row["channel"],
         label=row["label"],
         date_added=datetime.fromisoformat(row["date_added"]),
         _proof=_TARGET_MINT,
@@ -241,7 +243,7 @@ class TargetRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def upsert(self, bssid: BSSID, ssid: str, label: str) -> Target:
+    def upsert(self, bssid: BSSID, ssid: str, channel: int, label: str) -> Target:
         existing = self._conn.execute(
             "SELECT 1 FROM targets WHERE bssid = ?", (str(bssid),)
         ).fetchone()
@@ -250,13 +252,13 @@ class TargetRepository:
             # this became a Target", not "when last renamed" -- same preserve-the-
             # original rule as Network.first_seen's _update above.
             self._conn.execute(
-                "UPDATE targets SET ssid = ?, label = ? WHERE bssid = ?",
-                (ssid, label, str(bssid)),
+                "UPDATE targets SET ssid = ?, channel = ?, label = ? WHERE bssid = ?",
+                (ssid, channel, label, str(bssid)),
             )
         else:
             self._conn.execute(
-                "INSERT INTO targets (bssid, ssid, label, date_added) VALUES (?, ?, ?, ?)",
-                (str(bssid), ssid, label, datetime.now().isoformat()),
+                "INSERT INTO targets (bssid, ssid, channel, label, date_added) VALUES (?, ?, ?, ?, ?)",
+                (str(bssid), ssid, channel, label, datetime.now().isoformat()),
             )
         self._conn.commit()
         row = self._conn.execute(

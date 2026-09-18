@@ -94,6 +94,10 @@ class Target:
     id: int
     bssid: BSSID
     ssid: str
+    channel: int  # needed by Capture to lock the adapter (airodump-ng -c); same
+    # reasoning as ssid -- supplied by the caller at add() time from the Network
+    # row, not looked up internally, so adding a Target never requires the bssid
+    # to already be a Discovered Network.
     label: str
     date_added: datetime
     _proof: object = field(default=None, repr=False, compare=False)
