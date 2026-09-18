@@ -7,7 +7,7 @@ via Engine's constructor injection; none construct one itself.
 from __future__ import annotations
 
 import itertools
-from typing import Callable, Iterator, Protocol
+from typing import Callable, Iterator, Optional, Protocol
 
 _fake_pid_counter = itertools.count(90000)  # high enough not to collide with anything real
 
@@ -94,16 +94,29 @@ class FakeProcRunner:
     adapter. This is what makes the headless call site in
     docs/design/core-gui-boundary.md real."""
 
-    def __init__(self, script: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        script: dict[str, list[str]],
+        on_spawn: Optional[Callable[[list[str]], None]] = None,
+    ) -> None:
         """script maps a recognizable argv[0] (e.g. 'airodump-ng') to the lines it
         should yield, so a test can drive Discovery/Capture/Crack/Enumerate without
-        touching a real tool."""
+        touching a real tool. on_spawn, if given, is called with the full argv on
+        every spawn() call, before the ProcHandle is built -- the seam a test uses
+        to simulate a tool that writes a real on-disk artifact (airodump-ng's
+        --write-csv/-w, hashcat's --outfile) instead of only producing stdout. Kept
+        as a plain callback rather than flag-parsing logic here, since different
+        drivers invoke the same tool name with different flags -- see
+        docs/roadmap.md Phase 1 item 0."""
         self._script = script
+        self._on_spawn = on_spawn
 
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
-        # A KeyError here means the test scripted the wrong argv[0] -- a test-author
-        # bug, not something this fake should paper over.
+        if self._on_spawn is not None:
+            self._on_spawn(argv)
         return _FakeProcHandle(self._script[argv[0]])
+        # A KeyError on that lookup means the test scripted the wrong argv[0] --
+        # a test-author bug, not something this fake should paper over.
 
 
 # --- Startup orphan reconciliation (ADR-0004) -------------------------------------
