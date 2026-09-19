@@ -62,6 +62,13 @@ CAPTURE_NOISE = [f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00" for i in range(15
 NO_HANDSHAKE_OUTPUT = ["No valid WPA handshakes found"]
 CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 
+# RadioController.reserve() now really spawns "airmon-ng" on its first
+# monitor-mode use (docs/roadmap.md Phase 2 item 1) -- every script below needs
+# an entry for it or FakeProcRunner KeyErrors. No rename-announcement line, so
+# parse_airmon_monitor_interface falls back to the original "wlan0" name,
+# matching what every existing assertion in this file already assumes.
+AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
+
 # See module docstring, point 1. Real but tiny -- comfortably shorter than any
 # human-perceptible delay, long enough (given _slow_lines' own per-line delay
 # below) to let several loop iterations run for real before a same-process
@@ -114,6 +121,7 @@ def test_passive_capture_finds_handshake_on_first_check(tmp_path):
     engine = _make_engine(
         tmp_path,
         script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
             "airodump-ng": CAPTURE_NOISE[:3],
             "aircrack-ng": ["   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"],
         },
@@ -145,6 +153,7 @@ def test_passive_capture_never_finds_handshake_gets_cancelled(tmp_path):
     engine = _make_engine(
         tmp_path,
         script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
             "airodump-ng": _slow_lines(1000, 0.001),
             "aircrack-ng": NO_HANDSHAKE_OUTPUT,
         },
@@ -172,6 +181,7 @@ def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
     engine = _make_engine(
         tmp_path,
         script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
             "airodump-ng": _slow_lines(1000, 0.001),
             "aircrack-ng": NO_HANDSHAKE_OUTPUT,
             "aireplay-ng": [],  # only .wait()'d, never .lines()'d -- see capture.py
@@ -202,7 +212,10 @@ def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
 
 
 def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path):
-    engine = _make_engine(tmp_path, script={"airodump-ng": _slow_lines(30, 0.01)})
+    engine = _make_engine(
+        tmp_path,
+        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": _slow_lines(30, 0.01)},
+    )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     # Reserves the adapter synchronously inside .start() itself, before

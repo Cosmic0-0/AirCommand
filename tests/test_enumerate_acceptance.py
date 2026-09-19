@@ -5,9 +5,10 @@ style as test_capture_acceptance.py.
 
 get_subnet injection: Engine.__init__ wires Enumerator with no get_subnet
 kwarg at all (see engine.py -- `Enumerator(self.targets, self._db.enum_results,
-self._bus, self._jobs, self._rf, self._proc)`, production always wants the
-real get_interface_subnet default), so a test needing a *fake* subnet can't
-reach it through Engine. _make_enumerator() below instead builds Allowlist/
+self._bus, self._jobs, self._rf, self._proc, self._db.new_connection_scope)`,
+production always wants the real get_interface_subnet default), so a test
+needing a *fake* subnet can't reach it through Engine. _make_enumerator() below
+instead builds Allowlist/
 JobRegistry/RadioController by hand and constructs Enumerator directly -- the
 same shape as test_allowlist.py's make_allowlist() building an Allowlist
 directly instead of through Engine, extended with the extra collaborators
@@ -106,7 +107,9 @@ def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, E
     proc = FakeProcRunner(script=script)
     rf = RadioController("wlan0", proc)
     allowlist = Allowlist(db.targets, bus)
-    enumerator = Enumerator(allowlist, db.enum_results, bus, jobs, rf, proc, get_subnet=get_subnet)
+    enumerator = Enumerator(
+        allowlist, db.enum_results, bus, jobs, rf, proc, db.new_connection_scope, get_subnet=get_subnet
+    )
     return enumerator, allowlist, bus
 
 
@@ -146,7 +149,13 @@ def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script={"airodump-ng": _slow_lines(30, 0.01)}),
+        # RadioController.reserve() now really spawns "airmon-ng" on its first
+        # monitor-mode use (docs/roadmap.md Phase 2 item 1) -- no rename-
+        # announcement line, so it falls back to the original "wlan0" name.
+        proc=FakeProcRunner(script={
+            "airmon-ng": ["monitor mode already enabled on wlan0"],
+            "airodump-ng": _slow_lines(30, 0.01),
+        }),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 

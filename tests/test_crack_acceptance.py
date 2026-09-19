@@ -36,6 +36,7 @@ fixed in jobs.py itself; no test-side workaround needed here anymore.)
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -153,6 +154,10 @@ def _capture_handshake(engine: Engine, target):
 
 def _base_script(hashcat_lines) -> dict:
     return {
+        # RadioController.reserve() now really spawns "airmon-ng" on Capture's
+        # first monitor-mode use (docs/roadmap.md Phase 2 item 1) -- no rename-
+        # announcement line, so it falls back to the original "wlan0" name.
+        "airmon-ng": ["monitor mode already enabled on wlan0"],
         "airodump-ng": CAPTURE_NOISE,
         "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
         "hashcat": hashcat_lines,
@@ -250,6 +255,113 @@ def test_crack_cancelled_before_finishing(tmp_path):
     assert result_row.stop_reason == StopReason.CANCELLED
 
     assert engine.crack.list_results(handshake) == [result_row]
+
+
+def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str]], None]:
+    """Same two side effects as _make_on_spawn above, except the hashcat found
+    key is looked up per-job from its own wordlist_path (argv[4] -- see
+    crack.py's _drive argv) instead of one shared constant -- each concurrent
+    job in the stress test below needs its OWN distinct outfile content to
+    prove results don't cross-contaminate between threads."""
+
+    def on_spawn(argv: list[str]) -> None:
+        if argv[0] == "airodump-ng" and "-w" in argv:
+            cap_path = Path(argv[argv.index("-w") + 1])
+            cap_path.write_bytes(CAP_FILE_BYTES)
+        elif argv[0] == "hashcat":
+            key = wordlist_to_key.get(argv[4])
+            if key is not None:
+                outfile_path = Path(argv[argv.index("--outfile") + 1])
+                outfile_path.write_text(key + "\n")
+
+    return on_spawn
+
+
+def test_concurrent_crack_jobs_all_complete_with_distinct_results_and_no_sqlite_errors(tmp_path):
+    """Proves the connection-per-thread fix (docs/roadmap.md Phase 2 item 4)
+    actually closes the race it was designed to close, not just that the
+    happy-path single-job tests above still pass. Before the fix, every
+    _drive thread wrote through the SAME unsynchronized sqlite3 connection;
+    a second job starting immediately after a first one's wait_for_test()
+    returned could hit sqlite3.OperationalError on that shared connection
+    (see "Current state" in docs/roadmap.md, and jobs.py's own mark_terminal
+    ordering fix for the first, narrower instance of this race). Crack is the
+    only driver that can be started genuinely concurrently through one Engine
+    without AdapterBusy serializing the starts -- it takes no RF reservation
+    (crack.py's own comment: "hashcat doesn't touch the radio"), unlike
+    Discovery/Capture/Enumerate.
+    """
+    job_count = 8
+    wordlist_to_key: dict[str, str] = {}
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": ["monitor mode already enabled on wlan0"],
+                "airodump-ng": CAPTURE_NOISE,
+                "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
+                "hashcat": [],  # outcome decided by outfile content only, not scripted stdout
+            },
+            on_spawn=_make_stress_on_spawn(wordlist_to_key),
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    # Build job_count REAL Handshakes first -- sequentially, since Capture (unlike
+    # Crack) does take an RF reservation. Each capture's cap_path is keyed by its
+    # own job_id (capture.py's _drive), so these are genuinely distinct rows, not
+    # job_count references to the same one.
+    handshakes = [_capture_handshake(engine, target) for _ in range(job_count)]
+    assert len({h.id for h in handshakes}) == job_count
+
+    results_by_job_id = {}
+    engine.subscribe(lambda e: results_by_job_id.setdefault(e.job_id, e), CrackResult)
+
+    # Catches an sqlite3 error (or any other exception) raised inside a _drive
+    # thread that a naive read of "did wait_for_test() return" could otherwise
+    # miss -- exactly the kind of failure this refactor is supposed to prevent.
+    # (This exact gap bit tests/test_jobs.py during this same session: a
+    # background thread's sqlite3.ProgrammingError was silently swallowed by
+    # pytest into a warning instead of a failure until this hook was added.)
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handles = []
+        for i, handshake in enumerate(handshakes):
+            wordlist_path = tmp_path / f"wordlist-{i}.txt"
+            expected_key = f"key-{i}"
+            wordlist_to_key[str(wordlist_path)] = expected_key
+            handle = engine.crack.start(handshake, wordlist_path)
+            handles.append((handle, handshake, expected_key))
+            # No sleep, no waiting on the previous job -- fired back-to-back,
+            # exactly the shape that reproduced the race being tested for.
+
+        for handle, _, _ in handles:
+            handle.wait_for_test(timeout=5.0)
+    finally:
+        threading.excepthook = original_hook
+
+    assert thread_exceptions == []
+
+    assert len(results_by_job_id) == job_count
+    for handle, handshake, expected_key in handles:
+        result_row = results_by_job_id[handle.job_id].result
+        assert isinstance(result_row.outcome, Found)
+        assert result_row.outcome.key == expected_key
+        assert result_row.handshake_id == handshake.id
+        assert result_row.stop_reason == StopReason.COMPLETED
+
+    # Independently readable back through the main connection too, not just
+    # observed via the published events -- proves the writes are actually
+    # durable, not merely visible to whichever thread wrote them.
+    all_results = engine.crack.list_results()
+    assert len(all_results) == job_count
+    assert {r.handshake_id for r in all_results} == {h.id for h in handshakes}
+    assert len({r.id for r in all_results}) == job_count  # distinct rows, no overwritten/reused id
 
 
 # --- _format_hashrate ---------------------------------------------------------
