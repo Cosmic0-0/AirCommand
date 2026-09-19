@@ -10,7 +10,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from aircommand.core.allowlist import Allowlist
 from aircommand.core.domain import (
@@ -31,7 +31,7 @@ from aircommand.core.events import (
 )
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry, Pacer
 from aircommand.core.parse import parse_aircrack_handshake_check
-from aircommand.core.persistence.db import AuditLogRepository, HandshakeRepository
+from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, HandshakeRepository
 from aircommand.core.procutil import ProcRunner
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
@@ -54,16 +54,18 @@ class Capture:
         rf: RadioController,
         proc: ProcRunner,
         work_dir: Path,
+        new_connection_scope: Callable[..., ConnectionScope],
         handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
     ) -> None:
         self._allowlist = allowlist
-        self._handshakes = handshakes
-        self._audit = audit
+        self._handshakes = handshakes  # main-connection repo -- list_handshakes() (main-thread read) only
+        self._audit = audit  # main-connection repo -- list_audit_log() (main-thread read) only
         self._bus = bus
         self._jobs = jobs
         self._rf = rf
         self._proc = proc
         self._work_dir = work_dir
+        self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._handshake_check_interval = handshake_check_interval
 
     def start_passive(self, target: Target) -> JobHandle:
@@ -102,12 +104,16 @@ class Capture:
         burst_count = 0
         handshake_pacer = Pacer(self._handshake_check_interval)
         deauth_pacer = Pacer(deauth.interval) if deauth is not None else None
+        # This thread's own connection -- never self._audit/self._handshakes (the
+        # main connection) from in here. See persistence/db.py's Database/
+        # ConnectionScope docstrings.
+        db_scope = self._new_connection_scope()
         try:
             handle = self._proc.spawn(
                 ["airodump-ng", "-c", str(target.channel), "--bssid", str(target.bssid),
                  "-w", str(cap_path), adapter], privileged=True)
             self._jobs.record_process(job_id, handle.pid, handle.pgid,
-                f"airodump-ng {target.bssid} {adapter}")  # ADR-0004 — the long-running
+                f"airodump-ng {target.bssid} {adapter}", repo=db_scope.jobs)  # ADR-0004 — the long-running
             # airodump-ng process is what orphan cleanup needs to find; the short-lived
             # aireplay-ng/aircrack-ng one-shots below are .wait()/.lines()-exhausted
             # immediately and never outlive this loop, so they don't need their own
@@ -127,7 +133,7 @@ class Capture:
                         ["aireplay-ng", "--deauth", str(deauth.burst_size), "-a", str(target.bssid), adapter],
                         privileged=True).wait()
                     burst_count += 1
-                    audit_row = self._audit.record(target_id=target.id, capture_job_id=job_id,
+                    audit_row = db_scope.audit_log.record(target_id=target.id, capture_job_id=job_id,
                                                      client_mac=None, frame_count=deauth.burst_size)  # sync write
                                                      # BEFORE the event — ADR-0001, no exceptions
                     self._bus.publish(DeauthFired(event_id=uuid.uuid4(), occurred_at=datetime.now(),
@@ -143,7 +149,7 @@ class Capture:
                     if parse_aircrack_handshake_check(output):
                         handshake_seen = True
                         sha256 = hashlib.sha256(cap_path.read_bytes()).hexdigest()
-                        handshake = self._handshakes.insert(   # repository mints — see its own docstring
+                        handshake = db_scope.handshakes.insert(   # repository mints — see its own docstring
                             target_id=target.id, bssid=target.bssid, capture_job_id=job_id,
                             cap_file_path=cap_path, cap_file_sha256=sha256, kind=HandshakeKind.WPA2_EAPOL)
                         self._bus.publish(HandshakeCaptured(event_id=uuid.uuid4(), occurred_at=datetime.now(),
@@ -167,4 +173,5 @@ class Capture:
             # event has already been observed by every subscriber, not race it. (Found via
             # the acceptance tests: with the old ordering, wait_for_test() returning did NOT
             # imply CaptureStopped had fired yet — a real ordering bug, not a test artifact.)
-            self._jobs.mark_terminal(job_id)
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
+            db_scope.close()

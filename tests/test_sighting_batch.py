@@ -31,7 +31,7 @@ def test_publishing_sighting_update_flushes_within_a_couple_intervals():
     db.networks.upsert_returns_is_new(make_network())  # update_sighting only UPDATEs -- the row must pre-exist
 
     bus = EventBus()
-    batcher = SightingBatcher(bus, db.networks, flush_interval_s=0.05)
+    batcher = SightingBatcher(bus, db.new_connection_scope, flush_interval_s=0.05)
     batcher.start()
     try:
         updated = make_network(last_signal_dbm=-20, last_seen=datetime(2024, 1, 1, 10, 5, 0))
@@ -54,7 +54,7 @@ def test_stop_flushes_pending_update_immediately_rather_than_waiting_for_the_tim
     db.networks.upsert_returns_is_new(make_network())
 
     bus = EventBus()
-    batcher = SightingBatcher(bus, db.networks, flush_interval_s=10.0)  # longer than this test should ever take
+    batcher = SightingBatcher(bus, db.new_connection_scope, flush_interval_s=10.0)  # longer than this test should ever take
     batcher.start()
 
     updated = make_network(last_signal_dbm=-15, last_seen=datetime(2024, 1, 1, 10, 6, 0))

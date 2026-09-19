@@ -17,8 +17,11 @@ started it. Called by Engine.reconcile_startup(), never from Engine.__init__.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import os
 import subprocess
 from typing import Callable
+import uuid
 
 from aircommand.core.events import EventBus, StartupReconciliationCompleted
 from aircommand.core.jobs import JobRegistry
@@ -39,26 +42,45 @@ def reconcile_orphaned_processes(
     run_privileged: Callable[[list[str]], subprocess.Popen],
 ) -> ReconciliationSummary:
     raise NotImplementedError
-    # TODO:
+    # TODO — exact shape, decided:
+    #
     # stale = jobs.find_stale_jobs()   # DB read: rows still RUNNING from a prior process
     # terminated = 0
     # for job in stale:
-    #   if job.pgid is not None:
-    #     signaled = terminate_process_group(
-    #         job.pgid, job.process_fingerprint,
-    #         send_unprivileged=_send_signal_unprivileged,
-    #         send_privileged=lambda pgid, sig: run_privileged(["kill", f"-{sig}", f"-{pgid}"]),
-    #     )
-    #     if signaled: terminated += 1
-    #   # job.kind is JobKind.CAPTURE_DEAUTH and job.pgid is not None -> this is exactly
-    #   # the case StartupReconciliationCompleted's docstring warns about: bursts fired
-    #   # between crash and cleanup were never audit-logged. Not fixable after the fact
-    #   # (see ADR-0004 Consequences) — the StopReason on the CaptureStopped event this
-    #   # job's mark_terminal() implies is the signal for that, no separate audit row.
-    #   jobs.mark_terminal(job.job_id)   # -> StopReason.INTERRUPTED_PRIOR_SESSION
+    #     if job.pgid is not None:
+    #         signaled = terminate_process_group(
+    #             job.pgid, job.process_fingerprint,
+    #             send_unprivileged=_send_signal_unprivileged,
+    #             send_privileged=lambda pgid, sig: run_privileged(["kill", f"-{sig}", "--", f"-{pgid}"]).wait(),
+    #             # .wait() here (not in the original sketch): reaps the `sudo kill`
+    #             # helper process itself and makes the signal-delivery attempt
+    #             # actually complete before terminate_process_group's own
+    #             # grace-period sleep + re-check, rather than leaving it to happen
+    #             # in the background undetected.
+    #             #
+    #             # "--" before the negative pgid is load-bearing, not decoration:
+    #             # verified empirically against this machine's real /usr/bin/kill
+    #             # that a bare `kill -15 -<pgid>` silently exits 0 WITHOUT actually
+    #             # signaling the process group -- the external kill binary can't
+    #             # disambiguate a negative-PID target from a second option once
+    #             # one `-`-prefixed argument (the signal) is already consumed,
+    #             # unlike a shell's own builtin `kill`. Same fix applied in
+    #             # procutil.py's _RealProcHandle._signal, which hit this identical
+    #             # bug first -- see its comment for the empirical confirmation.
+    #         )
+    #         if signaled:
+    #             terminated += 1
+    #     # job.kind is JobKind.CAPTURE_DEAUTH and job.pgid is not None -> this is exactly
+    #     # the case StartupReconciliationCompleted's docstring warns about: bursts fired
+    #     # between crash and cleanup were never audit-logged. Not fixable after the fact
+    #     # (see ADR-0004 Consequences) — the StopReason on the CaptureStopped event this
+    #     # job's mark_terminal() implies is the signal for that, no separate audit row.
+    #     jobs.mark_terminal(job.job_id)   # -> StopReason.INTERRUPTED_PRIOR_SESSION
     # summary = ReconciliationSummary(stale_job_count=len(stale), processes_terminated=terminated)
-    # bus.publish(StartupReconciliationCompleted(stale_job_count=summary.stale_job_count,
-    #                                             processes_terminated=summary.processes_terminated, ...))
+    # bus.publish(StartupReconciliationCompleted(
+    #     event_id=uuid.uuid4(), occurred_at=datetime.now(),
+    #     stale_job_count=summary.stale_job_count, processes_terminated=summary.processes_terminated,
+    # ))
     # return summary
 
 
@@ -67,3 +89,6 @@ def _send_signal_unprivileged(pgid: int, signum: int) -> None:
     leftover hashcat process). Raises PermissionError for a root-owned pgid,
     which reconcile_orphaned_processes catches to fall back to run_privileged."""
     raise NotImplementedError
+    # TODO: os.killpg(pgid, signum) — let ProcessLookupError/PermissionError
+    # propagate uncaught; both are meaningful to terminate_process_group's caller
+    # (already-dead vs. needs-privileged-fallback), so don't swallow either here.

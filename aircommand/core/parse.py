@@ -119,6 +119,37 @@ def _format_hashrate(h_per_s: int) -> str:
     return f"{value:.1f} {units[unit_index]}"
 
 
+def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
+    """`airmon-ng start <adapter>`'s own stdout -> the resulting monitor-mode
+    interface name. RESEARCHED, NOT hardware-confirmed — flagged for a hands-on
+    recheck once a real adapter is available, same tier as Phase 1's aircrack-ng
+    flag combination and hashcat --status-json field names (docs/roadmap.md).
+
+    Whether airmon-ng renames the interface (classically e.g. "wlan0" ->
+    "wlan0mon" — reportedly still true for rt2800usb, the RT3070's own driver)
+    or switches the SAME interface's type in place (most current mac80211
+    drivers/airmon-ng versions, no rename) depends on the exact driver+version
+    combination. Handles both: looks for airmon-ng's documented rename-
+    announcement line, e.g.
+        "(mac80211 monitor mode vif enabled for [phy0]wlan0 on [phy0]wlan0mon)"
+    and returns the interface name after the final "on" if found; returns
+    `fallback` (the original adapter name) if that line isn't present, covering
+    the in-place (no rename) case — and, defensively, any output shape this
+    regex doesn't recognize, rather than raising."""
+    import re
+
+    # (?:\[\w+\])? matches an entire optional "[phy0]"-style prefix as one unit,
+    # deliberately not two independently-optional bracket characters around a
+    # greedy \w* -- that first shape was tried and empirically failed the
+    # no-bracket case (a bare "on wlan0mon" with no "[phyN]" prefix): the greedy
+    # \w* had nothing to stop it from swallowing the whole interface name,
+    # leaving (\w+) to backtrack down to capturing just its last character ("n").
+    # Caught by actually running this against sample output before shipping it,
+    # not just hand-tracing the pattern.
+    match = re.search(r"monitor mode vif enabled for \S+ on (?:\[\w+\])?(\w+)", output)
+    return match.group(1) if match else fallback
+
+
 def parse_nmap_xml(xml_bytes: bytes) -> tuple[EnumHost, ...]:
     """nmap -oX output -> the hosts/ports it found. nmap's XML schema (host/
     address/hostnames/hostname/ports/port/state) is stable and well-documented;

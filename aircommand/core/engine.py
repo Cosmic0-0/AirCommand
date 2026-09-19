@@ -23,6 +23,12 @@ from aircommand.core.procutil import ProcRunner, SubprocessRunner
 from aircommand.core.reconciliation import ReconciliationSummary, reconcile_orphaned_processes
 from aircommand.core.rf import RadioController
 
+# How long shutdown() waits for each still-running job to reach a terminal
+# state before giving up on it and moving on -- a best-effort grace period, not
+# a guarantee. A job stuck past this is left RUNNING in the jobs table; the
+# NEXT launch's reconcile_startup() (ADR-0004) is what actually cleans it up.
+SHUTDOWN_JOB_WAIT_TIMEOUT_S = 5.0
+
 
 class Engine:
     def __init__(
@@ -47,22 +53,31 @@ class Engine:
         self._proc: ProcRunner = proc or SubprocessRunner(self.privilege.run_privileged)
         self._rf = RadioController(adapter, self._proc)
 
+        # self._db.networks/.handshakes/.audit_log/.crack_results/.enum_results
+        # below are each facade's MAIN-connection repo, for that facade's own
+        # main-thread-only methods (list_networks, list_handshakes,
+        # list_audit_log, list_results) — never touched from inside a _drive
+        # thread anymore. self._db.new_connection_scope is what each _drive
+        # thread calls itself, once, at the start of its own run, for every DB
+        # write that thread performs — see persistence/db.py's Database/
+        # ConnectionScope docstrings and each facade's own _drive method.
         self.targets = Allowlist(self._db.targets, self._bus)
         self.discovery = Discovery(
             self._db.networks, self._bus, self._jobs, self._rf, self._proc,
-            self._work_dir, discovery_poll_interval,
+            self._work_dir, self._db.new_connection_scope, discovery_poll_interval,
         )
         self.capture = Capture(
             self.targets, self._db.handshakes, self._db.audit_log, self._bus,
             self._jobs, self._rf, self._proc, self._work_dir,
-            capture_handshake_check_interval,
+            self._db.new_connection_scope, capture_handshake_check_interval,
         )
         self.enumerate = Enumerator(
             self.targets, self._db.enum_results, self._bus, self._jobs, self._rf, self._proc,
+            self._db.new_connection_scope,
         )
-        self.crack = Crack(self._db.crack_results, self._bus, self._jobs, self._proc)
+        self.crack = Crack(self._db.crack_results, self._bus, self._jobs, self._proc, self._db.new_connection_scope)
 
-        self._sighting_batcher = SightingBatcher(self._bus, self._db.networks)
+        self._sighting_batcher = SightingBatcher(self._bus, self._db.new_connection_scope)
         self._sighting_batcher.start()
 
         # Deliberately NOT calling reconcile_startup() here — see its docstring.
@@ -83,6 +98,33 @@ class Engine:
 
     def shutdown(self) -> None:
         raise NotImplementedError
-        # TODO: cancel all live jobs (self._jobs), wait briefly for their driver
-        # threads to publish terminal events, self._sighting_batcher.stop() (final
-        # flush), self.privilege.stop(), self._db.close().
+        # TODO — exact shape and ordering, decided:
+        #
+        # job_ids = self._jobs.active_job_ids()
+        # for job_id in job_ids:
+        #     self._jobs.cancel(job_id)
+        # for job_id in job_ids:
+        #     self._jobs.wait_for_terminal(job_id, timeout=SHUTDOWN_JOB_WAIT_TIMEOUT_S)
+        #     # Best-effort grace period, not a guarantee: a driver thread stuck
+        #     # past the timeout (e.g. a wedged subprocess) is left running and
+        #     # left RUNNING in the jobs table -- next launch's reconcile_startup()
+        #     # (ADR-0004) is what actually cleans it up. shutdown() must not hang
+        #     # the app closing indefinitely on one stuck thread.
+        # self._sighting_batcher.stop()   # final flush -- AFTER jobs are confirmed
+        # # terminal, so no NetworkSightingUpdated from a still-running Discovery
+        # # job can arrive after the batcher's last flush and get silently dropped.
+        # self._rf.release_to_managed()   # don't leave the adapter in monitor mode
+        # # once AirCommand isn't running. Safe here: every job that might have held
+        # # a reservation is already confirmed terminal above, so release() has
+        # # already cleared self._rf._current via each driver's own finally block.
+        # self.privilege.stop()   # AFTER waiting for jobs, not before: a privileged
+        # # job's own cancellation path (ProcHandle.terminate() on a root-owned
+        # # process, see procutil.py's _RealProcHandle) needs run_privileged still
+        # # working while that job is being cancelled above.
+        # self._db.close()   # last -- nothing above touches the DB after this point
+        #
+        # SHUTDOWN_JOB_WAIT_TIMEOUT_S: a new module-level constant (pick something
+        # like 5.0) -- add it near the top of this file next to the other
+        # DEFAULT_*/timedelta constants imported from discovery.py/capture.py,
+        # with a one-line comment explaining it's a shutdown grace period, not a
+        # tuned value.
