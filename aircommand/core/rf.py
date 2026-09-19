@@ -117,17 +117,23 @@ class RadioController:
         return self._monitor_adapter if wants_monitor else self._adapter
 
     def _start_monitor_mode(self) -> str:
-        # RESEARCHED, NOT hardware-confirmed (flag for hands-on recheck once a
-        # real adapter + aircrack-ng are available -- same tier as Phase 1's
-        # aircrack-ng-flag and hashcat-status-field flags): whether airmon-ng
-        # renames the interface (classically e.g. "wlan0" -> "wlan0mon" -- still
-        # reportedly true for rt2800usb, the RT3070's own driver) or switches the
-        # SAME interface's type in place (most current mac80211 drivers/airmon-ng
-        # versions) depends on the exact driver+version combination, which can't
-        # be checked from here. parse_airmon_monitor_interface (parse.py) is
-        # written defensively either way: it looks for airmon-ng's documented
-        # rename-announcement line and falls back to the ORIGINAL adapter name
-        # (no rename) if that line isn't present in the output.
+        # HARDWARE-CONFIRMED (docs/roadmap.md Phase 2 item 5) against a real
+        # Ralink RT2870/RT3070 (rt2800usb): it does rename, matching the
+        # "classically... reportedly true for rt2800usb" research -- but with a
+        # real twist that research didn't anticipate. This adapter's
+        # udev-persistent name (wlx24050f7d7ae0, 15 chars) is already at Linux's
+        # IFNAMSIZ-1 limit, so "<original>mon" (18 chars) doesn't fit -- airmon-ng
+        # falls back to an old-style short name (wlan0mon) instead, AND drops
+        # the "for <original>" clause from its announcement line entirely in
+        # that case. parse_airmon_monitor_interface (parse.py) originally
+        # required that clause unconditionally, so it silently fell through to
+        # the WRONG interface name (the fallback) against this real output --
+        # fixed there; see its own docstring and tests/test_parse.py's
+        # regression test for the exact real string this broke on. Other
+        # drivers/versions may still switch the SAME interface's type in place
+        # (no rename) -- parse_airmon_monitor_interface's fallback still covers
+        # that case, now genuinely exercised on top of a hardware-confirmed
+        # rename case, not just the fallback path alone.
         # airmon-ng's own exit code isn't checked/branched on (unconfirmed
         # semantics, same reasoning as capture.py never checking aircrack-ng's
         # exit code) -- .wait() is called only to reap the process; success/
