@@ -373,9 +373,37 @@ validation on real hardware.
 Implemented together, tested headlessly (`tests/test_procutil.py`,
 `tests/test_rf.py`) — `RadioController.reserve()`/`release()` now really spawn
 `airmon-ng start`/`stop <adapter>` through the injected `ProcRunner`, parsed via
-`parse_airmon_monitor_interface` (researched, not hardware-confirmed — see
-`rf.py`'s own flag on whether airmon-ng renames the interface or switches it in
-place, driver-dependent).
+`parse_airmon_monitor_interface`.
+
+**The airmon-ng rename question is now hardware-confirmed, with a real bug
+found and fixed** (once the user got a monitor-mode-capable adapter plugged in
+and the aircrack-ng suite installed): `sudo airmon-ng start wlx24050f7d7ae0`
+against a real Ralink RT2870/RT3070 (rt2800usb driver) DOES rename the
+interface, matching the "classically... reportedly true for rt2800usb"
+research — but not to `<original>mon`. That adapter's udev-persistent name
+(`wlx24050f7d7ae0`, 15 characters) is already at Linux's IFNAMSIZ-1 limit, so
+`<original>mon` (18 characters) doesn't fit; airmon-ng instead falls back to an
+old-style short name (`wlan0mon`) and — not previously anticipated — drops the
+"for `<original>`" clause from its announcement line entirely in that case:
+`(mac80211 monitor mode vif enabled on [phy1]wlan0mon)`, no "for" clause at
+all. `parse_airmon_monitor_interface`'s regex required that clause
+unconditionally, so against this real output it silently fell all the way
+through to `fallback` — the WRONG interface name — which would have broken
+every subsequent real `airodump-ng`/`aireplay-ng` spawn (they'd target an
+interface that no longer exists post-rename). Fixed by making the "for `\S+`"
+clause optional in the regex; see `parse.py`'s own docstring and
+`tests/test_parse.py`'s regression test, which keeps the real captured output
+verbatim rather than a trimmed repro. The originally-researched "for X on Y"
+shape (both clauses present) was never itself hardware-confirmed and may not
+be real airmon-ng output at all — kept supported as a harmless superset, not
+because it's confirmed.
+
+Also confirmed, no code change needed: `airmon-ng start` warns about
+NetworkManager/wpa_supplicant/avahi-daemon potentially interfering (channel
+changes, forcing the interface back to managed mode) — exactly the scenario
+`rf.py`'s own comment already anticipated when it deliberately decided NOT to
+run `airmon-ng check kill` automatically (would risk killing the operator's own
+network connection). This is expected, working-as-designed behavior, not a bug.
 
 **Found only once item 4 (below) actually unblocked `Database` and let the
 Discovery/Capture/Enumerate *acceptance* tests run for the first time** (they

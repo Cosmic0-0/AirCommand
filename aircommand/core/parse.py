@@ -121,21 +121,28 @@ def _format_hashrate(h_per_s: int) -> str:
 
 def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
     """`airmon-ng start <adapter>`'s own stdout -> the resulting monitor-mode
-    interface name. RESEARCHED, NOT hardware-confirmed — flagged for a hands-on
-    recheck once a real adapter is available, same tier as Phase 1's aircrack-ng
-    flag combination and hashcat --status-json field names (docs/roadmap.md).
+    interface name. HARDWARE-CONFIRMED (docs/roadmap.md Phase 2 item 5) against
+    a real Ralink RT2870/RT3070 (rt2800usb driver) adapter with a udev-persistent
+    name (`wlx<mac>`, 15 characters — right at Linux's IFNAMSIZ-1 limit):
 
-    Whether airmon-ng renames the interface (classically e.g. "wlan0" ->
-    "wlan0mon" — reportedly still true for rt2800usb, the RT3070's own driver)
-    or switches the SAME interface's type in place (most current mac80211
-    drivers/airmon-ng versions, no rename) depends on the exact driver+version
-    combination. Handles both: looks for airmon-ng's documented rename-
-    announcement line, e.g.
-        "(mac80211 monitor mode vif enabled for [phy0]wlan0 on [phy0]wlan0mon)"
-    and returns the interface name after the final "on" if found; returns
-    `fallback` (the original adapter name) if that line isn't present, covering
-    the in-place (no rename) case — and, defensively, any output shape this
-    regex doesn't recognize, rather than raising."""
+        Interface wlx24050f7d7ae0mon is too long for linux so it will be
+        renamed to the old style (wlan#) name.
+
+            (mac80211 monitor mode vif enabled on [phy1]wlan0mon)
+
+    This driver does rename (matching the "classically... reportedly true for
+    rt2800usb" research), but NOT to `<original>mon` here — `<original>mon`
+    would exceed IFNAMSIZ, so airmon-ng falls back to old-style short naming
+    (`wlan0`, `wlan1`, ...) instead, and — not previously anticipated —
+    its announcement line in this fallback case has NO "for <original>" clause
+    at all, just "vif enabled on [phyN]<new>". The originally-researched
+    "vif enabled for [phy0]wlan0 on [phy0]wlan0mon" shape (both a "for" and an
+    "on" clause) was never hardware-confirmed and may not be real airmon-ng
+    output at all — kept supported below since it's a harmless superset, not
+    because it's confirmed. Returns `fallback` (the original adapter name) if
+    no rename-announcement line is present at all, covering the in-place
+    (no rename) case — and, defensively, any output shape this regex doesn't
+    recognize, rather than raising."""
     import re
 
     # (?:\[\w+\])? matches an entire optional "[phy0]"-style prefix as one unit,
@@ -146,7 +153,16 @@ def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
     # leaving (\w+) to backtrack down to capturing just its last character ("n").
     # Caught by actually running this against sample output before shipping it,
     # not just hand-tracing the pattern.
-    match = re.search(r"monitor mode vif enabled for \S+ on (?:\[\w+\])?(\w+)", output)
+    #
+    # (?:for \S+ )? is optional for the same reason: real hardware output (see
+    # docstring) omits the "for <original>" clause entirely in the old-style-
+    # rename case. A bare, always-required "for \S+ on" (the original shape)
+    # silently fell all the way through to `fallback` — the WRONG interface
+    # name — against this real output, since the whole regex simply failed to
+    # match. Caught only by testing against real captured output, not by
+    # hand-tracing the pattern; see tests/test_parse.py's own regression test
+    # for the exact string this broke on.
+    match = re.search(r"monitor mode vif enabled (?:for \S+ )?on (?:\[\w+\])?(\w+)", output)
     return match.group(1) if match else fallback
 
 
