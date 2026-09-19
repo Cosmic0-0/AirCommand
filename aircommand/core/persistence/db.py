@@ -447,13 +447,12 @@ class EnumResultRepository:
         self._conn = conn
 
     def insert(self, target_id: int, job_id: JobId, hosts: tuple[EnumHost, ...]) -> None:
-        raise NotImplementedError
-        # TODO: for host in hosts:
-        #   self._conn.execute(
-        #     "INSERT INTO enum_results (target_id, job_id, ip, hostname, open_ports) VALUES (?, ?, ?, ?, ?)",
-        #     (target_id, str(job_id), host.ip, host.hostname,
-        #      ",".join(str(p) for p in host.open_ports)))
-        # self._conn.commit()
+        for host in hosts:
+            self._conn.execute(
+                "INSERT INTO enum_results (target_id, job_id, ip, hostname, open_ports) VALUES (?, ?, ?, ?, ?)",
+                (target_id, str(job_id), host.ip, host.hostname,
+                 ",".join(str(p) for p in host.open_ports)))
+        self._conn.commit()
 
 
 class JobRepository:

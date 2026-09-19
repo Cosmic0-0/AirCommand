@@ -8,30 +8,34 @@ explicitly rather than pretending a TODO comment is a finished design.
 
 ## Current state — read this whole section before doing anything
 
-Committed, in order: core scaffolding + GUI shell + ADRs/design doc — `domain.py` +
-`events.py` — the headless Discovery flow end to end (schema, `NetworkRepository`,
-`JobRepository`, `SightingBatcher`, `JobRegistry`, `RadioController`'s in-memory
-arbitration, an airodump-ng CSV parser, `Discovery` itself) — `Allowlist` +
-`TargetRepository`. Nothing has touched a real subprocess, real `sudo`, or real
-hardware yet — every slice so far runs against `FakeProcRunner`.
+**Phase 1 is complete.** Committed, in order: core scaffolding + GUI shell +
+ADRs/design doc — `domain.py` + `events.py` — the headless Discovery flow end to
+end — `Allowlist` + `TargetRepository` (including the `Target.channel` field
+Capture needed) — Discovery's on-disk-CSV-poll bug fix (Phase 1 item 0) —
+`Capture` (item 1) — `Crack` (item 2) — `Enumerator` (item 3, Option A subnet
+source). 93 tests pass. Nothing has touched a real subprocess, real `sudo`, or
+real hardware yet — every slice so far runs against `FakeProcRunner`; that's
+exactly what Phase 2 is for. See each Phase 1 item below for what was
+actually decided/found while implementing it — left in place as rationale for
+Phase 2, not deleted now that the item is done.
 
-**Uncommitted right now, in the working tree, not yet reviewed by the user — commit
-this first, before anything else:** `Target` was missing a `channel` field. Capture
-needs it to lock the adapter (`airodump-ng -c <channel>`), and nothing else on
-`Target` could supply it — same shape of gap as the missing `ssid` found in the
-Allowlist slice, just caught later because it surfaced while scoping Capture, after
-Allowlist had already shipped. Fixed the same way `ssid` was: `channel: int` added
-to `Target` (`domain.py`), the `targets` table gained a `channel` column, and
-`Allowlist.add`/`TargetRepository.upsert` both became 4-arg
-`(bssid, ssid, channel, label)`. Existing tests updated to match. 76 tests pass.
-Touched: `domain.py`, `persistence/db.py`, `allowlist.py`,
-`docs/design/core-gui-boundary.md`, `tests/test_allowlist.py`,
-`tests/test_persistence_db.py`. Review this diff yourself (small, mechanical,
-mirrors the `ssid` fix exactly) before building anything on top of it.
+**Also fixed this session, in already-committed code from before Phase 1 started
+(not part of any Phase 1 item, found incidentally while testing Crack):**
+`JobRegistry.mark_terminal()` (`jobs.py`) was setting the in-memory event that
+unblocks `JobHandle.wait_for_test()` *before* its own DB delete actually
+committed, against the single sqlite3 connection every driver thread shares
+unsynchronized. Starting a second job immediately after a first job's
+`wait_for_test()` returns — exactly Crack's own usage shape (capture a
+Handshake, then immediately crack it) — could race the two threads' writes on
+that shared connection (`sqlite3.OperationalError: cannot commit - no
+transaction is active`, reproduced directly). Fixed by reordering
+`mark_terminal()` so the DB write completes first. This closes that specific
+race; it does **not** fix the deeper issue that every driver thread still
+shares one unsynchronized connection (see `persistence/db.py`'s `Database`
+docstring) — that's real, pre-existing, and still open, see Phase 2 below.
 
-**Discovery has a confirmed real bug, found while researching Capture below, not
-yet fixed — see the top of Phase 1.** It currently passes all 76 tests but would
-not work against a real adapter.
+**Next: Phase 2** — first real subprocess/hardware code. Nothing below this
+point has been started.
 
 ## The process (already in CLAUDE.md — restated briefly because it matters)
 
@@ -282,24 +286,20 @@ value" idiom used for Discovery's CSV and Capture's handshake check above.
 
 ### 3. `enumerate.py`
 
-Independent of Capture/Crack (only needs `Allowlist`), but has a real open design
-gap, not just an implementation detail:
-
-**Not actually scoped yet — this one needs the user, don't resolve it solo:** the
-`_drive` TODO references a `target_subnet` that's never defined anywhere. A `Target`
-only carries a wifi `bssid`/`ssid` — nmap needs an IP/subnet, and nothing in the
-current design says how to get from one to the other. Unlike Capture's gap above,
-this one doesn't need hardware or research — it's a genuine design fork, answerable
-today by thinking it through, but it's bigger than it first looks and touches
-security-sensitive territory, so ask rather than deciding solo:
+Independent of Capture/Crack (only needs `Allowlist`). Had a real open design gap
+(not just an implementation detail): the `_drive` TODO referenced a `target_subnet`
+that was never defined anywhere. A `Target` only carries a wifi `bssid`/`ssid` —
+nmap needs an IP/subnet, and nothing in the original design said how to get from
+one to the other. Two options were put to the user rather than decided solo, since
+it touches security-sensitive territory (whether this tool stores wifi credentials
+at rest):
 
 - **Option A**: AirCommand never joins a network itself. It assumes the operator
   already associated to the target network through their OS's normal wifi settings
   before clicking "Enumerate," and just reads whatever subnet the currently-active
   interface is on (stdlib-only — no new domain fields, no credential storage).
   Smaller scope, matches this project's minimal-scope posture, but means Enumerate
-  silently finds nothing if the operator hasn't manually joined first.
-  Recommended for exactly that reason.
+  fails if the operator hasn't manually joined first.
 - **Option B**: AirCommand manages the join itself — which means storing a
   network's credentials somewhere (a new field on `Target`? a separate secret
   store?) and giving `RadioController`'s `AdapterMode.MANAGED` a real "associate to
@@ -308,9 +308,18 @@ security-sensitive territory, so ask rather than deciding solo:
   passwords at rest" is a security-posture decision worth an ADR of its own, not a
   quiet default.
 
-Whichever way the user goes, write it down — as an ADR if it's Option B (real
-tradeoff, real scope), as a note in this doc if it's Option A (confirms an
-assumption, doesn't add anything new).
+**Decided: Option A** (confirms an assumption, per the note above doesn't need its
+own ADR). `enumerate.py` now has `get_interface_subnet(interface) -> str`, a
+stdlib-only (`socket`/`fcntl`/`struct`) raw-ioctl read of whatever IPv4 subnet the
+adapter currently has an address on, injected into `Enumerator` as a `get_subnet`
+constructor param (same testability-seam pattern as `ProcRunner` — production
+default is the real ioctl function, tests inject a canned subnet). Accepted
+tradeoff: if the operator hasn't actually joined the target network yet,
+`get_interface_subnet` raises `OSError` and the scan job ends via the same
+"let an unexpected error propagate past the `finally` cleanup" path every other
+driver already uses — there's no dedicated failure event for this in `events.py`,
+and adding one was treated as out of scope for this decision rather than a quiet
+default of its own.
 
 ## Phase 2 — first real subprocess/hardware code
 
@@ -342,6 +351,14 @@ validate it, not just `pytest`.
   real hardware exists to check it against — see the flag in Phase 1's `capture.py`
   entry. If it was implemented from research alone without full confidence, this is
   where that gets settled for real, not guessed at again.
+- **Give each job-driver thread its own SQLite connection**, per `persistence/db.py`'s
+  `Database` docstring — already flagged as provisional there, now with a concrete
+  reason it's not just theoretical: see "Current state" above. `JobRegistry.mark_terminal`'s
+  own ordering bug is fixed, but every driver thread still writes through one shared,
+  unsynchronized `sqlite3.Connection`; a genuinely concurrent write from two real
+  driver threads (not just the wait_for_test()-mediated handoff that surfaced this)
+  is still an open risk once Phase 2 makes threads/timing real instead of
+  `FakeProcRunner`-fast.
 
 ## Phase 3 — GUI
 
