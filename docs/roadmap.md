@@ -91,26 +91,37 @@ and don't try to pre-solve Phase 2 or Phase 3 problems from inside a Phase 1 min
   Enums → `x.value` to store, `EnumType(row["..."])` back. `datetime` → `x.isoformat()`
   to store, `datetime.fromisoformat(row["..."])` back. `JobId`/UUIDs → `str(x)` to
   store, `uuid.UUID(row["..."])` back. `conn.row_factory` is already `sqlite3.Row`.
-- **Mint-restricted types** (`Target` done, `Handshake` next): the repository mints
-  (imports the `_*_MINT` sentinel, constructs the frozen dataclass directly), the
-  facade stays a thin delegation. **Flagged below**: the original `capture.py` TODO
-  sketch shows the opposite (facade mints from a raw `row`) — resolve this
-  deliberately when you scope Capture, don't just copy one pattern blindly.
+- **Mint-restricted types**: the repository mints (imports the `_*_MINT` sentinel,
+  constructs the frozen dataclass directly), the facade stays a thin delegation.
+  `Target` (`TargetRepository`) and `Handshake` (`HandshakeRepository`) both follow
+  this now — `Handshake`'s was a deliberate choice, not a default: the original
+  `capture.py` TODO sketch showed the opposite (facade mints from a raw `row`), but
+  that sketch was never actually implemented, so there was no shipped code to
+  reconcile. If a future mint-restricted type shows up, mint it in the repository.
 - **"Preserve the original on upsert"**: `Network.first_seen` and `Target.date_added`
   both mean "the first time this became true," not "the last time this row was
   written" — excluded from the `UPDATE` SET list on purpose, with a comment saying so.
-  Watch for the same shape elsewhere (e.g. would a `Handshake`'s `captured_at` ever
-  need this treatment? Probably not, since handshakes aren't upserted — but check).
+  Confirmed this doesn't recur for `Handshake.captured_at`: handshakes are pure
+  `INSERT`s (`HandshakeRepository.insert`), never upserted, so there's no second
+  write that could ever overwrite it.
 - **`DurableEvent` fires only for a real write.** `Allowlist.remove()` on a bssid
   that was never a Target publishes nothing — there's no state transition to
   describe. Apply the same check-before-publish discipline anywhere an operation
   might be a no-op.
-- **Exception safety in driver threads.** `Discovery._drive` wraps spawn-through-loop
-  in `try/finally` so `rf.release()`/`jobs.mark_terminal()` always run, even if
-  parsing a malformed line from a real external tool raises mid-loop — otherwise the
-  RF reservation leaks forever and the app can never run another Discovery/Capture/
-  Enumerate without a restart. Every other `_drive` (Capture, Enumerate) needs the
-  same guarantee; nothing about it is Discovery-specific.
+- **Exception safety in driver threads.** Every `_drive` (Discovery, Capture, Crack,
+  Enumerator) wraps spawn-through-loop in `try/finally` so `rf.release()`
+  (where applicable) and `jobs.mark_terminal()` always run, even if something raises
+  mid-loop — otherwise a reservation or a `jobs` row leaks forever and the app can
+  never run another job of that kind without a restart.
+- **Terminal ordering: publish the terminal `DurableEvent`, then `mark_terminal()`
+  last, always.** `mark_terminal()` is what unblocks `JobHandle.wait_for_test()`
+  (and, in spirit, any future external "is this job done" signal) and does its own
+  DB write — a caller waking on it must be able to trust both the terminal event and
+  that write already happened, not race either. Got this backwards once (`jobs.py`
+  itself, plus an inherited TODO sketch for `capture.py`/`crack.py`) and it caused a
+  real, reproduced `sqlite3.OperationalError` once a second job could start
+  immediately after a first one's `wait_for_test()` returned — see "Current state"
+  above. Fixed everywhere it existed; keep new `_drive`s in this shape from the start.
 - **Thin facade, fat repository.** Facade methods are 1-4 line delegations; the
   repository holds the actual SQL and constructs the actual domain object. Keep
   following this rather than letting SQL creep into `capture.py`/`crack.py`/etc.
@@ -135,7 +146,7 @@ and don't try to pre-solve Phase 2 or Phase 3 problems from inside a Phase 1 min
 
 ## Phase 1 — core engine, headless-testable (do these via FakeProcRunner, same as Discovery)
 
-### 0. Fix Discovery — confirmed bug, do this before anything else in this phase
+### 0. Fix Discovery — confirmed bug, do this before anything else in this phase [DONE]
 
 `airodump-ng --write-csv <prefix>` writes CSV data to **files on disk**
 (`<prefix>-01.csv` etc.) — confirmed against the aircrack-ng manual and independent
@@ -183,7 +194,7 @@ Update `tests/test_discovery_acceptance.py` accordingly — it currently scripts
 `FakeProcRunner` with CSV lines as scripted stdout, which will need to change to
 match whatever the fixed `_drive` actually reads.
 
-### 1. `capture.py`
+### 1. `capture.py` [DONE]
 
 The only `Handshake` mint site; drives **three** tools, not two (see below); is
 where ADR-0001's audit requirement actually bites (`DeauthFired` must be written to
@@ -241,7 +252,7 @@ fix, just producing a `.cap` capture instead of a `.csv`), aireplay-ng
 (fire-and-wait per deauth burst, no meaningful output to parse, just `.wait()`),
 and now aircrack-ng (one-shot, `.wait()`, check stdout text per above).
 
-### 2. `crack.py`
+### 2. `crack.py` [DONE]
 
 Depends on a real `Handshake` — since `Handshake` is mint-restricted, you can't
 hand-construct one for an isolated Crack unit test, so this naturally wants Capture
@@ -284,7 +295,7 @@ plaintext from it), empty means `Exhausted` (if the process ran to completion) o
 matches the same "check a clean on-disk artifact after the fact, not a live stream
 value" idiom used for Discovery's CSV and Capture's handshake check above.
 
-### 3. `enumerate.py`
+### 3. `enumerate.py` [DONE]
 
 Independent of Capture/Crack (only needs `Allowlist`). Had a real open design gap
 (not just an implementation detail): the `_drive` TODO referenced a `target_subnet`

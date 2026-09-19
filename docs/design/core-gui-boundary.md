@@ -220,7 +220,7 @@ Two tiers, matching `DurableEvent`/`TelemetryEvent` above:
 1. **Correctness-critical transitions write synchronously, then publish** a `DurableEvent`: `NetworkDiscovered` (first sighting), `TargetAdded`/`TargetRemoved`, `CaptureStarted`, `DeauthFired`, `HandshakeCaptured`, `NmapScanCompleted`, `CrackStarted`, `CrackResult`. Each is produced by a function that performs one SQLite write in one transaction, then calls `bus.publish(...)` with the value that write produced. This matters concretely for `DeauthFired` (the write happens before the event exists, so no subscriber can ever observe a firing that failed to log) and `HandshakeCaptured` (no window where the GUI shows a handshake the DB doesn't have).
 2. **High-frequency/low-stakes telemetry publishes a `TelemetryEvent` without a synchronous write per occurrence.** `NetworkSightingUpdated` (signal refresh on an already-known beacon) and `CrackProgress` (hashrate/ETA ticks) are handled by `SightingBatcher` (`core/persistence/sighting_batch.py`), a genuine bus subscriber whose callback just appends to an in-memory deque (fast, keeps `publish()` non-blocking); a separate timer thread flushes accumulated last-known-values every few seconds in one batched `UPDATE`. A crash loses at most a few seconds of freshness — identity and terminal results are tier 1, never at risk.
 
-Each job-driver thread owns its own `sqlite3` connection (WAL mode, short `busy_timeout`) and writes only its own tables — per-actor state with SQLite as the merge point at the read boundary, not one shared connection guarded by an app-level lock.
+Each job-driver thread owns its own `sqlite3` connection (WAL mode, short `busy_timeout`) and writes only its own tables — per-actor state with SQLite as the merge point at the read boundary, not one shared connection guarded by an app-level lock. **Not true yet as of Phase 1**: every facade still shares one `Database` connection (`check_same_thread=False`, unsynchronized) — see `persistence/db.py`'s own docstring and the Phase 2 item in `docs/roadmap.md`. This is real, not cosmetic: it's already caused one reproduced race (two driver threads' writes overlapping — see "Cancellation" above for the ordering half of the fix that shipped; the connection-per-thread half hasn't).
 
 ### Allowlist gate — structural, not a scattered `if`
 
@@ -293,7 +293,9 @@ class JobHandle:
     def cancel(self) -> None: raise NotImplementedError         # -> engine.cancel(job_id); returns immediately
 ```
 
-`engine.cancel(job_id)` looks up the job's `CancellationToken`, signals it, sends the driving subprocess a termination signal (SIGTERM, escalating to SIGKILL after a grace period — aircrack-ng-suite tools don't always honor SIGINT cleanly), and returns without waiting for cleanup. The job-driver thread observes the token, performs cleanup (drain remaining output, mark the job row terminal, release its RF reservation), and *that* thread publishes the terminal `DurableEvent` (`CaptureStopped(reason=CANCELLED)`, etc.). The request to cancel is a command with an immediate return; the fact that cancellation completed is an event, observed identically to any other state transition. `cancel()` on an already-terminal or unknown job is a no-op.
+`engine.cancel(job_id)` looks up the job's `CancellationToken`, signals it, sends the driving subprocess a termination signal (SIGTERM, escalating to SIGKILL after a grace period — aircrack-ng-suite tools don't always honor SIGINT cleanly), and returns without waiting for cleanup. The job-driver thread observes the token, performs cleanup (drain remaining output, release its RF reservation), and *that* thread publishes the terminal `DurableEvent` (`CaptureStopped(reason=CANCELLED)`, etc.) *before* marking the job row terminal — not after. The request to cancel is a command with an immediate return; the fact that cancellation completed is an event, observed identically to any other state transition. `cancel()` on an already-terminal or unknown job is a no-op.
+
+**Ordering invariant, load-bearing (found the hard way during Phase 1's Capture/Crack acceptance tests, now fixed everywhere):** a job-driver's terminal `DurableEvent` must publish, and `JobRegistry.mark_terminal`'s own DB write must complete, *before* `mark_terminal` sets the in-memory event that `JobHandle.wait_for_test()` blocks on. Getting this backwards — as an earlier draft of `_drive`'s pseudocode and `jobs.py` itself both did — means a caller waking on that event has no guarantee the terminal event was actually observed yet, or that the job's DB row is actually gone yet, which matters concretely once a second job can start immediately after (e.g. Crack starting right after Capture produces a `Handshake`): two driver threads' writes can race on the connection every driver currently shares (see "SQLite and the event stream" above). Every `_drive`'s `finally` block should read: do the real work, publish the terminal event, *then* call `mark_terminal` last.
 
 ### Startup reconciliation — orphaned processes from a prior crash
 
@@ -336,6 +338,8 @@ class Engine:
 
 Every runner (`discovery.py`, `capture.py`, `crack.py`, `enumerate.py`) takes its `ProcRunner` via `Engine`, never constructs one itself — this is what makes the headless call site in [Usage](#usage-callers-view) real rather than aspirational. Output parsing (`airodump` CSV → `Network`/progress, `hashcat --status` → `CrackProgress`, `nmap -oX` → hosts) lives in `core/parse.py` as pure functions with no I/O, independently unit-testable against captured tool output.
 
+The same constructor-injected-function seam is reused once more, for a real syscall rather than a subprocess: `Enumerator` takes a `get_subnet: Callable[[str], str]` (production default `get_interface_subnet`, a raw Linux ioctl — see `enumerate.py` and `docs/roadmap.md` Phase 1 item 3 for why nmap's target subnet comes from the OS's already-associated interface rather than a new domain field), so tests inject a canned subnet instead of needing a real joined network. `Pacer` (`core/jobs.py`) is the other small piece of driver-loop plumbing worth naming here: a monotonic-clock rate gate shared by every "poll a clean on-disk artifact instead of a live stream" idiom in Phase 1 — Discovery's CSV poll, Capture's deauth-burst timer, and Capture's handshake-check timer all construct one, each overriding its interval via a constructor param purely for test speed (the same reason `SudoSession.__init__` takes `keepalive_interval_s`).
+
 ### Module map
 
 ```
@@ -349,15 +353,18 @@ aircommand/core/
   rf.py                  # RadioController, AdapterMode, AdapterBusy — single-radio serialization
   discovery.py            # Discovery — wraps airodump-ng discovery mode
   capture.py               # Capture — wraps airodump-ng (+aireplay-ng); the only Handshake mint site
-  enumerate.py              # Enumerator — wraps nmap, gated
+  enumerate.py              # Enumerator — wraps nmap, gated; subnet comes from get_subnet
+                            #  (default: get_interface_subnet, a raw ioctl — Option A, roadmap Phase 1 item 3)
   crack.py                   # Crack — wraps hashcat, trusts Handshake.target_id
   privilege.py                # SudoSession — priming, keepalive, run_privileged() choke point
-  jobs.py                      # JobRegistry, CancellationToken, JobHandle plumbing shared by all drivers
+  jobs.py                      # JobRegistry, CancellationToken, JobHandle, Pacer — plumbing shared by all drivers
   procutil.py                   # ProcRunner protocol, SubprocessRunner, FakeProcRunner — the test seam
   parse.py                       # PURE parsers: airodump/hashcat/nmap output -> domain types. No I/O.
   reconciliation.py                # reconcile_orphaned_processes() — startup orphan cleanup, ADR-0004
   persistence/
-    db.py                         # schema, connection-per-thread helpers, one repository per aggregate
+    db.py                         # schema, one repository per aggregate. One shared sqlite3 connection
+                                   #  today (check_same_thread=False, no lock) — connection-per-driver-thread
+                                   #  is still Phase 2 work, not done yet; see "SQLite and the event stream"
     sighting_batch.py              # SightingBatcher — the tier-2 async DB subscriber
 aircommand/gui/
   app.py                            # owns the single Engine instance
@@ -418,8 +425,8 @@ Rejected: the polling candidate's single generic `Job[R]` + `poll()`/`subscribe(
 
 ## Next implementation step
 
-Done: `core/domain.py` and `core/events.py` (with the `EventBus` unit test suite), and the headless `Discovery` flow end to end (`FakeProcRunner` → parse → `NetworkDiscovered` → SQLite), per the Usage section's headless call site — including the full SQLite schema (`persistence/db.py`), which this design doc left as a TODO and which turned out to need `JobRepository` alongside `JobRegistry` so ADR-0004's orphan detection has somewhere durable to read from. Still no real subprocess or sudo code exists anywhere in the tree.
+**Phase 1 is done.** `domain.py`, `events.py`, `allowlist.py`, `discovery.py` (including its on-disk-CSV-poll fix), `capture.py`, `crack.py`, and `enumerate.py` are all implemented and headless-tested against `FakeProcRunner` — no real subprocess, no real `sudo`, no real hardware anywhere in the tree yet. See `docs/roadmap.md`'s "Current state" for the authoritative up-to-date summary (this doc covers the *shape* of the system; the roadmap tracks *what's done*).
 
-Next: `core/allowlist.py` — small (four methods: `add`/`remove`/`list`/`require_target`) and fully headless-testable like the last two slices, but it's the shared prerequisite both remaining gated facades need (`Capture`/`Enumerator` both call `require_target` at Action-start, per 'Allowlist gate' above). Do it before either of them rather than letting one implement a throwaway stand-in.
+Two things Phase 1 shipped that this design doc didn't originally anticipate, now load-bearing enough to know about before touching Phase 2: `Pacer` (`jobs.py`), a small rate-gate reused by every "poll a clean on-disk artifact instead of a live stream" driver loop; and the mark_terminal-must-run-last ordering invariant (see "Cancellation" above) — get either wrong again in new driver code and it'll reproduce the same class of race that bit Capture/Crack's own acceptance tests.
 
-After that: `core/capture.py` — the next real milestone, not another small slice. It's the only `Handshake` mint site, drives two tools (`airodump-ng` + `aireplay-ng`) instead of Discovery's one, and is where ADR-0001's audit requirement actually bites (`DeauthFired` must be logged before the event fires, per 'SQLite and the event stream' above) — worth planning its own headless test fixtures (scripted deauth-then-handshake CSV output) before dispatching implementation, the same way the Discovery slice's CSV field-layout contract was pinned up front rather than left to whoever implemented it. `core/crack.py` naturally follows once `Capture` can produce a real `Handshake` to feed it. `core/enumerate.py` only depends on `Allowlist`, so it can happen in either order relative to `Capture`/`Crack`. `core/privilege.py` (real `sudo` invocation) and `core/reconciliation.py` stay last — both need genuine subprocess/sudo code, which every prior slice has deliberately deferred, and reconciliation specifically needs `Capture` to exist first for its "unlogged deauth bursts" scenario to mean anything.
+Next: **Phase 2**, per `docs/roadmap.md`'s own Phase 2 list — `privilege.py` (real `sudo`; decide its testing strategy explicitly, there's no `ProcRunner`-shaped seam for it yet), `procutil.py`'s real `SubprocessRunner.spawn` + `rf.py`'s real `airmon-ng` calls (paired, since one is what the other would spawn through), `Engine.shutdown()`, `reconciliation.py` (ADR-0004), giving each driver thread its own SQLite connection (closes the deeper half of the race mentioned above — "SQLite and the event stream" still describes this as the *intended* end state, not yet reality), and re-checking Capture's handshake-detection assumption against real `aircrack-ng` output. This is the point where `FakeProcRunner`-only development stops being sufficient — expect to need actual hardware and root to validate it, not just `pytest`.
