@@ -10,12 +10,11 @@ first test does, then grabs HandshakeCaptured's .handshake before ever
 touching Crack. _capture_handshake() below is that recipe, factored out since
 all three Crack scenarios need it.
 
-Three real-thread-timing subtleties apply here -- the first two are the ones
-test_capture_acceptance.py documents too, but checked here against what
-crack.py's own _drive actually does rather than assumed by analogy; the third
-is new, found while making these tests pass reliably:
+One real-thread-timing subtlety applies here, the same one
+test_capture_acceptance.py documents, checked here against what crack.py's own
+_drive actually does rather than assumed by analogy:
 
-1. Cancellation race (identical to test_capture_acceptance.py point 2): a
+1. Cancellation race (identical to test_capture_acceptance.py point 1): a
    plain, instantly-iterable scripted hashcat stdout lets the driver thread's
    loop exhaust before this thread's next line (the .cancel() call) ever runs,
    for the same threading.Thread.start()-hands-off-the-CPU reason documented
@@ -24,46 +23,14 @@ is new, found while making these tests pass reliably:
    so cancellation reliably lands mid-loop instead of racing an already-
    exhausted stream.
 
-2. Terminal-event race -- checked, and it does NOT apply to CrackResult, for
-   a reason specific to what crack.py's _drive actually does (this is NOT the
-   same conclusion test_capture_acceptance.py draws for CaptureStopped, so
-   don't copy that file's _wait_until()-after-wait_for_test() pattern here
-   without re-deriving it):
-
-   crack.py's _drive finally block calls `self._bus.publish(CrackResult(...))`
-   BEFORE `self._jobs.mark_terminal(job_id)` -- both on the *same* driver
-   thread, with nothing async in between. EventBus.publish() is documented
-   (events.py) and implemented to be synchronous: "publish() does not return
-   until every subscriber has been called". mark_terminal() is what sets the
-   threading.Event that JobHandle.wait_for_test() blocks on (jobs.py). So by
-   the time _drive reaches mark_terminal(), publish(CrackResult) has already
-   fully returned -- every subscriber (including a plain list.append here)
-   has already run. wait_for_test() returning is therefore already proof
-   CrackResult has been observed; no extra polling helper is needed for it.
-
-   (This is actually also true of capture.py's current _drive, which publishes
-   CaptureStopped before calling mark_terminal the same way -- but
-   test_capture_acceptance.py's own module docstring still describes the
-   opposite, pre-fix ordering for Capture and polls anyway via _wait_until().
-   That docstring looks stale relative to the code it's next to; out of scope
-   to fix here since capture.py/test_capture_acceptance.py aren't files this
-   task touches. Verified empirically too: this file's tests pass repeatedly,
-   with no _wait_until()-style helper, using wait_for_test() alone.)
-
-3. A different, genuinely pre-existing race, one level down from either of the
-   above: JobRegistry.mark_terminal (jobs.py, out of scope to fix here) calls
-   `event.set()` -- what unblocks wait_for_test() -- *before* its own
-   `self._repo.mark_terminal(job_id)` DB delete+commit, against the single
-   shared, unlocked sqlite3 connection every driver thread on an Engine writes
-   through (db.py's Database docstring already flags that sharing as
-   provisional). test_capture_acceptance.py never exercises this, because
-   nothing there starts a second job on the same Engine immediately after
-   wait_for_test() on a first one -- but cracking is exactly that shape
-   (capture a Handshake, then immediately crack it), so _capture_handshake()
-   below adds a short real settle sleep after wait_for_test() to avoid
-   engine.crack.start()'s JobRepository write landing while Capture's driver
-   thread is still mid-mark_terminal. See _capture_handshake()'s own docstring
-   for the full account, including the exact exception this reproduced.
+(Terminal-event ordering was checked too: crack.py's _drive finally block
+calls self._bus.publish(CrackResult(...)) before self._jobs.mark_terminal(),
+and EventBus.publish() is synchronous, so wait_for_test() returning is already
+proof CrackResult has been observed -- no polling helper needed for it. A
+separate, genuinely pre-existing bug was found this way -- JobRegistry.mark_terminal
+was setting its event before its own DB write committed, which could race a
+second job's write on the shared sqlite3 connection -- and has since been
+fixed in jobs.py itself; no test-side workaround needed here anymore.)
 """
 
 from __future__ import annotations
@@ -171,35 +138,15 @@ def _capture_handshake(engine: Engine, target):
     first test. HandshakeCaptured itself fires mid-loop, strictly before the
     loop can exit -- same reasoning as that file's DeauthFired note -- so
     wait_for_test() returning is already enough proof *that* has happened, no
-    extra settling needed for it.
-
-    The settle sleep below is for a different, genuinely pre-existing race,
-    found while making this file's tests pass reliably: JobRegistry.mark_terminal
-    (jobs.py) calls `event.set()` -- what unblocks wait_for_test() -- *before*
-    `self._repo.mark_terminal(job_id)`, its own DB delete+commit against the
-    single shared, unlocked sqlite3 connection (db.py's Database docstring
-    already flags that sharing as provisional: "each job-DRIVER thread is
-    eventually meant to open its own separate connection... not the case yet
-    for this milestone's drivers"). Nothing in test_capture_acceptance.py ever
-    exercises this, since nothing there starts a second job on the same Engine
-    immediately after wait_for_test() on a first one -- but Crack usage is
-    exactly that shape (capture a Handshake, then immediately crack it), and
-    without a settle here, engine.crack.start()'s own JobRepository write can
-    land while Capture's driver thread is still mid-mark_terminal, racing on
-    the shared connection (observed directly: a real, intermittent
-    sqlite3.OperationalError: "cannot commit - no transaction is active").
-    jobs.py/db.py are out of scope for this task to fix, so this is a
-    test-side settle, not a production fix -- same idiom as
-    test_capture_acceptance.py's own PRE_CANCEL_SETTLE_S for a different real
-    thread-timing race."""
+    extra settling needed for it. (An earlier version of this helper also
+    slept here to work around a since-fixed jobs.py race -- see the module
+    docstring's parenthetical -- no longer needed now that mark_terminal()
+    itself orders its DB write before its event.)"""
     captured: list[HandshakeCaptured] = []
     subscription = engine.subscribe(captured.append, HandshakeCaptured)
     handle = engine.capture.start_passive(target)
     handle.wait_for_test(timeout=2.0)
     subscription.unsubscribe()
-    time.sleep(PRE_CANCEL_SETTLE_S)  # see docstring above -- lets Capture's
-    # driver thread finish its own mark_terminal DB write before this test
-    # starts a second job (Crack) on the same shared connection.
     assert len(captured) == 1
     return captured[0].handshake
 
