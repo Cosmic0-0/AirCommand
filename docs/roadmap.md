@@ -34,24 +34,37 @@ race; it does **not** fix the deeper issue that every driver thread still
 shares one unsynchronized connection (see `persistence/db.py`'s `Database`
 docstring) — that's real, pre-existing, and still open, see Phase 2 below.
 
-**Phase 2 is under way.** Items 0, 1, and 4 (below) are done. Items 2 and 3 are
-designed and pinned as exact TODOs in `engine.py`/`reconciliation.py`, ready to
-dispatch, but not yet implemented. Item 5 is blocked on real hardware this
-development machine doesn't have. See "Phase 2" below for the authoritative,
-up-to-date state of each item — this paragraph is a pointer, not a duplicate.
+**Phase 2 is complete except item 5.** Items 0, 1, 2, 3, and 4 (below) are all
+done — `Engine.shutdown()` and `reconciliation.py` (items 2/3, ADR-0004)
+landed in the same session that also confirmed real `aircrack-ng`/`hashcat`/
+`nmap` and a real monitor-mode-capable adapter are now present on this machine
+(see the constraints paragraph below, updated to match — it was stale relative
+to item 1's own entry further down before this update). Item 5 is no longer
+blocked on missing tools/hardware, but still needs the user driving it
+hands-on (a real terminal for `sudo`, and an authorized Target network they
+nominate themselves) — not something a future headless session can pick up
+unattended. See "Phase 2" below for the authoritative, up-to-date state of
+each item — this paragraph is a pointer, not a duplicate.
 
-**This machine's real constraints (confirmed via `lsusb`/`rfkill`/`dpkg`, not
-assumed) — relevant to which Phase 2 items can be genuinely validated here, not
-just implemented against `FakeProcRunner`:** real Linux Mint, not a VM. No
-`aircrack-ng`/`airodump-ng`/`aireplay-ng`/`airmon-ng`/`hashcat`/`nmap` installed
-(available via `apt`, just not installed). No external wifi adapter attached.
-`sudo` is not passwordless. Items 0, 1, and 4 needed none of that (privilege
-priming's own test strategy, the subprocess/RF plumbing's unit tests, and the
-DB connection-per-thread work are all pure Python/SQLite/threading, fully
-testable headlessly) — but their real-hardware, real-`sudo` paths are still
-unverified hands-on, and item 5 is fully blocked until real hardware is
-available. Say so explicitly whenever a future item needs it and can't get it,
-rather than claiming something works that was only run against `FakeProcRunner`.
+**This machine's real constraints, updated — CHANGED since this paragraph
+originally shipped, don't trust an older copy:** real Linux Mint, not a VM.
+`aircrack-ng`, `hashcat`, and `nmap` are now installed (`sudo apt install
+aircrack-ng hashcat nmap`), and a real monitor-mode-capable USB adapter is now
+plugged in (Ralink RT2870/RT3070, `rt2800usb` driver, shows up as
+`wlx24050f7d7ae0` in managed mode; renames to `wlan0mon` under `airmon-ng
+start` — see item 1's own entry below for the real bug this surfaced and
+fixed). Real hands-on hardware validation is genuinely possible on this
+machine now, not just headless `pytest`. `sudo` is still NOT passwordless
+(`sudo -n true` fails), and Claude Code's `!`-prefixed inline shell mechanism
+does not allocate a TTY, so `sudo` cannot prompt for a password through it —
+any real privileged command needs the user to open an actual separate
+terminal window themselves, run it there, and paste the output back. Items
+0-4 needed none of that (all fully headlessly testable — see each item's own
+entry below, including items 2/3's own new tests); item 5 is the one item
+whose own scope IS real hands-on hardware validation, and it's now genuinely
+actionable rather than categorically blocked. Say so explicitly whenever an
+item needs real `sudo`/hardware and can't get it in-session, rather than
+claiming something works that was only run against `FakeProcRunner`.
 
 ## The process (already in CLAUDE.md — restated briefly because it matters)
 
@@ -422,32 +435,71 @@ own `_make_enumerator()` helper (bypasses `Engine`, constructs `Enumerator`
 directly) also needed a `new_connection_scope` argument added — a real gap from
 item 4's own constructor-signature change, not item 1's.
 
-### 2. `Engine.shutdown()` — pinned, not yet implemented
+### 2. `Engine.shutdown()` [DONE]
 
-Still `raise NotImplementedError`, with an exact TODO already pinned in
-`engine.py`: cancel live jobs, wait briefly for their terminal events, stop
-`SightingBatcher`, stop the keepalive, close the DB. Depends on `privilege.py`
-(item 0, done — needs `self.privilege.stop()`). Ready to dispatch as its own
-slice; see the end of this doc for the handoff prompt.
+Implemented exactly per the pinned TODO: cancel every active job
+(`self._jobs.active_job_ids()` + `cancel()` each), wait up to
+`SHUTDOWN_JOB_WAIT_TIMEOUT_S` (5.0s) for each to reach terminal, stop
+`SightingBatcher` (final flush), release the adapter to managed mode, stop
+`self.privilege` (after waiting for jobs, not before — a privileged job's own
+cancellation path still needs `run_privileged` while being cancelled), close
+the DB last. `tests/test_engine.py` (new): a real `Engine` + `FakeProcRunner`,
+same style as the acceptance tests — one test starts a slow-scripted passive
+Capture job, calls `shutdown()`, and asserts the job reached
+`StopReason.CANCELLED`, the adapter was released to managed mode (a real
+`airmon-ng stop` spawn observed via `on_spawn`), `self.privilege`'s real
+keepalive thread (started via a module-level-patched `subprocess.run`, same
+technique as `tests/test_privilege.py`) actually stopped, and
+`engine._db._conn` is closed (`sqlite3.ProgrammingError` on a query against
+it); a second test covers the "nothing running" case (`shutdown()` on a
+freshly-constructed `Engine` completes promptly with no errors). No bugs found
+implementing this one — the ordering was already fully decided by the pinned
+TODO and its inline comments.
 
-### 3. `reconciliation.py` (ADR-0004) — pinned, not yet implemented
+### 3. `reconciliation.py` (ADR-0004) [DONE]
 
-Still `raise NotImplementedError`, with an exact TODO already pinned in
-`reconciliation.py`. Needs `privilege.py` (done), the real `SubprocessRunner`
-(done), and realistically `capture.py` (the "unlogged deauth bursts" scenario
-it exists for doesn't mean anything without Capture — done since Phase 1). Also
-needs `procutil.py`'s `is_process_group_alive`/`terminate_process_group`/
-`_send_signal_unprivileged` (Linux `/proc` parsing — already implemented as
-part of item 1, not a remaining gap).
+`reconcile_orphaned_processes()` and `_send_signal_unprivileged()` implemented
+exactly per their pinned TODOs — the fingerprint-checked find/signal/mark-
+terminal loop, and a plain `os.killpg` for the unprivileged path respectively.
+`tests/test_reconciliation.py` (new), following the roadmap's own testing
+strategy rather than inventing one: a real `JobRegistry`/`Database`, a real
+short-lived unprivileged subprocess (`python3 -c "import time; time.sleep(30)"`,
+`start_new_session=True`) with its real pid/pgid/fingerprint recorded via
+`jobs.record_process(...)` (matching what a real `_drive` does), then
+`reconcile_orphaned_processes(...)` called for real — asserts the process is
+actually dead (`popen.wait()`/`.returncode`) and the job row is gone
+(`find_stale_jobs() == []`); no mocking needed for that path, since the
+unprivileged `send_unprivileged` really is `os.killpg` against this test's own
+process, not faked. The one path that can't be exercised with real root on
+this machine — `PermissionError` → `send_privileged` fallback — is tested by
+monkeypatching `_send_signal_unprivileged` to raise `PermissionError`, with the
+injected `run_privileged` stand-in still performing a real `os.killpg` itself
+so the process's actual death is proof the routing works, not just that a mock
+recorded a call (same spirit as `test_procutil.py`'s own privileged-handle
+test). Also covered: no-stale-jobs (still publishes
+`StartupReconciliationCompleted` with zero counts), a stale row with no
+recorded process at all (pid/pgid `None` — nothing to kill, only the row to
+clear), and a stale row whose recorded pgid no longer exists (row still
+cleared, `processes_terminated` stays 0). No new bugs found in this slice
+itself — the two already-documented ones below (privileged-signal routing, the
+`--` fix) were caught earlier, by item 1's own work, and the pinned TODO
+already had both fixes baked in; this slice just implemented it literally.
 
-**Load-bearing bug already found and fixed, don't reintroduce it**: signaling a
-privileged (root-owned) process group requires routing through
+**Load-bearing bug already found and fixed earlier, don't reintroduce it**:
+signaling a privileged (root-owned) process group requires routing through
 `run_privileged` (Unix signal permission is UID-based, not parent/child-based),
 and the real `/usr/bin/kill` binary needs `--` before a negative PGID
 (`kill -15 -- -<pgid>`) — omitting it silently exits 0 without signaling
-anything. Both fixed in `procutil.py`'s shipped code; `reconciliation.py`'s own
-pinned TODO already reflects the fix. See `procutil.py`'s `_RealProcHandle`
-docstring for the full story.
+anything. Both fixed in `procutil.py`'s shipped code; `reconciliation.py`'s
+implementation (above) carries the same fix. See `procutil.py`'s
+`_RealProcHandle` docstring for the full story.
+
+Real hands-on validation of this module's *privileged* path (a real root-owned
+orphan, actually killed via real `sudo`) is still unverified — same caveat as
+every other Phase 2 item's real-`sudo` path (see the constraints paragraph
+above). Not blocking: the routing logic itself is genuinely tested (see
+above), and full end-to-end proof needs the user's own real-terminal `sudo`
+session, same as item 5.
 
 ### 4. Give each job-driver thread its own SQLite connection [DONE]
 
@@ -506,13 +558,18 @@ timing out its full 5s rather than genuinely being woken. Fixed by having that
 background thread open its own `ConnectionScope`, matching the contract every
 real driver thread now follows.
 
-### 5. Re-check Capture's handshake-detection assumption against real output — blocked
+### 5. Re-check Capture's handshake-detection assumption against real output — not categorically blocked, not yet done
 
-Still open, and still blocked on real hardware this development machine
-doesn't have (see "Current state" above: no `aircrack-ng`, no adapter). See the
-flag in Phase 1's `capture.py` entry — the exact `aircrack-ng -b <bssid> -w
-/dev/null <cap_path>` invocation was researched, not run for real. Needs the
-user's own hands-on validation.
+No longer blocked on missing tools/hardware — `aircrack-ng` is installed and a
+real monitor-mode-capable adapter is plugged in (see the constraints paragraph
+above). Still not done, and still not something a headless session can pick up
+unattended: it needs the user driving it hands-on, in a real terminal (not
+Claude Code's `!`-prefixed inline shell, which has no TTY for `sudo` to prompt
+through — see the constraints paragraph), against a Target network they
+nominate themselves (Capture is gated — `engine.targets.add(...)` or whatever
+the eventual GUI/CLI surfaces first). See the flag in Phase 1's `capture.py`
+entry — the exact `aircrack-ng -b <bssid> -w /dev/null <cap_path>` invocation
+was researched, not run for real.
 
 ## Phase 3 — GUI
 
