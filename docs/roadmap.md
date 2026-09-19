@@ -34,8 +34,24 @@ race; it does **not** fix the deeper issue that every driver thread still
 shares one unsynchronized connection (see `persistence/db.py`'s `Database`
 docstring) — that's real, pre-existing, and still open, see Phase 2 below.
 
-**Next: Phase 2** — first real subprocess/hardware code. Nothing below this
-point has been started.
+**Phase 2 is under way.** Items 0, 1, and 4 (below) are done. Items 2 and 3 are
+designed and pinned as exact TODOs in `engine.py`/`reconciliation.py`, ready to
+dispatch, but not yet implemented. Item 5 is blocked on real hardware this
+development machine doesn't have. See "Phase 2" below for the authoritative,
+up-to-date state of each item — this paragraph is a pointer, not a duplicate.
+
+**This machine's real constraints (confirmed via `lsusb`/`rfkill`/`dpkg`, not
+assumed) — relevant to which Phase 2 items can be genuinely validated here, not
+just implemented against `FakeProcRunner`:** real Linux Mint, not a VM. No
+`aircrack-ng`/`airodump-ng`/`aireplay-ng`/`airmon-ng`/`hashcat`/`nmap` installed
+(available via `apt`, just not installed). No external wifi adapter attached.
+`sudo` is not passwordless. Items 0, 1, and 4 needed none of that (privilege
+priming's own test strategy, the subprocess/RF plumbing's unit tests, and the
+DB connection-per-thread work are all pure Python/SQLite/threading, fully
+testable headlessly) — but their real-hardware, real-`sudo` paths are still
+unverified hands-on, and item 5 is fully blocked until real hardware is
+available. Say so explicitly whenever a future item needs it and can't get it,
+rather than claiming something works that was only run against `FakeProcRunner`.
 
 ## The process (already in CLAUDE.md — restated briefly because it matters)
 
@@ -334,42 +350,141 @@ default of its own.
 
 ## Phase 2 — first real subprocess/hardware code
 
-Everything above can still be developed and tested with `FakeProcRunner` alone,
-exactly like Discovery. This phase is where that stops being true — do it as one
-connected unit, and expect to need actual hardware (a real adapter, real root) to
-validate it, not just `pytest`.
+Everything in Phase 1 could be developed and tested with `FakeProcRunner` alone,
+exactly like Discovery. This phase is where that stops being fully true — real
+hardware (a real adapter, real root) is needed to validate some items beyond
+`pytest`, though several items below turned out to be pure Python/SQLite/
+threading work, fully headlessly testable in spite of being "Phase 2." Numbered
+0-5 below — this numbering is now the canonical reference other docs/handoff
+prompts use, so keep it stable rather than renumbering.
 
-- **`privilege.py`** (`SudoSession`): `start`/`run_privileged`/`stop`/keepalive loop.
-  Decide the testing strategy explicitly before implementing — there's no existing
-  seam like `ProcRunner` for this; you'll likely need `unittest.mock.patch` on
-  `subprocess` directly, or a passwordless-sudo test environment. Don't leave this
-  implicit.
-- **`procutil.py`'s real `SubprocessRunner.spawn`** and **`rf.py`'s real
-  `airmon-ng` invocation inside `reserve()`/`release()`** (both currently
-  deliberately deferred, with comments saying so) — go together, since
-  `SubprocessRunner` is what `RadioController` would eventually spawn through.
-- **`Engine.shutdown()`** — still `raise NotImplementedError`. Do it once
-  `privilege.py` exists (it needs to call `self.privilege.stop()`): cancel live
-  jobs, wait briefly for their terminal events, stop `SightingBatcher`, stop the
-  keepalive, close the DB.
-- **`reconciliation.py`** (ADR-0004) — needs `privilege.py`, the real
-  `SubprocessRunner`, and realistically `capture.py` (the "unlogged deauth bursts"
-  scenario it exists for doesn't mean anything without Capture). Also needs
-  `procutil.py`'s `is_process_group_alive`/`terminate_process_group`/
-  `_send_signal_unprivileged` (Linux `/proc` parsing — already well-specified via
-  existing TODOs, lower risk than the items above).
-- **Re-check Capture's handshake-detection assumption against real output**, once
-  real hardware exists to check it against — see the flag in Phase 1's `capture.py`
-  entry. If it was implemented from research alone without full confidence, this is
-  where that gets settled for real, not guessed at again.
-- **Give each job-driver thread its own SQLite connection**, per `persistence/db.py`'s
-  `Database` docstring — already flagged as provisional there, now with a concrete
-  reason it's not just theoretical: see "Current state" above. `JobRegistry.mark_terminal`'s
-  own ordering bug is fixed, but every driver thread still writes through one shared,
-  unsynchronized `sqlite3.Connection`; a genuinely concurrent write from two real
-  driver threads (not just the wait_for_test()-mediated handoff that surfaced this)
-  is still an open risk once Phase 2 makes threads/timing real instead of
-  `FakeProcRunner`-fast.
+### 0. `privilege.py` (`SudoSession`) [DONE]
+
+`start`/`run_privileged`/`stop`/keepalive loop implemented and tested headlessly
+(`tests/test_privilege.py`) — no existing `ProcRunner`-style seam existed for
+this, so the testing strategy had to be decided explicitly rather than reused
+from elsewhere; see the test file itself for what was chosen. Real-`sudo`
+end-to-end behavior is still unverified hands-on — this machine's `sudo` isn't
+passwordless (see "Current state" above), so that path needs the user's own
+validation on real hardware.
+
+### 1. `procutil.py`'s real `SubprocessRunner.spawn` + `rf.py`'s real `airmon-ng` calls [DONE]
+
+Implemented together, tested headlessly (`tests/test_procutil.py`,
+`tests/test_rf.py`) — `RadioController.reserve()`/`release()` now really spawn
+`airmon-ng start`/`stop <adapter>` through the injected `ProcRunner`, parsed via
+`parse_airmon_monitor_interface` (researched, not hardware-confirmed — see
+`rf.py`'s own flag on whether airmon-ng renames the interface or switches it in
+place, driver-dependent).
+
+**Found only once item 4 (below) actually unblocked `Database` and let the
+Discovery/Capture/Enumerate *acceptance* tests run for the first time** (they
+build a whole `Engine`, so they'd never gotten past `Database.__init__` raising
+`NotImplementedError` before now): those acceptance tests' `FakeProcRunner`
+scripts predated this item's real `airmon-ng` spawn and had no `"airmon-ng"`
+entry, so every one of them `KeyError`'d the moment `reserve()` actually ran.
+Fixed by adding a no-rename-announcement `"airmon-ng"` script entry to each
+(`tests/test_capture_acceptance.py`, `tests/test_discovery_acceptance.py`,
+`tests/test_enumerate_acceptance.py`), matching the pattern `test_rf.py`
+already established, plus guarding two `on_spawn` callbacks
+(`_write_csv_on_spawn` in `test_discovery_acceptance.py`) that assumed they'd
+only ever be called for `"airodump-ng"` and broke once `"airmon-ng"` became a
+real, earlier spawn in the same test run. `tests/test_enumerate_acceptance.py`'s
+own `_make_enumerator()` helper (bypasses `Engine`, constructs `Enumerator`
+directly) also needed a `new_connection_scope` argument added — a real gap from
+item 4's own constructor-signature change, not item 1's.
+
+### 2. `Engine.shutdown()` — pinned, not yet implemented
+
+Still `raise NotImplementedError`, with an exact TODO already pinned in
+`engine.py`: cancel live jobs, wait briefly for their terminal events, stop
+`SightingBatcher`, stop the keepalive, close the DB. Depends on `privilege.py`
+(item 0, done — needs `self.privilege.stop()`). Ready to dispatch as its own
+slice; see the end of this doc for the handoff prompt.
+
+### 3. `reconciliation.py` (ADR-0004) — pinned, not yet implemented
+
+Still `raise NotImplementedError`, with an exact TODO already pinned in
+`reconciliation.py`. Needs `privilege.py` (done), the real `SubprocessRunner`
+(done), and realistically `capture.py` (the "unlogged deauth bursts" scenario
+it exists for doesn't mean anything without Capture — done since Phase 1). Also
+needs `procutil.py`'s `is_process_group_alive`/`terminate_process_group`/
+`_send_signal_unprivileged` (Linux `/proc` parsing — already implemented as
+part of item 1, not a remaining gap).
+
+**Load-bearing bug already found and fixed, don't reintroduce it**: signaling a
+privileged (root-owned) process group requires routing through
+`run_privileged` (Unix signal permission is UID-based, not parent/child-based),
+and the real `/usr/bin/kill` binary needs `--` before a negative PGID
+(`kill -15 -- -<pgid>`) — omitting it silently exits 0 without signaling
+anything. Both fixed in `procutil.py`'s shipped code; `reconciliation.py`'s own
+pinned TODO already reflects the fix. See `procutil.py`'s `_RealProcHandle`
+docstring for the full story.
+
+### 4. Give each job-driver thread its own SQLite connection [DONE]
+
+`persistence/db.py`'s `Database._resolve_path`/`_connect`/`new_connection_scope`
+and `ConnectionScope` (`__init__`/`close`), plus `persistence/sighting_batch.py`'s
+`SightingBatcher.start`/`.stop`/`._flush_loop`, are implemented per their
+already-pinned TODOs. Engine wiring, each `_drive()`'s own connection-scope
+usage, and `jobs.py`'s `repo:` override parameter were already in place from
+before this slice — see git history for exactly what landed when. Full suite:
+**120 passed, 0 failed** (114 from finishing this item's own scope + fixing the
+item-1 test-fixture gap above, plus 6 new tests: 5 for `ConnectionScope`/
+`new_connection_scope` in `tests/test_persistence_db.py`, 1 genuine concurrency
+stress test in `tests/test_crack_acceptance.py`).
+
+`":memory:"` (this project's own test-database convention) is rewritten in
+`_resolve_path` to a uniquely-named SQLite shared-cache URI
+(`file:aircommand-<uuid>?mode=memory&cache=shared`) — verified empirically that
+a bare `sqlite3.connect(":memory:")` gives each connection its own private,
+disconnected database, exactly backwards from what `new_connection_scope()`
+needs. A real file path passes through unchanged.
+
+**A second real bug was found by writing the concurrency stress test the
+original task asked for, not by reasoning about the design in the abstract**:
+the shared-cache URI above uses SQLite's table-level locking (not WAL's normal
+MVCC), because `PRAGMA journal_mode=WAL` against a shared-cache in-memory
+database silently downgrades to `'memory'` mode. Table-level lock contention
+raises `SQLITE_LOCKED` ("database table is locked"), a *different* error class
+from `SQLITE_BUSY` — `PRAGMA busy_timeout` only ever retries `SQLITE_BUSY`;
+`SQLITE_LOCKED` under shared-cache mode is normally cleared via SQLite's
+separate unlock-notify API, which Python's stdlib `sqlite3` module doesn't
+implement. Confirmed directly with a throwaway script (N threads, each its own
+connection onto one shared-cache in-memory database, writing concurrently):
+`"database table is locked"` reproduces reliably even with `busy_timeout=5000`
+already set. Fixed with `_RetryingConnection` (`persistence/db.py`), a thin
+`sqlite3.Connection` subclass used as every connection's `factory=` that
+retries `execute`/`commit` on `"locked"` `OperationalError`s for up to 5s. This
+is a **test-only concern in practice**: production never passes `":memory:"` as
+a real `db_path`, so it never enters shared-cache mode and never hits
+`SQLITE_LOCKED` this way — a real file-backed WAL connection's ordinary
+`SQLITE_BUSY` contention was already covered by `busy_timeout`, and the retry
+wrapper is a harmless no-op there. Without this fix, the stress test
+(`test_concurrent_crack_jobs_all_complete_with_distinct_results_and_no_sqlite_errors`)
+failed reliably, proving the fix does real work rather than just looking
+plausible.
+
+**A third, smaller bug found the same way**: `tests/test_jobs.py`'s
+`test_wait_for_terminal_blocks_until_another_thread_marks_terminal` predated
+this item and had its background thread call `registry.mark_terminal(job_id)`
+directly against the *main*-connection repo (`check_same_thread=True`, which
+this item made a real, enforced constraint) from a different thread — silently
+raising `sqlite3.ProgrammingError` inside that thread on every run, caught only
+as a `PytestUnhandledThreadExceptionWarning` (not a failure) because the test's
+own assertion (`elapsed >= 0.2`, no upper bound) happened to still hold even
+though the write never actually completed and `wait_for_terminal` was
+timing out its full 5s rather than genuinely being woken. Fixed by having that
+background thread open its own `ConnectionScope`, matching the contract every
+real driver thread now follows.
+
+### 5. Re-check Capture's handshake-detection assumption against real output — blocked
+
+Still open, and still blocked on real hardware this development machine
+doesn't have (see "Current state" above: no `aircrack-ng`, no adapter). See the
+flag in Phase 1's `capture.py` entry — the exact `aircrack-ng -b <bssid> -w
+/dev/null <cap_path>` invocation was researched, not run for real. Needs the
+user's own hands-on validation.
 
 ## Phase 3 — GUI
 

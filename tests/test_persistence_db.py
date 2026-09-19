@@ -1,5 +1,8 @@
+import sqlite3
 import uuid
 from datetime import datetime
+
+import pytest
 
 from aircommand.core.domain import EncryptionType, JobId, JobKind, MacAddress, Network
 from aircommand.core.persistence.db import Database
@@ -198,3 +201,73 @@ def test_target_get_returns_none_for_unknown_bssid():
     db = Database(":memory:")
 
     assert db.targets.get(MacAddress(value="00:00:00:00:00:00")) is None
+
+
+# --- ConnectionScope / new_connection_scope -- docs/roadmap.md Phase 2 item 4 ---
+
+
+def test_scope_written_row_is_visible_through_the_main_connection():
+    db = Database(":memory:")
+    bssid = MacAddress(value="AA:BB:CC:DD:EE:01")
+
+    scope = db.new_connection_scope()
+    try:
+        scope.targets.upsert(bssid, "Home-WiFi", 6, "My house")
+    finally:
+        scope.close()
+
+    # A second, independent connection (db's own) sees the write -- proves the
+    # shared-cache in-memory URI (_resolve_path) actually shares data across
+    # connections, not just within one.
+    stored = db.targets.get(bssid)
+    assert stored is not None
+    assert stored.ssid == "Home-WiFi"
+
+
+def test_main_connection_write_is_visible_through_a_new_scope():
+    db = Database(":memory:")
+    bssid = MacAddress(value="AA:BB:CC:DD:EE:01")
+    db.targets.upsert(bssid, "Home-WiFi", 6, "My house")
+
+    scope = db.new_connection_scope()
+    try:
+        stored = scope.targets.get(bssid)
+    finally:
+        scope.close()
+
+    assert stored is not None
+    assert stored.ssid == "Home-WiFi"
+
+
+def test_two_separate_in_memory_databases_do_not_share_a_cache():
+    db1 = Database(":memory:")
+    db2 = Database(":memory:")
+
+    db1.targets.upsert(MacAddress(value="AA:BB:CC:DD:EE:01"), "Home-WiFi", 6, "My house")
+
+    assert db2.targets.all() == []
+
+
+def test_scope_exposes_one_repository_instance_per_aggregate():
+    db = Database(":memory:")
+
+    scope = db.new_connection_scope()
+    try:
+        for attr in ("networks", "targets", "handshakes", "audit_log", "crack_results", "enum_results", "jobs"):
+            assert hasattr(scope, attr)
+    finally:
+        scope.close()
+
+
+def test_scope_close_closes_its_own_connection_not_the_main_one():
+    db = Database(":memory:")
+
+    scope = db.new_connection_scope()
+    scope.close()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        scope.conn.execute("SELECT 1")
+
+    # The main connection is a separate sqlite3.Connection -- closing a scope
+    # must not have touched it.
+    db._conn.execute("SELECT 1")

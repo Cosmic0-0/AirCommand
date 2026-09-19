@@ -59,12 +59,23 @@ def test_wait_for_terminal_returns_immediately_when_already_terminal():
 
 
 def test_wait_for_terminal_blocks_until_another_thread_marks_terminal():
-    registry = make_registry()
+    # Real driver threads call mark_terminal() through their OWN connection
+    # scope (persistence/db.py), never through the repo bound to the main
+    # connection (check_same_thread=True there is deliberate -- see Database's
+    # own docstring). This test's background thread mirrors that contract
+    # instead of reaching for `registry`'s main-connection repo cross-thread,
+    # which would raise sqlite3.ProgrammingError.
+    db = Database(":memory:")
+    registry = JobRegistry(db.jobs)
     job_id, _ = registry.new_job(JobKind.DISCOVERY)
 
     def mark_after_delay():
         time.sleep(0.2)
-        registry.mark_terminal(job_id)
+        scope = db.new_connection_scope()
+        try:
+            registry.mark_terminal(job_id, repo=scope.jobs)
+        finally:
+            scope.close()
 
     thread = threading.Thread(target=mark_after_delay)
     thread.start()

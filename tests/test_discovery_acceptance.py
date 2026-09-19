@@ -54,12 +54,23 @@ DISCOVERY_NOISE = [
     " BSSID              PWR RXQ  Beacons  #Data  CH  MB   ENC  CIPHER AUTH ESSID",
 ]
 
+# RadioController.reserve() now really spawns "airmon-ng" on its first
+# monitor-mode use (docs/roadmap.md Phase 2 item 1) -- every script below needs
+# an entry for it or FakeProcRunner KeyErrors. No rename-announcement line, so
+# parse_airmon_monitor_interface falls back to the original "wlan0" name.
+AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
+
 
 def _write_csv_on_spawn(argv: list[str]) -> None:
     """Simulates airodump-ng's --write-csv side effect: writes the real on-disk
     artifact _poll_csv reads, at the path airodump-ng itself would use (the
     --write-csv prefix argument, plus airodump-ng's own "-01.csv" suffix
-    convention -- see Discovery._drive)."""
+    convention -- see Discovery._drive). Guarded on "--write-csv" actually being
+    present since FakeProcRunner now fires on_spawn for every spawn, including
+    RadioController's own "airmon-ng start <adapter>" call (docs/roadmap.md
+    Phase 2 item 1), which carries no such flag."""
+    if "--write-csv" not in argv:
+        return
     prefix = argv[argv.index("--write-csv") + 1]
     Path(f"{prefix}-01.csv").write_text(CSV_CONTENT)
 
@@ -72,7 +83,10 @@ def test_discovery_polls_csv_file_not_stdout_for_networks(tmp_path):
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script={"airodump-ng": DISCOVERY_NOISE}, on_spawn=_write_csv_on_spawn),
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": DISCOVERY_NOISE},
+            on_spawn=_write_csv_on_spawn,
+        ),
         # Zero interval: Pacer.due() fires on every check, so every one of the
         # scripted noise lines above drives its own poll tick -- fast and
         # deterministic, no real sleeping needed to exercise several iterations.
@@ -109,7 +123,8 @@ def test_discovery_survives_csv_file_never_appearing(tmp_path):
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script={"airodump-ng": DISCOVERY_NOISE}),  # no on_spawn -- csv never written
+        # no on_spawn -- csv never written
+        proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": DISCOVERY_NOISE}),
         discovery_poll_interval=timedelta(seconds=0),
     )
 
