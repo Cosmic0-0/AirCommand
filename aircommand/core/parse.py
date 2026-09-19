@@ -123,22 +123,23 @@ def parse_nmap_xml(xml_bytes: bytes) -> tuple[EnumHost, ...]:
     """nmap -oX output -> the hosts/ports it found. nmap's XML schema (host/
     address/hostnames/hostname/ports/port/state) is stable and well-documented;
     unlike airodump/hashcat's output this one didn't need research to pin."""
-    raise NotImplementedError
-    # TODO: import xml.etree.ElementTree as ET
-    #   root = ET.fromstring(xml_bytes)
-    #   hosts = []
-    #   for host_el in root.findall("host"):
-    #     address_el = host_el.find("address")
-    #     if address_el is None: continue
-    #     hostname_el = host_el.find("hostnames/hostname")
-    #     open_ports = tuple(
-    #       int(port_el.get("portid"))
-    #       for port_el in host_el.findall("ports/port")
-    #       if (state_el := port_el.find("state")) is not None and state_el.get("state") == "open"
-    #     )
-    #     hosts.append(EnumHost(
-    #       ip=address_el.get("addr"),
-    #       hostname=hostname_el.get("name") if hostname_el is not None else None,
-    #       open_ports=open_ports,
-    #     ))
-    #   return tuple(hosts)
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_bytes)
+    hosts = []
+    for host_el in root.findall("host"):
+        address_el = host_el.find("address")
+        if address_el is None:
+            continue
+        hostname_el = host_el.find("hostnames/hostname")
+        open_ports = tuple(
+            int(port_el.get("portid"))
+            for port_el in host_el.findall("ports/port")
+            if (state_el := port_el.find("state")) is not None and state_el.get("state") == "open"
+        )
+        hosts.append(EnumHost(
+            ip=address_el.get("addr"),
+            hostname=hostname_el.get("name") if hostname_el is not None else None,
+            open_ports=open_ports,
+        ))
+    return tuple(hosts)
