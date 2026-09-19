@@ -32,7 +32,7 @@ from aircommand.core.domain import EnumOptions, JobKind, Target
 from aircommand.core.events import EventBus, NmapScanCompleted
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry
 from aircommand.core.parse import parse_nmap_xml
-from aircommand.core.persistence.db import EnumResultRepository
+from aircommand.core.persistence.db import ConnectionScope, EnumResultRepository
 from aircommand.core.procutil import ProcRunner
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
@@ -64,14 +64,16 @@ class Enumerator:
         jobs: JobRegistry,
         rf: RadioController,
         proc: ProcRunner,
+        new_connection_scope: Callable[..., ConnectionScope],
         get_subnet: Callable[[str], str] = get_interface_subnet,
     ) -> None:
         self._allowlist = allowlist
-        self._repo = repo
+        self._repo = repo  # main-connection repo -- no reader method exists yet (see class docstring)
         self._bus = bus
         self._jobs = jobs
         self._rf = rf
         self._proc = proc
+        self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._get_subnet = get_subnet  # constructor-injected seam for testability,
         # same reasoning as ProcRunner/SudoSession.run_privileged — tests supply a
         # canned subnet instead of needing a real joined interface.
@@ -92,6 +94,9 @@ class Enumerator:
         target: Target,
         options: EnumOptions,
     ) -> None:
+        # This thread's own connection -- never self._repo (the main connection)
+        # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
+        db_scope = self._new_connection_scope()
         try:
             subnet = self._get_subnet(reservation.adapter)   # see module docstring — Option A;
             # lets an OSError here (interface not yet joined to anything) propagate, same as any
@@ -99,16 +104,18 @@ class Enumerator:
             argv = ["nmap", "-oX", "-", *(["-p", options.ports] if options.ports else []),
                     *(["-sV"] if options.service_detection else []), subnet]
             handle = self._proc.spawn(argv, privileged=True)   # raw-socket scan types need sudo
-            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"nmap {target.bssid}")  # ADR-0004
+            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"nmap {target.bssid}",
+                                       repo=db_scope.jobs)  # ADR-0004
             xml = b"".join(l.encode() for l in handle.lines())   # nmap XML isn't line-streamable the
             # same way airodump CSV is; buffer to completion, or switch to a streaming XML parser later
             hosts = parse_nmap_xml(xml)
-            self._repo.insert(target_id=target.id, job_id=job_id, hosts=hosts)   # sync write, BEFORE the event
+            db_scope.enum_results.insert(target_id=target.id, job_id=job_id, hosts=hosts)   # sync write, BEFORE the event
             self._bus.publish(NmapScanCompleted(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                                  job_id=job_id, target_id=target.id, hosts=hosts))
         finally:
             self._rf.release(reservation)
-            self._jobs.mark_terminal(job_id)
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
+            db_scope.close()
 
         # Note: token/cancellation isn't actually checkable mid-scan here — nmap's -oX -
         # output is buffered to completion (see the xml= line above), not iterated line by

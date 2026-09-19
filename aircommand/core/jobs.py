@@ -98,15 +98,26 @@ class JobRegistry:
         self._repo.insert_running(job_id, kind, target_id)
         return job_id, token
 
-    def record_process(self, job_id: JobId, pid: int, pgid: int, fingerprint: str) -> None:
+    def record_process(
+        self, job_id: JobId, pid: int, pgid: int, fingerprint: str, *, repo: Optional[JobRepository] = None
+    ) -> None:
         """Called by a driver thread right after ProcRunner.spawn() succeeds — not
         at new_job() time, since the PID doesn't exist yet then. This is what lets
         a crash between spawn and normal completion still leave enough in the DB
         for reconcile_orphaned_processes() to find and safely identify the orphan
         (see ADR-0004). Jobs with no privileged subprocess (e.g. between RF
         reservation and spawn) simply never call this — their StaleJob will have
-        pid=None, and reconciliation just marks them terminal with nothing to kill."""
-        self._repo.record_process(job_id, pid, pgid, fingerprint)
+        pid=None, and reconciliation just marks them terminal with nothing to kill.
+
+        `repo`, if given, is used INSTEAD of this registry's own (main-connection)
+        repo — every job-driver thread passes its own ConnectionScope.jobs here
+        (persistence/db.py), since this call happens FROM WITHIN that thread, not
+        the thread that constructed Engine. Defaults to the main repo only for
+        callers that have no scope of their own (there currently are none in
+        production code — every _drive already has a scope by the time it calls
+        this — but new_job()/find_stale_jobs() below intentionally have no such
+        parameter at all, since those two are ALWAYS main-thread calls)."""
+        (repo or self._repo).record_process(job_id, pid, pgid, fingerprint)
 
     def cancel(self, job_id: JobId) -> None:
         with self._lock:
@@ -114,22 +125,39 @@ class JobRegistry:
         if token is not None:
             token.cancel()
 
-    def mark_terminal(self, job_id: JobId) -> None:
+    def mark_terminal(self, job_id: JobId, *, repo: Optional[JobRepository] = None) -> None:
         # The DB write happens BEFORE the in-memory event is set, deliberately:
         # event.set() is what unblocks JobHandle.wait_for_test() (and, in spirit,
         # any future external "is this job done" signal), so a caller waking on
         # it must be able to trust the row is already gone -- not race a second
-        # job's write against this one's still-in-flight commit on the shared
-        # sqlite3 connection (see persistence/db.py's Database docstring: driver
-        # threads share one connection today). Found for real via Capture/Crack's
+        # job's write still in flight. Found for real via Capture/Crack's
         # acceptance tests, which start a second job immediately after the first
-        # one's wait_for_test() returns -- exactly the shape that raced.
-        self._repo.mark_terminal(job_id)
+        # one's wait_for_test() returns -- exactly the shape that raced back when
+        # every driver thread shared one unsynchronized connection; each driver
+        # thread using its own connection (see `repo` below and
+        # persistence/db.py's ConnectionScope) closes the underlying gap, but
+        # this ordering is kept regardless -- it's also what makes mark_terminal
+        # a safe "everything about this job is now durable" signal on its own.
+        #
+        # `repo`: see record_process's docstring above -- same reasoning, same
+        # default.
+        (repo or self._repo).mark_terminal(job_id)
         with self._lock:
             self._tokens.pop(job_id, None)
             event = self._terminal_events.get(job_id)
             if event is not None:
                 event.set()
+
+    def active_job_ids(self) -> list[JobId]:
+        """Snapshot of every job currently tracked here (has a live
+        CancellationToken; hasn't reached mark_terminal() yet). In-memory only,
+        same as the tokens/events it reads -- not reconstructable after a crash,
+        which is fine (see this class's own docstring: startup reconciliation
+        works from `repo`'s persisted state, not from this). Added for
+        Engine.shutdown(), which needs to cancel and wait for everything still
+        running before closing the DB."""
+        with self._lock:
+            return list(self._tokens.keys())
 
     def find_stale_jobs(self) -> list[StaleJob]:
         """DB-only read: job rows left behind by a prior process. This process's

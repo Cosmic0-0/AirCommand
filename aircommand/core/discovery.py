@@ -8,12 +8,13 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from aircommand.core.domain import DiscoveryOptions, JobKind, Network
 from aircommand.core.events import EventBus, NetworkDiscovered, NetworkSightingUpdated
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry, Pacer
 from aircommand.core.parse import parse_airodump_csv_line
-from aircommand.core.persistence.db import NetworkRepository
+from aircommand.core.persistence.db import ConnectionScope, NetworkRepository
 from aircommand.core.procutil import ProcRunner
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
@@ -33,14 +34,16 @@ class Discovery:
         rf: RadioController,
         proc: ProcRunner,
         work_dir: Path,
+        new_connection_scope: Callable[..., ConnectionScope],
         poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
     ) -> None:
-        self._repo = repo
+        self._repo = repo  # main-connection repo -- list_networks() (main-thread read) only
         self._bus = bus
         self._jobs = jobs
         self._rf = rf
         self._proc = proc
         self._work_dir = work_dir
+        self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._poll_interval = poll_interval
 
     def start(self, options: DiscoveryOptions = DiscoveryOptions()) -> JobHandle:
@@ -70,11 +73,17 @@ class Discovery:
         # appends "-01.csv" (incrementing if the file already exists) itself.
         csv_path = Path(f"{csv_prefix}-01.csv")
         pacer = Pacer(self._poll_interval)
+        # This thread's own connection -- never self._repo (the main connection)
+        # from in here. See persistence/db.py's Database/ConnectionScope
+        # docstrings: every job-driver thread gets its own connection now,
+        # instead of every driver sharing one unsynchronized sqlite3.Connection.
+        db_scope = self._new_connection_scope()
         try:
             handle = self._proc.spawn(
                 ["airodump-ng", "--write-csv", str(csv_prefix), adapter], privileged=True
             )
-            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}")
+            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}",
+                                       repo=db_scope.jobs)
             for _line in handle.lines():
                 # _line's CONTENT is deliberately unused -- see docs/roadmap.md
                 # Phase 1 item 0. handle.lines() still drives this loop for what
@@ -87,7 +96,7 @@ class Discovery:
                     handle.terminate()
                     break
                 if pacer.due():
-                    self._poll_csv(csv_path)
+                    self._poll_csv(csv_path, db_scope.networks)
         finally:
             # Must run even if a poll crashes the loop (e.g. a malformed-but-
             # BSSID-valid row — parse_airodump_csv_line deliberately lets that
@@ -95,9 +104,10 @@ class Discovery:
             # jobs row leak forever, and no later Discovery/Capture/Enumerate can
             # start.
             self._rf.release(reservation)
-            self._jobs.mark_terminal(job_id)
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
+            db_scope.close()
 
-    def _poll_csv(self, csv_path: Path) -> None:
+    def _poll_csv(self, csv_path: Path, networks: NetworkRepository) -> None:
         try:
             content = csv_path.read_text()
         except FileNotFoundError:
@@ -107,7 +117,7 @@ class Discovery:
             network = parse_airodump_csv_line(line)
             if network is None:
                 continue
-            is_new = self._repo.upsert_returns_is_new(network)
+            is_new = networks.upsert_returns_is_new(network)  # this thread's own db_scope, not self._repo
             event_type = NetworkDiscovered if is_new else NetworkSightingUpdated
             self._bus.publish(event_type(event_id=uuid.uuid4(), occurred_at=datetime.now(), network=network))
         # airodump-ng rewrites <prefix>-01.csv in place each refresh cycle

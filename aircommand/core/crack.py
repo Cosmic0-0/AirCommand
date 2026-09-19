@@ -9,13 +9,13 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from aircommand.core.domain import Aborted, CrackResultRow, Exhausted, Found, Handshake, StopReason
 from aircommand.core.events import CrackProgress, CrackResult, CrackStarted, EventBus
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobKind, JobRegistry
 from aircommand.core.parse import parse_hashcat_status_line
-from aircommand.core.persistence.db import CrackResultRepository
+from aircommand.core.persistence.db import ConnectionScope, CrackResultRepository
 from aircommand.core.procutil import ProcRunner
 
 # hashcat's default --outfile-format includes the hash alongside the plaintext
@@ -38,11 +38,13 @@ class Crack:
         bus: EventBus,
         jobs: JobRegistry,
         proc: ProcRunner,
+        new_connection_scope: Callable[..., ConnectionScope],
     ) -> None:
-        self._repo = repo
+        self._repo = repo  # main-connection repo -- list_results() (main-thread read) only
         self._bus = bus
         self._jobs = jobs
         self._proc = proc
+        self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
 
     def start(self, handshake: Handshake, wordlist_path: Path) -> JobHandle:
         # No allowlist re-check — handshake.target_id is the proof (see module docstring).
@@ -68,6 +70,9 @@ class Crack:
         # that (already-known-writable) location rather than adding a work_dir param
         # to Crack just for this one file.
         outfile_path = handshake.cap_file_path.parent / f"{job_id}-hashcat.outfile"
+        # This thread's own connection -- never self._repo (the main connection)
+        # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
+        db_scope = self._new_connection_scope()
         try:
             handle = self._proc.spawn(
                 ["hashcat", "-m", "22000", str(handshake.cap_file_path), str(wordlist_path),
@@ -76,7 +81,7 @@ class Crack:
                 privileged=False)
             # ADR-0004 — unprivileged orphan, cleaned up the same way, just never needs the sudo fallback path.
             self._jobs.record_process(job_id, handle.pid, handle.pgid,
-                f"hashcat {handshake.cap_file_path}")
+                f"hashcat {handshake.cap_file_path}", repo=db_scope.jobs)
             for line in handle.lines():
                 if token.is_cancelled():
                     handle.terminate()
@@ -98,8 +103,9 @@ class Crack:
                        else Aborted() if token.is_cancelled()
                        else Exhausted())
             stop_reason = StopReason.CANCELLED if token.is_cancelled() else StopReason.COMPLETED
-            row = self._repo.insert(handshake_id=handshake.id, outcome=outcome, wordlist_path=wordlist_path,
-                started_at=started_at, finished_at=datetime.now(), stop_reason=stop_reason)  # sync write
+            row = db_scope.crack_results.insert(handshake_id=handshake.id, outcome=outcome,
+                wordlist_path=wordlist_path, started_at=started_at, finished_at=datetime.now(),
+                stop_reason=stop_reason)  # sync write
             self._bus.publish(CrackResult(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                            job_id=job_id, result=row))   # DurableEvent
             # mark_terminal LAST, deliberately, same reason as capture.py's _drive: it's
@@ -107,4 +113,5 @@ class Crack:
             # caller that wakes on mark_terminal should be able to trust the event already
             # fired, not race it. (This ordering bug was found for real in Capture's
             # acceptance tests; apply the fix here too, don't reintroduce it.)
-            self._jobs.mark_terminal(job_id)
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
+            db_scope.close()
