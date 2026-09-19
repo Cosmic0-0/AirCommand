@@ -115,12 +115,21 @@ class JobRegistry:
             token.cancel()
 
     def mark_terminal(self, job_id: JobId) -> None:
+        # The DB write happens BEFORE the in-memory event is set, deliberately:
+        # event.set() is what unblocks JobHandle.wait_for_test() (and, in spirit,
+        # any future external "is this job done" signal), so a caller waking on
+        # it must be able to trust the row is already gone -- not race a second
+        # job's write against this one's still-in-flight commit on the shared
+        # sqlite3 connection (see persistence/db.py's Database docstring: driver
+        # threads share one connection today). Found for real via Capture/Crack's
+        # acceptance tests, which start a second job immediately after the first
+        # one's wait_for_test() returns -- exactly the shape that raced.
+        self._repo.mark_terminal(job_id)
         with self._lock:
             self._tokens.pop(job_id, None)
             event = self._terminal_events.get(job_id)
             if event is not None:
                 event.set()
-        self._repo.mark_terminal(job_id)
 
     def find_stale_jobs(self) -> list[StaleJob]:
         """DB-only read: job rows left behind by a prior process. This process's
