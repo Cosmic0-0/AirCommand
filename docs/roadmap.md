@@ -573,25 +573,45 @@ was researched, not run for real.
 
 ## Phase 3 — GUI
 
-**Do not treat this as a normal slice to scope-and-dispatch.** `gui/event_pump.py`
-is actually fine to implement normally — `GuiEventPump.on`/`_tick` are already
-precisely specified (dict-append, drain-and-dispatch-with-job-filtering,
-self-rescheduling via `root.after`) and can go through the same process as any core
-slice. But `gui/app.py` is a 49-line stub whose entire widget tree — the networks
-table, target picker, capture panel, audit log view, crack progress + wordlist
-picker, status bar, the sudo password dialog — doesn't exist anywhere, not even as
-stub files. `docs/design/core-gui-boundary.md` deliberately only covers the
-core/GUI *boundary*; it was never meant to specify the GUI's own internal structure.
+**The GUI's internal-structure design pass is done.** See
+`docs/design/gui-structure.md`: every view (`NetworksView`, `TargetPicker`,
+`TargetSelector`, `CapturePanel`, `EnumeratePanel`, `HandshakePicker`/
+`WordlistPicker`/`CrackPanel`, `AuditLogView`, `StatusBar`, `SudoPasswordDialog`),
+its layout (a `StatusBar` + four-tab `CTkTabview`), its exact `GuiEventPump`
+subscriptions (job-scoped vs. global — see that doc's event subscription table),
+and what each seeds itself from at startup, is specified there. `gui/event_pump.py`
+itself was already fine to implement normally before this pass — `GuiEventPump.on`/
+`_tick` were already precisely specified (dict-append,
+drain-and-dispatch-with-job-filtering, self-rescheduling via `root.after`) — and
+still is; this pass didn't touch it.
 
-This needs its own architecture pass first — run `/architect` (or an equivalent
-planning conversation) scoped to "the GUI's internal structure: what views exist,
-how they're laid out, how each subscribes to `GuiEventPump`, what state each one
-seeds itself from at startup" — the same way the original core/GUI boundary got a
-dedicated design pass before any core implementation started. Only scope
-implementation slices out of GUI work once that design exists and is recorded
-(likely as a new `docs/design/gui-*.md` alongside the existing one, plus an ADR if
-it involves a real tradeoff). Don't let implementation pressure turn this into
-ad-hoc widget-by-widget improvisation.
+That design pass surfaced two real gaps in already-shipped core code (not GUI
+files) that block two of the specified views from being implementable as
+written — both pinned exactly, as their own small mechanical fixes, in
+`docs/design/gui-structure.md`'s "Gaps found & required core-side fixes"
+section: `ReconciliationSummary`/`StartupReconciliationCompleted` need to carry
+`interrupted_deauth_target_ids` (needed for the Audit Log tab's "may be
+incomplete" flag, per ADR-0004's own Consequences — the events.py docstring
+already claimed this was surfaced via `CaptureStopped`, but the shipped
+`JobRegistry.mark_terminal()` never publishes any event at all, so that claim
+doesn't match the code); and `Enumerator._drive` needs a new `EnumerationFailed`
+event, since `NmapScanCompleted` only publishes on the success path and
+`EnumeratePanel` otherwise has no way to leave its "Enumerating…" state on a
+failed scan (the most likely real case being the operator not having joined the
+Target's network yet, Option A's own accepted tradeoff — see item 3 above).
+Neither rose to ADR-worthy (neither decides between real alternatives — both
+close a gap against an already-decided ADR, or apply a pattern Capture/Crack's
+own drivers already use), so no new ADR was written; the design doc explains
+why for each.
+
+Only scope/dispatch GUI implementation slices from here — per the design doc's
+own "Next implementation step": the two core-side fixes first (small,
+self-contained, normal process), then `SudoPasswordDialog`+`StatusBar`+startup
+sequencing, then the Discovery & Targets tab, then the Target Actions tab (needs
+the `EnumerationFailed` fix landed first), then Crack, then Audit Log (needs the
+`ReconciliationSummary` fix landed first). Don't let implementation pressure turn
+this into ad-hoc widget-by-widget improvisation — the design doc's per-view
+sections are what each slice should be scoped against.
 
 ## What "done" looks like
 
