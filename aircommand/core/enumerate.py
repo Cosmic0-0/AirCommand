@@ -11,8 +11,9 @@ no credential storage. Tradeoff accepted: if the operator hasn't actually joined
 yet, get_interface_subnet raises (no address to read) and the scan job ends via
 the same "let an unexpected exception propagate past the finally cleanup" path
 every other driver already uses (see e.g. discovery.py's parse-error comment) —
-there's no dedicated "enumeration failed" event in events.py, and adding one is
-out of scope here. Option B (AirCommand manages the join itself, storing
+`events.py`'s `EnumerationFailed` is published (from `_drive`'s `except`
+clause) on any exception during the scan, subnet lookup failure being the most
+likely real case. Option B (AirCommand manages the join itself, storing
 credentials) was rejected — see docs/roadmap.md Phase 1 item 3 for the tradeoff.
 """
 
@@ -29,7 +30,7 @@ from typing import Callable
 
 from aircommand.core.allowlist import Allowlist
 from aircommand.core.domain import EnumOptions, JobKind, Target
-from aircommand.core.events import EventBus, NmapScanCompleted
+from aircommand.core.events import EnumerationFailed, EventBus, NmapScanCompleted
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry
 from aircommand.core.parse import parse_nmap_xml
 from aircommand.core.persistence.db import ConnectionScope, EnumResultRepository
@@ -112,6 +113,11 @@ class Enumerator:
             db_scope.enum_results.insert(target_id=target.id, job_id=job_id, hosts=hosts)   # sync write, BEFORE the event
             self._bus.publish(NmapScanCompleted(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                                  job_id=job_id, target_id=target.id, hosts=hosts))
+        except Exception as exc:
+            self._bus.publish(EnumerationFailed(event_id=uuid.uuid4(), occurred_at=datetime.now(),
+                                                 job_id=job_id, target_id=target.id, error=str(exc)))
+            raise   # unchanged control flow otherwise — still logged via the default
+                    # threading excepthook, still reaches `finally` below
         finally:
             self._rf.release(reservation)
             self._jobs.mark_terminal(job_id, repo=db_scope.jobs)

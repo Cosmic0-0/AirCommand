@@ -111,6 +111,14 @@ class NmapScanCompleted(DurableEvent):
     hosts: tuple[EnumHost, ...]
 
 
+@dataclass(frozen=True)
+class EnumerationFailed(DurableEvent):
+    job_id: JobId
+    target_id: int
+    error: str   # str(exc) — enough fidelity for display; the exception type
+                 # itself isn't a stable cross-boundary contract worth exposing.
+
+
 # --- Crack ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -156,15 +164,19 @@ class SudoKeepaliveRecovered(DurableEvent):
 
 @dataclass(frozen=True)
 class StartupReconciliationCompleted(DurableEvent):
-    """Published once, after Engine.reconcile_startup() finishes. A CAPTURE_DEAUTH
-    job among the cleaned-up ones surfaces via its own CaptureStopped event with
-    reason=INTERRUPTED_PRIOR_SESSION — read that as 'an unknown, unlogged number
-    of deauth bursts may have fired here' (see docs/design/core-gui-boundary.md),
+    """Published once, after Engine.reconcile_startup() finishes.
+    interrupted_deauth_target_ids carries the Target ids of every reconciled
+    CAPTURE_DEAUTH job — read a non-empty tuple as 'an unknown, unlogged number
+    of deauth bursts may have fired for these Targets between the crash and
+    this reconciliation' (see docs/design/core-gui-boundary.md and ADR-0004),
     since cleanup stops further firings but can't retroactively audit-log ones
     that already happened while nothing was watching."""
 
     stale_job_count: int
     processes_terminated: int
+    interrupted_deauth_target_ids: tuple[int, ...]   # mirrors ReconciliationSummary,
+    # for symmetry with any future non-GUI subscriber — the GUI itself uses the
+    # synchronous return value, not this event, at startup (see Status bar above).
 
 
 # --- Bus -------------------------------------------------------------------------------
