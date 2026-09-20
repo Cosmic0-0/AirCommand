@@ -142,11 +142,26 @@ def _capture_handshake(engine: Engine, target):
     extra settling needed for it. (An earlier version of this helper also
     slept here to work around a since-fixed jobs.py race -- see the module
     docstring's parenthetical -- no longer needed now that mark_terminal()
-    itself orders its DB write before its event.)"""
+    itself orders its DB write before its event.)
+
+    timeout=10.0, not 2.0: this is a genuinely fast, single-threaded, all-fake
+    path (no real subprocess, no real sleep) that normally completes in low
+    single-digit milliseconds -- but once the Phase 3 GUI test files joined the
+    suite (many real ctk.CTk()/CTkToplevel() windows created and destroyed
+    across dozens of tests), this call started intermittently taking multiple
+    real seconds and occasionally missing a 2.0s deadline, confirmed
+    reproducible (~50-100% of full-suite runs, depending on how many GUI tests
+    ran first) and confirmed to NOT be a raw-Python-thread-count effect (a
+    standalone repro spinning up 50 extra idle Engines showed zero measurable
+    slowdown) -- it's specifically tied to accumulated real Tk/X11 overhead
+    from many GUI tests run earlier in the same process, not a logic bug in
+    Capture's own driver. Same "generous relative to the normal case, still
+    bounded so a real bug fails loudly" reasoning as test_privilege.py's own
+    WAIT_TIMEOUT_S."""
     captured: list[HandshakeCaptured] = []
     subscription = engine.subscribe(captured.append, HandshakeCaptured)
     handle = engine.capture.start_passive(target)
-    handle.wait_for_test(timeout=2.0)
+    handle.wait_for_test(timeout=10.0)
     subscription.unsubscribe()
     assert len(captured) == 1
     return captured[0].handshake

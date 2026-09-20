@@ -589,36 +589,306 @@ That design pass surfaced two real gaps in already-shipped core code (not GUI
 files) that block two of the specified views from being implementable as
 written — both pinned exactly, as their own small mechanical fixes, in
 `docs/design/gui-structure.md`'s "Gaps found & required core-side fixes"
-section: `ReconciliationSummary`/`StartupReconciliationCompleted` need to carry
-`interrupted_deauth_target_ids` (needed for the Audit Log tab's "may be
-incomplete" flag, per ADR-0004's own Consequences — the events.py docstring
-already claimed this was surfaced via `CaptureStopped`, but the shipped
-`JobRegistry.mark_terminal()` never publishes any event at all, so that claim
-doesn't match the code); and `Enumerator._drive` needs a new `EnumerationFailed`
-event, since `NmapScanCompleted` only publishes on the success path and
-`EnumeratePanel` otherwise has no way to leave its "Enumerating…" state on a
-failed scan (the most likely real case being the operator not having joined the
-Target's network yet, Option A's own accepted tradeoff — see item 3 above).
-Neither rose to ADR-worthy (neither decides between real alternatives — both
-close a gap against an already-decided ADR, or apply a pattern Capture/Crack's
-own drivers already use), so no new ADR was written; the design doc explains
-why for each.
+section. Neither rose to ADR-worthy (neither decides between real alternatives —
+both close a gap against an already-decided ADR, or apply a pattern
+Capture/Crack's own drivers already use), so no new ADR was written; the design
+doc explains why for each.
 
-Only scope/dispatch GUI implementation slices from here — per the design doc's
-own "Next implementation step": the two core-side fixes first (small,
-self-contained, normal process), then `SudoPasswordDialog`+`StatusBar`+startup
-sequencing, then the Discovery & Targets tab, then the Target Actions tab (needs
-the `EnumerationFailed` fix landed first), then Crack, then Audit Log (needs the
-`ReconciliationSummary` fix landed first). Don't let implementation pressure turn
-this into ad-hoc widget-by-widget improvisation — the design doc's per-view
-sections are what each slice should be scoped against.
+Implementation is proceeding in the order the design doc's own "Next
+implementation step" lays out. Numbering below matches that order (0-6);
+follow it — don't let implementation pressure turn this into ad-hoc
+widget-by-widget improvisation, the design doc's per-view sections are what
+each slice should be scoped against.
+
+### 0. Two core-side gaps [DONE]
+
+`ReconciliationSummary`/`StartupReconciliationCompleted` now carry
+`interrupted_deauth_target_ids: tuple[int, ...]` (target ids of every
+reconciled `CAPTURE_DEAUTH` job) — needed for the Audit Log tab's "may be
+incomplete" flag, per ADR-0004's own Consequences. The `events.py` docstring
+previously claimed this was surfaced via `CaptureStopped`; that was false
+against the shipped code (`JobRegistry.mark_terminal()` never publishes any
+event at all) and has been corrected, not just papered over. `Enumerator._drive`
+now publishes a new `EnumerationFailed` event from an `except Exception`
+clause wrapped around the existing scan body (mirroring Capture/Crack's own
+"finally always publishes a terminal event" shape), since `NmapScanCompleted`
+only published on the success path and `EnumeratePanel` otherwise had no way
+to leave its "Enumerating…" state on a failed scan — the most likely real case
+being the operator not having joined the Target's network yet (Option A's own
+accepted tradeoff, item 3 above).
+
+**Test-infrastructure finding worth knowing before writing another test like
+this**: the natural-looking `pytest.warns(pytest.PytestUnhandledThreadExceptionWarning)`
+around a `JobHandle.wait_for_test()` call does **not** work on this repo's
+pytest (9.1.1) to prove a driver thread's exception really propagated
+uncaught — confirmed to fail deterministically (0/5), not flakily, even with a
+1s sleep inside the `with` block. Root cause: `_pytest/threadexception.py`'s
+`collect_thread_exception` (what actually calls `warnings.warn(...)`) is a
+`trylast` impl of the same `pytest_runtest_call` hook whose normal-priority
+impl is what invokes the test function itself — the warning is only ever
+emitted *after* the whole test function has already returned, so no
+`pytest.warns(...)` block placed inside the test body can ever see it,
+regardless of timing. Use this codebase's own already-established pattern
+instead (`test_crack_acceptance.py`'s stress test): swap `threading.excepthook`
+directly (save/restore in a `try`/`finally`), poll briefly afterward since the
+hook can still fire slightly after `wait_for_test()` unblocks (that part *is*
+a genuine race — `mark_terminal()`'s event-set happens inside the driver's
+`finally`, before the exception finishes propagating out of the thread).
+`tests/test_enumerate_acceptance.py::test_failed_scan_publishes_enumeration_failed_and_cleans_up`
+is the reference example.
+
+### 1. `GuiEventPump` [DONE]
+
+`on()`/`_tick()` implemented exactly per their own pinned TODOs — no
+deviation, nothing to report beyond that. `tests/test_event_pump.py` (new)
+covers type-based dispatch, multi-handler accumulation, `only_job` filtering,
+pre-`start()` queuing (events published before `pump.start()` are still
+delivered on the first tick, since `engine.subscribe(...)` happens at
+`GuiEventPump.__init__`, not `start()`), and the self-rescheduling `_tick`
+loop — all against a fake `root.after`-recording stand-in, not a real Tk
+mainloop (this pump never touches a widget, only schedules callbacks).
+
+### 2. `SudoPasswordDialog` + `StatusBar` + startup sequencing in `app.py` [DONE]
+
+`app.py` is a real, constructible `App` now — Engine construction, the sudo
+dialog retry loop, `reconcile_startup()`, `GuiEventPump`/`StatusBar` wiring,
+the 4-tab `CTkTabview` (tab names exactly `"Discovery & Targets"` /
+`"Target Actions"` / `"Crack"` / `"Audit Log"` — later items replace each
+tab's placeholder body, not its name), `WM_DELETE_WINDOW` → `on_close`,
+`pump.start()`, then `discovery.start()`. `SudoPasswordDialog`
+(`gui/sudo_dialog.py`) and `StatusBar` (`gui/status_bar.py`) are new, built
+exactly per the design doc's own sections.
+
+Two gaps resolved that the design doc's own sketch didn't cover:
+- **`App.__init__` gained a `proc: Optional[ProcRunner] = None` param**,
+  forwarded to `Engine(..., proc=proc)` — same seam every other constructor in
+  this codebase already has, needed so startup (which auto-starts Discovery,
+  spawning real `airmon-ng`/`airodump-ng`) is headlessly testable via
+  `FakeProcRunner` instead of real hardware/root.
+- **The pinned sketch's cancel-guard bug**: the design doc's own `while True`
+  retry loop only null-checks the dialog's return value in the *retry*
+  branch, not on the very first `_ask_sudo_password_dialog()` call before the
+  loop — cancelling on the first prompt would have passed `None` into
+  `SudoSession.start()`, raising an uncaught `TypeError` instead of the
+  intended "no partial/no-privilege mode" `SystemExit(0)`. Fixed by guarding
+  the first call identically to the retry branch. This is a one-line
+  completion of the design doc's own stated behavior, not a design change —
+  noting it here so a future reader doesn't rediscover it as if it were new.
+
+Four `_build_*_tab` methods are deliberate placeholders (a `CTkLabel` saying
+"Not yet implemented") — items 3-6 below replace each one's body wholesale.
+
+Tests: `tests/test_sudo_dialog.py`, `tests/test_status_bar.py`,
+`tests/test_app.py` (new) — all against real `ctk`/`tkinter` widgets (this
+dev machine has a real X display), not mocks of Tk itself; `App`'s own tests
+reuse `test_engine.py`'s established pattern (`FakeProcRunner` +
+`@patch("aircommand.core.privilege.subprocess.run")`) via the new `proc` seam.
+One finding worth keeping: destroying the root `ctk.CTk()` (not a `Toplevel`)
+tears down the whole Tcl interpreter, so `winfo_exists()` raises `TclError`
+afterward rather than returning falsy — confirmed empirically, asserted via
+`pytest.raises(tkinter.TclError)` in `test_app.py`'s `on_close` test.
+
+### 3. `NetworksView`/`TargetPicker` (Discovery & Targets tab) [DONE]
+
+`aircommand/gui/discovery_view.py` (new): `NetworksView` (seeded from
+`engine.discovery.list_networks()`, updated live via `NetworkDiscovered`/
+`NetworkSightingUpdated`) and `TargetPicker` (seeded from
+`engine.targets.list()`, updated live via `TargetAdded`/`TargetRemoved`), per
+the design doc's own section. Two gaps resolved that the design doc leaves
+implicit:
+- **No table widget exists in CustomTkinter** — this is the first view needing
+  one. Decided: build each row by hand inside a `ctk.CTkScrollableFrame` (one
+  `CTkLabel` per column + a trailing action button), tracked in a
+  `dict[BSSID, dict]` keyed by bssid so a row can be updated or destroyed in
+  place. `TargetPicker._remove` re-grids every surviving row after a removal
+  so no permanent blank gap is left.
+- **`upsert_row`'s parameter type**: the design doc's own pump-wiring line
+  (`self.pump.on(NetworkDiscovered, self.networks_view.upsert_row)`) means the
+  handler receives the raw event, but seeding (`engine.discovery.list_networks()`)
+  hands back plain `Network`s, not events. Resolved by splitting each class's
+  public `upsert_row(event)`/`remove_row(event)` (used for pump registration)
+  from a private `_upsert(value)`/`_remove(bssid)` (used directly for seeding)
+  — keeps the design doc's literal pump-wiring code unchanged.
+
+Every click handler (Add as Target, Add manually, Remove) calls the relevant
+`engine.targets.*` method and stops — it never mutates view state directly,
+following this codebase's own established discipline ("the picker updates
+from the event, not the return value," per `docs/design/core-gui-boundary.md`'s
+Usage section). Tests: `tests/test_discovery_view.py` (new, 12 tests, all
+against real `ctk`/`tkinter` widgets — this dev machine has a real X display)
+plus one addition to `tests/test_app.py`'s happy-path test proving the tab's
+pump wiring is genuinely connected end-to-end (adds a real Target, drives one
+pump tick by hand, confirms `TargetPicker` picked it up via the event, not by
+calling `_upsert` directly).
+
+### 4. `TargetSelector` + `CapturePanel` + `EnumeratePanel` (Target Actions tab) [DONE]
+
+New: `aircommand/gui/target_selector.py` (`TargetSelector`, reusable — built
+with an `include_all_option` flag now, unused by this slice's own caller, so
+Audit Log's later reuse doesn't need this file touched twice),
+`aircommand/gui/capture_view.py` (`CapturePanel`), `aircommand/gui/enumerate_view.py`
+(`EnumeratePanel`), `aircommand/gui/target_actions_view.py` (composes the three,
+owns the deauth confirm dialog via stdlib `tkinter.messagebox.askyesno` — same
+"stdlib is the right tool, not a gap" reasoning the design doc already gives
+for `WordlistPicker`'s file dialog).
+
+Two real gaps resolved, found only by grounding the design doc against the
+actual shipped event shapes (not assumed from the doc's own sketch):
+- **`HandshakeCaptured` has no `job_id` field** (only `handshake.capture_job_id`
+  does) — the design doc's own pinned `only_job=handle.job_id` registration for
+  this event type would structurally never match, since `GuiEventPump`'s
+  filtering reads `getattr(event, "job_id", None)`. Fixed on the GUI side only
+  (not by adding a field to the event): `CapturePanel` registers
+  `HandshakeCaptured` once, unfiltered, in `__init__`, and matches the job
+  manually inside `_on_handshake` via `event.handshake.capture_job_id`.
+- **A missing Cancel button.** The design doc's own CapturePanel section
+  specifies exactly two buttons and never mentions cancelling an in-progress
+  capture — a real gap, since a deauth-assisted Capture is unbounded by
+  default (fires until a handshake is seen or cancelled) and actively
+  transmits frames, with `JobHandle.cancel()` already available and used
+  elsewhere in this codebase's own docs. Asked the project owner directly
+  rather than guessing; they said add it. `CapturePanel` now has a third
+  button, disabled until a capture is active.
+
+One more cross-cutting requirement from this slice's own design doc section
+(not scope creep): the "Pause/Resume Discovery" button the doc says belongs on
+the Discovery & Targets tab (item 3, already built) had to be added there now,
+since it only becomes necessary once something — Capture/Enumerate — can
+actually contend for the radio. `App._build_discovery_targets_tab` (item 3's
+own method) gained this button; `_build_target_actions_tab` gained the real
+`TargetActionsView`.
+
+**Test-infrastructure bug found in review, fixed directly (not redispatched —
+small and mechanical) rather than left in**: the dispatched implementation's
+own `tests/test_capture_view.py`/`tests/test_enumerate_view.py` each had a
+`_poll_until(lambda: panel.active_handle is None, timeout=2.0)` call meant to
+wait for a queued event to be dispatched — but the fake root's `after()` is a
+no-op in these tests, so nothing ever calls `pump._tick()` to actually drain
+the queue, and the predicate can never become true on its own. Each such call
+silently burned its full 2-second timeout doing nothing, then fell through to
+a separate (already-correct) `for _ in range(5): pump._tick()` block right
+after it, which is what actually made the assertions pass. Not a correctness
+bug — the tests still verified the right things — but genuinely dead,
+misleading code inflating the suite's runtime for no reason (confirmed via
+`--durations`: ~2.0-2.1s per affected test, vs. ~0.05-0.09s once fixed). Fixed
+by replacing the dead poll with a `_tick_until()` helper that actually ticks
+the pump on every iteration, and dropping the now-redundant trailing tick
+loops. Full suite dropped from 23.4s to 15.1s. Worth remembering for any
+future test written against a `GuiEventPump` + fake (non-ticking) root: a
+"wait for this state" polling helper MUST call `pump._tick()` itself, or it's
+not actually waiting for anything.
+
+### 5. `HandshakePicker`/`WordlistPicker`/`CrackPanel` (Crack tab) [DONE]
+
+New: `aircommand/gui/crack_view.py` (all three classes, per the design doc's
+own module map — one file, not split like the Target Actions tab's four).
+`WordlistPicker` deliberately takes no `app` param (unlike every other panel
+so far) — it's a pure stdlib `tkinter.filedialog` wrapper with no use for
+`engine`/`pump`/`status_bar`, so forcing one on for consistency alone would be
+dead weight, not a real requirement. No Cancel button on `CrackPanel`
+(considered, not added): unlike Capture's deauth transmission, an in-progress
+Crack is a local computation with no external effect if left running — not
+the same safety argument that got Capture's Cancel button approved, so this
+one didn't need re-asking.
+
+**A real, non-obvious flaky-test bug found during review, root-caused and
+fixed (this is the kind of debugging CLAUDE.md keeps with the strongest model,
+not a routine dispatch — the implementing subagent found and reported the
+symptom accurately but correctly left root-causing it to this pass).**
+`tests/test_crack_acceptance.py`'s shared `_capture_handshake()` helper
+(used by both its own file and the new `test_crack_view.py`) intermittently
+failed its own `assert len(captured) == 1` — `HandshakeCaptured` sometimes
+didn't arrive within `wait_for_test(timeout=2.0)`. Reproduced deterministically
+(~50-100% of full-suite runs depending on GUI-test ordering; 100% reproducible
+by running the Phase 3 GUI test files together, e.g. `test_app.py` +
+`test_capture_view.py` + `test_discovery_view.py` + `test_enumerate_view.py` +
+`test_event_pump.py` + `test_status_bar.py` + `test_sudo_dialog.py` +
+`test_target_selector.py` + `test_crack_view.py`; 0% reproducible running
+`test_crack_view.py` alone, or any single one of those files alone, or even
+half of them together — only the *cumulative* combination reproduces it,
+ruling out any single file as "the" culprit). Root cause investigated and
+narrowed, not just patched blind: a standalone repro spun up 50 extra idle
+`Engine`s (leaving their `SightingBatcher` daemon threads running, mimicking
+what a long pytest session accumulates) and measured `_capture_handshake`'s
+own timing — zero measurable slowdown, disproving "raw background thread
+count" as the mechanism. The actual cause is specifically tied to **real
+Tk/X11 overhead accumulating from the many real `ctk.CTk()`/`CTkToplevel()`
+windows created and destroyed across the Phase 3 GUI test files** (dozens by
+the time `test_crack_view.py` runs) — not a logic bug in `Capture`'s driver,
+not a `GuiEventPump`/`EventBus` ordering bug (the underlying mechanism this
+project has already hardened carefully — see "Conventions established so
+far" — remains correct; this is purely an environmental/test-infrastructure
+timing margin issue). **Fix**: bumped `_capture_handshake`'s hardcoded
+`wait_for_test(timeout=2.0)` to `10.0` — the same "generous relative to the
+normal (sub-millisecond) case, still bounded so a real bug fails loudly, not
+hangs the suite" reasoning `test_privilege.py`'s own `WAIT_TIMEOUT_S` already
+documents. Verified: 6/6 clean full-suite runs after the fix (0/6 before).
+Scope note: only this one confirmed flaky call site was touched — the many
+other `timeout=2.0` call sites across the new GUI tests were not speculatively
+bumped, since none have actually been observed to flake across dozens of runs
+this session; revisit only if one of them is caught flaking for real.
+
+### 6. `AuditLogView` (Audit Log tab) [DONE]
+
+New: `aircommand/gui/audit_log_view.py` (`AuditLogView`) — a `TargetSelector`-
+filtered view (reusing `include_all_option=True`, exactly the reuse case that
+flag was added for in item 4) over `engine.capture.list_audit_log()`, a
+persistent ADR-0004 "may be missing firings" banner built once from
+`App._interrupted_deauth_targets` (seeded state, not event-driven — matches
+the design doc's own framing), and a manual Refresh button. This is also
+where the global `self.pump.on(DeauthFired, self.audit_log_view.append)`
+registration finally lands — deliberately deferred from item 4's
+`CapturePanel` work (which only ever needed its own local, per-job
+`DeauthFired` subscription for a live burst counter), since `AuditLogView`
+didn't exist yet at that point. Every `_build_*_tab` method in `app.py` now
+has real functionality — none are placeholders anymore.
+
+One decision made in this pass, not spelled out by the design doc: when the
+view is filtered to a specific Target and a `DeauthFired` arrives for a
+*different* Target, `append()` suppresses it from the current display rather
+than showing it anyway — purely a display choice (the underlying audit-trail
+write already happened, durably, before the event ever reaches the GUI, so
+ADR-0001's "every firing logged" guarantee is untouched by this), matching
+ordinary filtered-live-view expectations.
+
+Same real construction-order gotcha as `TargetActionsView` (item 4) recurred
+here and was caught the same way (by actually running it, not by assuming
+symmetry): `TargetSelector.__init__` synchronously fires `on_change` during
+construction, so `self._body` has to exist before `TargetSelector` is
+constructed, even though it's visually packed afterward. Worth remembering
+as a general fact about this codebase's `TargetSelector`/`on_change` pattern
+for any future reuse of it: **whatever `on_change` touches must already exist
+by construction time**, not just by pack/layout time.
+
+**Phase 3 is now complete.** All four tabs (`Discovery & Targets`,
+`Target Actions`, `Crack`, `Audit Log`) are wired to the real `Engine`, per
+`docs/design/gui-structure.md`. 194 tests pass (up from 93 at the end of
+Phase 1). See "What 'done' looks like" below — the one thing this pass didn't
+do is drive the real GUI end-to-end with real hardware/root (that still needs
+the user's own terminal, same constraint as Phase 2 item 5).
 
 ## What "done" looks like
 
 Phase 1 and Phase 2 complete: the whole core engine is implemented, tested, and can
-run for real against actual hardware with actual `sudo` — not just headlessly. Phase
-3 has at least a recorded design and, ideally, a working GUI wired to the real
-`Engine`. If you stop partway through any of this, leave the working tree in a state
+run for real against actual hardware with actual `sudo` — not just headlessly.
+
+**Phase 3 is now complete too**: a real, working GUI (`aircommand/gui/app.py` +
+every view under `aircommand/gui/`) wired to the real `Engine`, per
+`docs/design/gui-structure.md`'s own spec — all four tabs, the sudo dialog,
+status bar, and startup reconciliation banner. 194 tests pass, all headless
+(`FakeProcRunner`, no real subprocess/root/hardware), including real `ctk`/
+`tkinter` widget interaction against this dev machine's real X display.
+
+What Phase 3 does **not** cover, same caveat as Phase 2 item 5: nobody has yet
+driven the real GUI end-to-end against real hardware with real `sudo` (a real
+terminal, a real monitor-mode adapter, a Target network the user nominates
+themselves) — that's still the user's own hands-on task, not something a
+headless session can do. Everything up to that point (widget wiring, event
+flow, gate enforcement, error surfacing) is verified; the remaining unknown is
+purely "does this look and feel right when actually run," which needs a human
+at the keyboard.
+
+If you stop partway through any future work, leave the working tree in a state
 where `git status`/recent commit messages make it obvious exactly what's done, what's
 mid-flight, and what's next — the next session (a review pass, per the user) needs to
 be able to reconstruct that without you there to ask.
