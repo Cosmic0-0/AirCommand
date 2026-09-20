@@ -28,15 +28,21 @@ class GuiEventPump:
         self._handlers: dict[type, list[tuple[Callable[[Event], None], Optional[JobId]]]] = {}
 
     def on(self, event_type: type, handler: Callable[[Event], None], only_job: Optional[JobId] = None) -> None:
-        raise NotImplementedError
-        # TODO: self._handlers.setdefault(event_type, []).append((handler, only_job))
+        self._handlers.setdefault(event_type, []).append((handler, only_job))
 
     def start(self) -> None:
         self._tick()
 
     def _tick(self) -> None:
-        raise NotImplementedError
-        # TODO: drain via self._q.get_nowait() until queue.Empty; for each event,
-        # look up self._handlers.get(type(event), []), filter by only_job when set
-        # (compare against getattr(event, "job_id", None)), call each handler — safe,
-        # we're on the mainloop thread now. Then self._root.after(self._tick_ms, self._tick).
+        while True:
+            try:
+                event = self._q.get_nowait()
+            except queue.Empty:
+                break
+
+            for handler, only_job in self._handlers.get(type(event), []):
+                if only_job is not None and getattr(event, "job_id", None) != only_job:
+                    continue
+                handler(event)
+
+        self._root.after(self._tick_ms, self._tick)
