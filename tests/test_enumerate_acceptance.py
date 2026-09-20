@@ -42,6 +42,7 @@ sidesteps that entirely.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -50,7 +51,7 @@ from aircommand.core.allowlist import Allowlist, NotATargetError
 from aircommand.core.domain import MacAddress
 from aircommand.core.engine import Engine
 from aircommand.core.enumerate import Enumerator, get_interface_subnet
-from aircommand.core.events import EventBus, NmapScanCompleted
+from aircommand.core.events import EnumerationFailed, EventBus, NmapScanCompleted
 from aircommand.core.jobs import JobRegistry
 from aircommand.core.persistence.db import Database
 from aircommand.core.procutil import FakeProcRunner
@@ -98,7 +99,7 @@ def _slow_lines(count: int, delay_s: float):
         yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
 
 
-def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, EventBus]:
+def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, EventBus, JobRegistry]:
     """Builds Allowlist/JobRegistry/RadioController by hand and constructs
     Enumerator directly, bypassing Engine -- see module docstring for why."""
     db = Database(":memory:")
@@ -110,7 +111,7 @@ def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, E
     enumerator = Enumerator(
         allowlist, db.enum_results, bus, jobs, rf, proc, db.new_connection_scope, get_subnet=get_subnet
     )
-    return enumerator, allowlist, bus
+    return enumerator, allowlist, bus, jobs
 
 
 def test_successful_scan_publishes_nmap_scan_completed_with_both_hosts():
@@ -120,7 +121,7 @@ def test_successful_scan_publishes_nmap_scan_completed_with_both_hosts():
         get_subnet_calls.append(adapter)
         return "192.168.1.0/24"
 
-    enumerator, allowlist, bus = _make_enumerator({"nmap": [NMAP_XML]}, fake_get_subnet)
+    enumerator, allowlist, bus, _ = _make_enumerator({"nmap": [NMAP_XML]}, fake_get_subnet)
     target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
 
     completed = []
@@ -178,6 +179,60 @@ def test_not_a_target_error_when_target_removed_after_fetch(tmp_path):
 
     with pytest.raises(NotATargetError):
         engine.enumerate.start_scan(stale_target)
+
+
+def test_failed_scan_publishes_enumeration_failed_and_cleans_up():
+    def raising_get_subnet(adapter: str) -> str:
+        raise OSError("network is unreachable")
+
+    enumerator, allowlist, bus, jobs = _make_enumerator({}, raising_get_subnet)
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+
+    # pytest.warns(pytest.PytestUnhandledThreadExceptionWarning) around the
+    # wait_for_test() call (the originally-specified approach here) does NOT
+    # work on this repo's pytest (9.1.1): verified empirically that it fails
+    # deterministically (0/5, even with a 1s sleep inside the `with` block) --
+    # not a race. _pytest/threadexception.py's collect_thread_exception (which
+    # is what actually calls warnings.warn(...)) is registered as a `trylast`
+    # impl of the SAME `pytest_runtest_call` hook whose normal-priority impl
+    # (_pytest/runner.py) is what invokes the test function itself -- so the
+    # warning is only ever emitted *after* the whole test function has already
+    # returned, never reachable by a pytest.warns(...) block placed inside the
+    # test body, regardless of how long it sleeps first. Using this codebase's
+    # own already-established pattern for the exact same problem instead (see
+    # test_crack_acceptance.py's stress test): swap threading.excepthook
+    # directly to prove the exception really propagated out of the thread
+    # uncaught, rather than being silently swallowed.
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        # wait_for_test() unblocks the instant mark_terminal() sets its internal
+        # event, inside `finally` -- slightly BEFORE the exception actually
+        # finishes propagating out of the thread and hits threading.excepthook.
+        # Poll briefly instead of assuming either ordering.
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        threading.excepthook = original_hook
+
+    assert len(failed) == 1
+    assert failed[0].job_id == handle.job_id
+    assert failed[0].target_id == target.id
+    assert "network is unreachable" in failed[0].error
+    # finally still ran despite the exception -- job row cleared, RF reservation released
+    assert jobs.active_job_ids() == []
+
+    # the exception really propagated out of the thread uncaught, per
+    # enumerate.py's own "still logged via the default threading excepthook" comment
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is OSError
 
 
 def test_get_interface_subnet_against_real_loopback_interface():

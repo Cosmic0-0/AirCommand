@@ -23,6 +23,7 @@ import subprocess
 from typing import Callable
 import uuid
 
+from aircommand.core.domain import JobKind
 from aircommand.core.events import EventBus, StartupReconciliationCompleted
 from aircommand.core.jobs import JobRegistry
 from aircommand.core.persistence.db import AuditLogRepository
@@ -33,6 +34,12 @@ from aircommand.core.procutil import terminate_process_group
 class ReconciliationSummary:
     stale_job_count: int
     processes_terminated: int
+    interrupted_deauth_target_ids: tuple[int, ...]
+    # target_id of every StaleJob with kind == JobKind.CAPTURE_DEAUTH, regardless
+    # of whether its orphaned process was still alive to kill — the flag is about
+    # "was a deauth session in flight when we crashed", not "did we find a
+    # process". ADR-0004 Consequences: an unknown, unlogged number of bursts may
+    # have fired for these Targets between the crash and this reconciliation.
 
 
 def reconcile_orphaned_processes(
@@ -73,10 +80,16 @@ def reconcile_orphaned_processes(
         # (see ADR-0004 Consequences) — the StopReason on the CaptureStopped event this
         # job's mark_terminal() implies is the signal for that, no separate audit row.
         jobs.mark_terminal(job.job_id)   # -> StopReason.INTERRUPTED_PRIOR_SESSION
-    summary = ReconciliationSummary(stale_job_count=len(stale), processes_terminated=terminated)
+    interrupted_deauth_target_ids = tuple(
+        job.target_id for job in stale
+        if job.kind is JobKind.CAPTURE_DEAUTH and job.target_id is not None
+    )
+    summary = ReconciliationSummary(stale_job_count=len(stale), processes_terminated=terminated,
+                                     interrupted_deauth_target_ids=interrupted_deauth_target_ids)
     bus.publish(StartupReconciliationCompleted(
         event_id=uuid.uuid4(), occurred_at=datetime.now(),
         stale_job_count=summary.stale_job_count, processes_terminated=summary.processes_terminated,
+        interrupted_deauth_target_ids=interrupted_deauth_target_ids,
     ))
     return summary
 

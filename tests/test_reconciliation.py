@@ -50,7 +50,8 @@ def test_reconcile_with_no_stale_jobs_is_a_noop_and_still_publishes_the_complete
 
     summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
 
-    assert summary == ReconciliationSummary(stale_job_count=0, processes_terminated=0)
+    assert summary == ReconciliationSummary(stale_job_count=0, processes_terminated=0,
+                                             interrupted_deauth_target_ids=())
     assert len(completed) == 1
     assert completed[0].stale_job_count == 0
     assert completed[0].processes_terminated == 0
@@ -67,7 +68,8 @@ def test_reconcile_clears_a_stale_job_row_with_no_recorded_process():
 
     summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
 
-    assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=0)
+    assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=0,
+                                             interrupted_deauth_target_ids=())
     assert jobs.find_stale_jobs() == []
 
 
@@ -86,7 +88,8 @@ def test_reconcile_clears_job_row_even_when_recorded_process_is_already_gone():
 
     summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=run_privileged)
 
-    assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=0)
+    assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=0,
+                                             interrupted_deauth_target_ids=())
     assert jobs.find_stale_jobs() == []
     run_privileged.assert_not_called()
 
@@ -112,7 +115,8 @@ def test_reconcile_terminates_a_real_unprivileged_orphan_and_clears_its_job_row(
 
         summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
 
-        assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=1)
+        assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=1,
+                                                 interrupted_deauth_target_ids=())
         assert completed[0].stale_job_count == 1
         assert completed[0].processes_terminated == 1
         popen.wait(timeout=WAIT_TIMEOUT_S)
@@ -159,7 +163,8 @@ def test_reconcile_falls_back_to_send_privileged_on_permission_error(monkeypatch
 
         summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=fake_run_privileged)
 
-        assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=1)
+        assert summary == ReconciliationSummary(stale_job_count=1, processes_terminated=1,
+                                                 interrupted_deauth_target_ids=())
         # "--" before the negative pgid, per the pinned argv shape -- see
         # reconciliation.py's own comment for why it's load-bearing.
         assert privileged_calls[0] == ["kill", f"-{signal.SIGTERM}", "--", f"-{popen.pid}"]
@@ -169,3 +174,24 @@ def test_reconcile_falls_back_to_send_privileged_on_permission_error(monkeypatch
         if popen.poll() is None:
             popen.kill()
             popen.wait()
+
+
+def test_reconcile_populates_interrupted_deauth_target_ids_for_capture_deauth_jobs_with_a_target():
+    # No recorded process for either job (pid/pgid/fingerprint all None) -- only
+    # the filtering behavior is under test here, not termination, so there's
+    # nothing to kill and no real subprocess needed (avoids the ~3s grace-period
+    # cost the real-termination tests above pay).
+    db, jobs = make_registry()
+    bus = EventBus()
+    completed = []
+    bus.subscribe(completed.append, StartupReconciliationCompleted)
+
+    jobs.new_job(JobKind.CAPTURE_DEAUTH, target_id=7)
+    jobs.new_job(JobKind.DISCOVERY)   # no target_id -- must NOT show up below,
+    # proving the filter is real, not just "return everything"
+
+    summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
+
+    assert summary.interrupted_deauth_target_ids == (7,)
+    assert len(completed) == 1
+    assert completed[0].interrupted_deauth_target_ids == (7,)
