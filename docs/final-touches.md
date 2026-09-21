@@ -14,34 +14,33 @@ be built" left to decide before v1, only "does it actually work."
 
 ## 0. There is no way to launch AirCommand yet — do this first [DONE]
 
-Found while preparing this doc, not previously flagged anywhere: **no entry
-point exists.** `App` (`aircommand/gui/app.py`) is a fully-implemented
-`ctk.CTk` subclass, but nothing in the codebase ever constructs one and calls
-`.mainloop()` on it — no `aircommand/__main__.py`, no `[project.scripts]`
-entry in `pyproject.toml`, no launcher script anywhere. The 194 tests never
-need one (they construct `App`/panels directly and drive `pump._tick()` by
-hand instead of a real mainloop, which is correct for headless testing) —
-so this gap was invisible until someone tries to actually run the app.
+Found while first drafting this doc, not previously flagged anywhere: `App`
+(`aircommand/gui/app.py`) was a fully-implemented `ctk.CTk` subclass that
+nothing in the codebase ever constructed and called `.mainloop()` on — no
+`aircommand/__main__.py`, no `[project.scripts]` entry, no launcher anywhere.
+The 194 tests never needed one (they construct `App`/panels directly and
+drive `pump._tick()` by hand instead of a real mainloop, which is correct for
+headless testing), so the gap was invisible until someone actually tried to
+run the app. This had blocked every item below — there's no "run the real
+GUI" without it.
 
-This blocks every item below — there's no "run the real GUI" without it.
+**Fixed** (dispatched per CLAUDE.md's model tiering — the interface was
+already fully pinned, so this was routine implementation, not a design
+decision): `aircommand/__main__.py` (new) parses `--adapter` (required),
+`--db-path`/`--work-dir` (both defaulted per
+`docs/design/core-gui-boundary.md`'s own Usage sketch —
+`~/.aircommand/aircommand.db` and `~/.aircommand/work`, created if missing),
+constructs `App(...)`, and calls `.mainloop()`. Also registered as a console
+script (`pyproject.toml`'s `[project.scripts]`,
+`aircommand = "aircommand.__main__:main"`). `docs/usage.md`'s "Launching"
+section now shows the real command (`python -m aircommand --adapter <name>`,
+or `aircommand --adapter <name>` once installed) instead of the old interim
+`python -c` snippet.
 
-**What's needed**, matching `App.__init__`'s already-pinned signature
-(`db_path: Path, work_dir: Path, adapter: str, proc: Optional[ProcRunner] = None`):
-a small `aircommand/__main__.py` (or a `console_scripts` entry in
-`pyproject.toml`, or both) that:
-- picks default `db_path`/`work_dir` — `docs/design/core-gui-boundary.md`'s
-  own Usage sketch already suggests `~/.aircommand/aircommand.db` and
-  `~/.aircommand/work`, expanded and created if missing;
-- takes `adapter` from a CLI arg or flag (no safe default — depends on the
-  machine's own interface name, see the usage guide);
-- constructs `App(...)` and calls `.mainloop()`.
-
-This is boilerplate against an interface that's already fully decided (the
-`App` constructor and every default it needs), not a design decision — a
-normal dispatch candidate per CLAUDE.md's model tiering, or small enough to
-write directly. Say the word and it's a five-minute add; not done yet only
-because it wasn't part of what was asked for in the GUI implementation or the
-audit pass.
+Verified: all 194 existing tests still pass unchanged; `--help` exits
+cleanly; a real launch (`timeout 5 .venv/bin/python -m aircommand --adapter
+wlan0`) gets past `App` construction into the blocking sudo-dialog/mainloop
+as expected, rather than crashing.
 
 ## 1. Re-check Capture's handshake-detection assumption against real output
 
@@ -107,5 +106,6 @@ for the next one").
 ## Once the above is done
 
 That's it — there's no further roadmap phase written down. v1 is "done" when
-item 0 exists and item 2's checklist has actually been walked through once,
-for real, on your own hardware.
+items 1 and 2 above have actually been carried out, for real, on your own
+hardware. Item 0 no longer blocks either — you can start whenever you're
+ready.
