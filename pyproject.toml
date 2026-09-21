@@ -11,6 +11,9 @@ dependencies = [
     "customtkinter>=5.2",
 ]
 
+[project.scripts]
+aircommand = "aircommand.__main__:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

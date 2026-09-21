@@ -12,7 +12,7 @@ Nothing below is a design question. Everything here is either a small
 mechanical gap or a hands-on validation step — there is no more "should this
 be built" left to decide before v1, only "does it actually work."
 
-## 0. There is no way to launch AirCommand yet — do this first
+## 0. There is no way to launch AirCommand yet — do this first [DONE]
 
 Found while preparing this doc, not previously flagged anywhere: **no entry
 point exists.** `App` (`aircommand/gui/app.py`) is a fully-implemented
