@@ -77,8 +77,11 @@ def reconcile_orphaned_processes(
         # job.kind is JobKind.CAPTURE_DEAUTH and job.pgid is not None -> this is exactly
         # the case StartupReconciliationCompleted's docstring warns about: bursts fired
         # between crash and cleanup were never audit-logged. Not fixable after the fact
-        # (see ADR-0004 Consequences) — the StopReason on the CaptureStopped event this
-        # job's mark_terminal() implies is the signal for that, no separate audit row.
+        # (see ADR-0004 Consequences). mark_terminal() below does NOT publish any bus
+        # event — it only writes the DB row and sets an in-memory threading.Event — so
+        # it is NOT the signal for this. The actual signal is interrupted_deauth_target_ids,
+        # computed below and carried on both ReconciliationSummary (sync return) and
+        # StartupReconciliationCompleted (event); no separate audit row either way.
         jobs.mark_terminal(job.job_id)   # -> StopReason.INTERRUPTED_PRIOR_SESSION
     interrupted_deauth_target_ids = tuple(
         job.target_id for job in stale
