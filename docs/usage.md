@@ -1,9 +1,8 @@
 # Using AirCommand
 
 A practical guide to running AirCommand once it's launched. For what's still
-missing before you can do that at all, see `docs/final-touches.md` — in
-particular, there is currently no launcher command; the "Launching" section
-below shows the interim way to start it by hand.
+missing before it's fully validated on real hardware, see
+`docs/final-touches.md`; the "Launching" section below shows how to start it.
 
 This tool audits networks **you personally own and administer**. Don't point
 it at anything else — see `docs/adr/0001-scope-boundaries.md` for why that's
@@ -28,26 +27,21 @@ a hard boundary, not just a suggestion.
 
 ## Launching
 
-Until `docs/final-touches.md` item 0 lands, start it by hand from the repo
-root, with the project's venv active:
+From the repo root, with the project's venv active:
 
 ```
-.venv/bin/python -c "
-from pathlib import Path
-from aircommand.gui.app import App
-
-app = App(
-    db_path=Path('~/.aircommand/aircommand.db').expanduser(),
-    work_dir=Path('~/.aircommand/work').expanduser(),
-    adapter='wlan0',   # replace with your interface name from `ip link`
-)
-app.mainloop()
-"
+.venv/bin/python -m aircommand --adapter wlan0   # replace with your interface name from `ip link`
 ```
 
-The database and work directory are created on first run if they don't
-exist. Once item 0 in `docs/final-touches.md` is done, this becomes a normal
-command — update this section then.
+Or, once installed with `pip install -e .`, the console-script form:
+
+```
+aircommand --adapter wlan0
+```
+
+`--db-path` and `--work-dir` default to `~/.aircommand/aircommand.db` and
+`~/.aircommand/work` respectively, and are created on first run if they don't
+exist. Pass `--help` to see all options.
 
 ## First launch
 
