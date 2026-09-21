@@ -888,6 +888,18 @@ flow, gate enforcement, error surfacing) is verified; the remaining unknown is
 purely "does this look and feel right when actually run," which needs a human
 at the keyboard.
 
+**Update, 2026-09-20/21**: an independent review pass re-verified every Phase
+3 commit against `docs/design/gui-structure.md`, reproduced and re-confirmed
+the flaky-test fix above, and found no spec drift or security gaps — one
+stale comment in `aircommand/core/reconciliation.py` was corrected. That pass
+also surfaced a real gap this section didn't cover: nothing in the codebase
+ever constructed an `App` and called `.mainloop()` on it, so there was no way
+to actually launch AirCommand at all. Fixed: `aircommand/__main__.py` plus a
+`pyproject.toml` console-script entry — see `docs/usage.md` for how to run it
+now. `docs/final-touches.md` is the live tracker for what's still open before
+v1 is genuinely finished (the real-hardware validation this section already
+flags); check there for current status rather than here.
+
 If you stop partway through any future work, leave the working tree in a state
 where `git status`/recent commit messages make it obvious exactly what's done, what's
 mid-flight, and what's next — the next session (a review pass, per the user) needs to
