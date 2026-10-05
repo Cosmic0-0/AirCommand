@@ -24,6 +24,16 @@ a hard boundary, not just a suggestion.
   Look for something like `wlan0` or `wlp3s0`. Pass this as-is — AirCommand
   switches it in and out of monitor mode itself via `airmon-ng` as needed; you
   don't need to (and shouldn't) put it in monitor mode yourself first.
+- AirCommand runs `airmon-ng check kill` automatically the moment Discovery
+  starts (i.e., effectively at launch), which stops NetworkManager (and
+  wpa_supplicant) system-wide — not just on the audited adapter, so any other
+  NetworkManager-managed connection (e.g. ethernet) drops too. NetworkManager
+  restarts automatically whenever the adapter returns to managed mode
+  (pausing Discovery/Capture to run Enumerate, or closing AirCommand
+  normally). If AirCommand is force-killed instead of closed normally,
+  NetworkManager stays down until you manually run
+  `sudo systemctl start NetworkManager` (see
+  `docs/adr/0005-networkmanager-check-kill.md`).
 
 ## Launching
 
