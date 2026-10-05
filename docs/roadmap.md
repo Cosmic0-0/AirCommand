@@ -418,6 +418,14 @@ changes, forcing the interface back to managed mode) — exactly the scenario
 run `airmon-ng check kill` automatically (would risk killing the operator's own
 network connection). This is expected, working-as-designed behavior, not a bug.
 
+**Revisited:** this conclusion is superseded — see
+`docs/adr/0005-networkmanager-check-kill.md`. The "no code change needed" call
+turned out to be wrong on real hardware: NetworkManager's interference wasn't
+just a warning, it silently kept the adapter out of monitor mode with nothing
+surfacing that in the GUI. `RadioController` now runs `airmon-ng check kill`
+and restarts NetworkManager automatically around every monitor<->managed
+transition, not just at startup/shutdown.
+
 **Found only once item 4 (below) actually unblocked `Database` and let the
 Discovery/Capture/Enumerate *acceptance* tests run for the first time** (they
 build a whole `Engine`, so they'd never gotten past `Database.__init__` raising
