@@ -15,7 +15,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from aircommand.core import AdapterBusy, JobHandle, Target
+from aircommand.core import AdapterBusy, JobHandle, RadioCommandFailed, Target
 from aircommand.core.domain import EnumHost
 from aircommand.core.events import EnumerationFailed, NmapScanCompleted
 
@@ -79,6 +79,9 @@ class EnumeratePanel(ctk.CTkFrame):
             handle = self._app.engine.enumerate.start_scan(self.target)
         except AdapterBusy as e:
             self._app.status_bar.show_error(f"Radio busy: {e.holder.value} is using the adapter")
+            return
+        except RadioCommandFailed as e:
+            self._app.status_bar.show_error(f"Couldn't switch the adapter into monitor mode: {e}")
             return
         self.active_handle = handle
         self._clear_results()

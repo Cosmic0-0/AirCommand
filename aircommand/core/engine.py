@@ -5,6 +5,7 @@ pieces together and holds no domain logic of its own.
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,13 +22,15 @@ from aircommand.core.persistence.sighting_batch import SightingBatcher
 from aircommand.core.privilege import SudoSession
 from aircommand.core.procutil import ProcRunner, SubprocessRunner
 from aircommand.core.reconciliation import ReconciliationSummary, reconcile_orphaned_processes
-from aircommand.core.rf import RadioController
+from aircommand.core.rf import RadioCommandFailed, RadioController
 
 # How long shutdown() waits for each still-running job to reach a terminal
 # state before giving up on it and moving on -- a best-effort grace period, not
 # a guarantee. A job stuck past this is left RUNNING in the jobs table; the
 # NEXT launch's reconcile_startup() (ADR-0004) is what actually cleans it up.
 SHUTDOWN_JOB_WAIT_TIMEOUT_S = 5.0
+
+logger = logging.getLogger(__name__)
 
 
 class Engine:
@@ -110,10 +113,17 @@ class Engine:
         self._sighting_batcher.stop()   # final flush -- AFTER jobs are confirmed
         # terminal, so no NetworkSightingUpdated from a still-running Discovery
         # job can arrive after the batcher's last flush and get silently dropped.
-        self._rf.release_to_managed()   # don't leave the adapter in monitor mode
-        # once AirCommand isn't running. Safe here: every job that might have held
-        # a reservation is already confirmed terminal above, so release() has
-        # already cleared self._rf._current via each driver's own finally block.
+        try:
+            self._rf.release_to_managed()   # don't leave the adapter in monitor mode
+            # once AirCommand isn't running. Safe here: every job that might have held
+            # a reservation is already confirmed terminal above, so release() has
+            # already cleared self._rf._current via each driver's own finally block.
+        except RadioCommandFailed as e:
+            # shutdown() must still stop the keepalive thread and close the DB
+            # below even if restoring NetworkManager failed -- this method's
+            # existing contract (see the job-wait timeout above) is best-effort,
+            # not a guarantee, and that applies here too.
+            logger.warning("Failed to fully restore managed mode during shutdown: %s", e)
         self.privilege.stop()   # AFTER waiting for jobs, not before: a privileged
         # job's own cancellation path (ProcHandle.terminate() on a root-owned
         # process, see procutil.py's _RealProcHandle) needs run_privileged still

@@ -18,7 +18,7 @@ from aircommand.core.domain import (
 )
 from aircommand.core.jobs import JobHandle
 from aircommand.core.allowlist import NotATargetError
-from aircommand.core.rf import AdapterBusy, AdapterMode
+from aircommand.core.rf import AdapterBusy, AdapterMode, RadioCommandFailed
 from aircommand.core.privilege import InvalidSudoPasswordError, PrivilegeStatus
 
 __all__ = [
@@ -38,6 +38,7 @@ __all__ = [
     "NotATargetError",
     "AdapterBusy",
     "AdapterMode",
+    "RadioCommandFailed",
     "InvalidSudoPasswordError",
     "PrivilegeStatus",
 ]
