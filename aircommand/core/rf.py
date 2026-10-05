@@ -10,12 +10,15 @@ reservation that didn't happen).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 
 from aircommand.core.domain import JobKind
 from aircommand.core.parse import parse_airmon_monitor_interface
 from aircommand.core.procutil import ProcRunner
+
+logger = logging.getLogger(__name__)
 
 
 class AdapterMode(Enum):
@@ -29,6 +32,27 @@ class AdapterBusy(Exception):
         super().__init__(f"adapter busy: wanted {requested.value}, held by {holder.value}")
         self.requested = requested
         self.holder = holder
+
+
+class RadioCommandFailed(Exception):
+    """Raised when a privileged command this class depends on for correctness —
+    currently `airmon-ng check kill` and `systemctl restart NetworkManager` —
+    exits non-zero. Deliberately NOT raised for `airmon-ng start`/`airmon-ng
+    stop`: their own exit-code semantics are unconfirmed (see _start_monitor_mode's
+    existing comment), so success/failure there is still inferred from parsing
+    stdout text, same as before this exception existed. check_kill runs first and
+    shares the identical sudo invocation path as every other privileged call in
+    this file, so raising on ITS exit code already catches a broken sudo/privilege
+    layer end-to-end without needing to touch the less-trustworthy airmon-ng start/
+    stop exit codes at all.
+    """
+
+    def __init__(self, argv: list[str], returncode: int, stderr_tail: list[str]) -> None:
+        detail = " ".join(stderr_tail[-5:]) if stderr_tail else "(no stderr captured)"
+        super().__init__(f"{' '.join(argv)} failed (exit {returncode}): {detail}")
+        self.argv = argv
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
 
 
 @dataclass(frozen=True)
@@ -101,14 +125,18 @@ class RadioController:
         # AdapterReservation.mode's informational value, not because airmon-ng
         # itself distinguishes them.
         #
-        # DECIDED (asked, not assumed): reserve() does NOT run `airmon-ng check
-        # kill` before switching modes. If NetworkManager/wpa_supplicant is
-        # holding the adapter, the mode switch may warn or misbehave and the
-        # operator resolves it manually -- deliberately not auto-killing
-        # NetworkManager system-wide as a side effect of starting Discovery/
-        # Capture, since that could silently drop the operator's OWN network
-        # connection if wifi is their only one. Revisit only as a deliberate,
-        # separately-surfaced decision, not a default baked in here.
+        # DECIDED (asked, not assumed; supersedes the previous version of this
+        # comment): reserve() now DOES run `airmon-ng check kill` before every
+        # managed->monitor switch (inside _start_monitor_mode), and
+        # _stop_monitor_mode restarts NetworkManager after every monitor->managed
+        # switch -- see docs/adr/0005-networkmanager-check-kill.md for the full
+        # writeup. Both calls are tied to THESE existing mode-transition hooks,
+        # not to app startup/shutdown, specifically so Enumerate (which needs
+        # NetworkManager alive to join a Target's network via the OS's normal
+        # wifi settings -- CONTEXT.md's "Enumerate" entry) keeps working mid-
+        # session, not just after the app fully closes. This trades away the
+        # original concern here (silently dropping the operator's own network
+        # connection) because the operator explicitly opted into that.
         wants_monitor = mode in (AdapterMode.MONITOR_HOPPING, AdapterMode.MONITOR_LOCKED)
         if wants_monitor and self._monitor_adapter is None:
             self._monitor_adapter = self._start_monitor_mode()
@@ -140,13 +168,55 @@ class RadioController:
         # failure is read from output text via the parser, with the fallback
         # covering "no rename line found" either way (mode-switch failed outright,
         # or it succeeded without renaming).
+        #
+        # `airmon-ng check kill` runs first, unconditionally, every time this
+        # method is called (see docs/adr/0005-networkmanager-check-kill.md) --
+        # same "spawn, drain to avoid the stdout-pipe deadlock" treatment as the
+        # `airmon-ng start` call right below it, but UNLIKE that call, its exit
+        # code IS checked (see RadioCommandFailed's docstring for why this one's
+        # trustworthy enough to raise on and airmon-ng start's isn't); its output
+        # has nothing this class needs to parse either way.
+        check_kill_handle = self._proc.spawn(["airmon-ng", "check", "kill"], privileged=True)
+        "\n".join(check_kill_handle.lines())  # drain; ignored, see comment above
+        check_kill_returncode = check_kill_handle.wait()
+        if check_kill_returncode != 0:
+            raise RadioCommandFailed(
+                ["airmon-ng", "check", "kill"], check_kill_returncode, check_kill_handle.stderr_tail()
+            )
+
         handle = self._proc.spawn(["airmon-ng", "start", self._adapter], privileged=True)
         output = "\n".join(handle.lines())
-        handle.wait()
+        start_returncode = handle.wait()
+        if start_returncode != 0:
+            logger.warning(
+                "airmon-ng start %s exited %d (exit code not treated as authoritative — "
+                "see this method's docstring); stderr: %s",
+                self._adapter, start_returncode, handle.stderr_tail(),
+            )
         return parse_airmon_monitor_interface(output, fallback=self._adapter)
 
     def _stop_monitor_mode(self) -> None:
         handle = self._proc.spawn(["airmon-ng", "stop", self._monitor_adapter], privileged=True)
         "\n".join(handle.lines())  # drain for the same reason _start_monitor_mode does; ignored
-        handle.wait()
+        stop_returncode = handle.wait()
+        if stop_returncode != 0:
+            logger.warning(
+                "airmon-ng stop %s exited %d (exit code not treated as authoritative — "
+                "see _start_monitor_mode's docstring); stderr: %s",
+                self._monitor_adapter, stop_returncode, handle.stderr_tail(),
+            )
         self._monitor_adapter = None
+
+        # Restart NetworkManager the moment the adapter isn't needed for monitor
+        # mode anymore -- not deferred to Engine.shutdown() -- so Enumerate can
+        # get it back mid-session (see docs/adr/0005-networkmanager-check-kill.md
+        # and this method's caller, _ensure_mode). Unlike the airmon-ng calls in
+        # this file, its exit code IS checked below -- systemd's exit codes are
+        # well-defined, unlike airmon-ng's (see RadioCommandFailed's docstring).
+        nm_handle = self._proc.spawn(["systemctl", "restart", "NetworkManager"], privileged=True)
+        "\n".join(nm_handle.lines())  # drain; ignored, see comment above
+        nm_returncode = nm_handle.wait()
+        if nm_returncode != 0:
+            raise RadioCommandFailed(
+                ["systemctl", "restart", "NetworkManager"], nm_returncode, nm_handle.stderr_tail()
+            )

@@ -10,7 +10,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from aircommand.core import Engine, InvalidSudoPasswordError
+from aircommand.core import Engine, InvalidSudoPasswordError, RadioCommandFailed
 from aircommand.core.events import (
     DeauthFired,
     HandshakeCaptured,
@@ -84,8 +84,15 @@ class App(ctk.CTk):
         # current stub — on_close() already exists but nothing calls it.
 
         self.pump.start()
-        self._discovery_handle = self.engine.discovery.start()   # auto-starts;
-        # see "Target Actions tab" for how the user frees the radio (a later slice).
+        try:
+            self._discovery_handle = self.engine.discovery.start()   # auto-starts;
+            # see "Target Actions tab" for how the user frees the radio (a later slice).
+        except RadioCommandFailed as e:
+            self.status_bar.show_error(f"Discovery couldn't start: {e}")
+            self._discovery_handle = None
+            # Nothing to pause/resume if Discovery never started -- the "else"
+            # branch below would otherwise call .cancel() on None.
+            self._pause_resume_button.configure(state="disabled")
 
     def _ask_sudo_password_dialog(self, error: Optional[str] = None) -> Optional[str]:
         dialog = SudoPasswordDialog(self, error=error)
@@ -110,7 +117,11 @@ class App(ctk.CTk):
 
     def _on_pause_resume_discovery_clicked(self) -> None:
         if self._discovery_paused:
-            self._discovery_handle = self.engine.discovery.start()
+            try:
+                self._discovery_handle = self.engine.discovery.start()
+            except RadioCommandFailed as e:
+                self.status_bar.show_error(f"Discovery couldn't resume: {e}")
+                return  # stay paused; don't touch the stale handle or button text
             self._discovery_paused = False
             self._pause_resume_button.configure(text="Pause Discovery")
         else:

@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from aircommand.core import AdapterBusy, JobHandle, Target
+from aircommand.core import AdapterBusy, JobHandle, RadioCommandFailed, Target
 from aircommand.core.events import CaptureStopped, DeauthFired, HandshakeCaptured
 
 
@@ -101,6 +101,9 @@ class CapturePanel(ctk.CTkFrame):
             self._app.status_bar.show_error(
                 f"Radio busy: {e.holder.value} is using the adapter — free it first (see Discovery tab)"
             )
+            return
+        except RadioCommandFailed as e:
+            self._app.status_bar.show_error(f"Couldn't switch the adapter into monitor mode: {e}")
             return
         self.active_handle = handle
         self._burst_count = 0

@@ -51,6 +51,12 @@ class ProcHandle(Protocol):
         """Blocks until the process exits; returns its exit code."""
         ...
 
+    def stderr_tail(self) -> list[str]:
+        """Best-effort snapshot of recent stderr lines, for error messages only —
+        never used for control flow (see _RealProcHandle for why it's not
+        guaranteed complete)."""
+        ...
+
 
 class ProcRunner(Protocol):
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
@@ -166,6 +172,16 @@ class _RealProcHandle:
     def wait(self) -> int:
         return self._popen.wait()
 
+    def stderr_tail(self) -> list[str]:
+        # wait() only waits for the PROCESS to exit, not for _drain_stderr's
+        # thread to finish flushing whatever was left in the pipe — a small
+        # race that could occasionally miss the last line or two if called
+        # immediately after wait(). Bounded join closes that window for all
+        # practical purposes without risking a hang (the thread's for-loop
+        # ends on EOF, which follows the process exiting almost immediately).
+        self._stderr_thread.join(timeout=0.5)
+        return list(self._stderr_tail)
+
     def _drain_stderr(self) -> None:
         assert self._popen.stderr is not None
         for line in self._popen.stderr:
@@ -197,8 +213,12 @@ class SubprocessRunner:
 
 
 class _FakeProcHandle:
-    def __init__(self, scripted_lines: list[str]) -> None:
+    def __init__(
+        self, scripted_lines: list[str], *, returncode: int = 0, stderr_lines: Optional[list[str]] = None
+    ) -> None:
         self._scripted_lines = scripted_lines
+        self._returncode = returncode
+        self._stderr_lines = stderr_lines or []
         self.pid = next(_fake_pid_counter)
         self.pgid = self.pid  # ProcHandle.pgid's own contract: == pid, one session per spawn
 
@@ -212,7 +232,10 @@ class _FakeProcHandle:
         pass
 
     def wait(self) -> int:
-        return 0
+        return self._returncode
+
+    def stderr_tail(self) -> list[str]:
+        return self._stderr_lines
 
 
 class FakeProcRunner:
@@ -224,6 +247,8 @@ class FakeProcRunner:
         self,
         script: dict[str, list[str]],
         on_spawn: Optional[Callable[[list[str]], None]] = None,
+        returncodes: Optional[dict[str, int]] = None,
+        stderr: Optional[dict[str, list[str]]] = None,
     ) -> None:
         """script maps a recognizable argv[0] (e.g. 'airodump-ng') to the lines it
         should yield, so a test can drive Discovery/Capture/Crack/Enumerate without
@@ -233,14 +258,22 @@ class FakeProcRunner:
         --write-csv/-w, hashcat's --outfile) instead of only producing stdout. Kept
         as a plain callback rather than flag-parsing logic here, since different
         drivers invoke the same tool name with different flags -- see
-        docs/roadmap.md Phase 1 item 0."""
+        docs/roadmap.md Phase 1 item 0. returncodes/stderr map that same argv[0]
+        key to a scripted exit code / stderr tail, each defaulting to "succeeded,
+        nothing captured" so every existing script= call site is unaffected."""
         self._script = script
         self._on_spawn = on_spawn
+        self._returncodes = returncodes or {}
+        self._stderr = stderr or {}
 
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
         if self._on_spawn is not None:
             self._on_spawn(argv)
-        return _FakeProcHandle(self._script[argv[0]])
+        return _FakeProcHandle(
+            self._script[argv[0]],
+            returncode=self._returncodes.get(argv[0], 0),
+            stderr_lines=self._stderr.get(argv[0]),
+        )
         # A KeyError on that lookup means the test scripted the wrong argv[0] --
         # a test-author bug, not something this fake should paper over.
 

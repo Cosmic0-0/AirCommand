@@ -71,10 +71,13 @@ def test_shutdown_cancels_running_job_stops_privilege_releases_adapter_and_close
     mock_run.return_value = _completed(0)
 
     airmon_calls = []
+    systemctl_calls = []
 
     def on_spawn(argv: list[str]) -> None:
         if argv[0] == "airmon-ng":
             airmon_calls.append(argv)
+        elif argv[0] == "systemctl":
+            systemctl_calls.append(argv)
 
     engine = Engine(
         db_path=":memory:",
@@ -85,6 +88,7 @@ def test_shutdown_cancels_running_job_stops_privilege_releases_adapter_and_close
                 "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
                 "airodump-ng": _slow_lines(1000, 0.001),
                 "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "systemctl": ["Synchronizing state..."],
             },
             on_spawn=on_spawn,
         ),
@@ -120,6 +124,54 @@ def test_shutdown_cancels_running_job_stops_privilege_releases_adapter_and_close
     # proof shutdown() itself made this call, not a side effect of job cleanup.
     assert any(call[:2] == ["airmon-ng", "stop"] for call in airmon_calls)
 
+    # NetworkManager comes back the moment the adapter returns to managed mode
+    # -- this IS "when the app closes, NetworkManager needs to be reverted"
+    # (docs/adr/0005-networkmanager-check-kill.md), proven end-to-end through a
+    # real Engine.shutdown(), not just unit-tested on RadioController alone.
+    assert any(call == ["systemctl", "restart", "NetworkManager"] for call in systemctl_calls)
+
     # DB closed last.
+    with pytest.raises(sqlite3.ProgrammingError):
+        engine._db._conn.execute("SELECT 1")
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_shutdown_still_stops_privilege_and_closes_db_when_network_manager_restart_fails(mock_run, tmp_path):
+    # Same shape as test_shutdown_cancels_running_job_stops_privilege_releases_adapter_and_closes_db
+    # above, except "systemctl restart NetworkManager" fails (RadioCommandFailed,
+    # see rf.py) during release_to_managed() -- proving shutdown() catches that
+    # (per its own new comment) and still runs every step below it, rather than
+    # the exception propagating out of shutdown() and skipping privilege.stop()/
+    # db.close().
+    mock_run.return_value = _completed(0)
+
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": _slow_lines(1000, 0.001),
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "systemctl": ["Failed to restart NetworkManager.service: Access denied"],
+            },
+            returncodes={"systemctl": 1},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=999),
+    )
+
+    engine.privilege.start(PASSWORD)
+    assert engine.privilege._keepalive_thread.is_alive()
+
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    engine.capture.start_passive(target)
+    time.sleep(PRE_SHUTDOWN_SETTLE_S)  # see module docstring -- let the driver
+    # thread genuinely be mid-loop (and holding the RF reservation) first.
+
+    engine.shutdown()  # must not raise despite the failing NetworkManager restart
+
+    # Every step AFTER the failed release_to_managed() still ran.
+    assert not engine.privilege._keepalive_thread.is_alive()
     with pytest.raises(sqlite3.ProgrammingError):
         engine._db._conn.execute("SELECT 1")

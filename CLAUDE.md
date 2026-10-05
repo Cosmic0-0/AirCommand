@@ -32,3 +32,11 @@ Claude does not run `git add`, `git commit`, `git push`, or anything else that w
 2. Give the exact command(s) to run, staging included (e.g. `git add <files>`, `git commit -m "..."`, `git push` as applicable).
 
 The user runs the command(s) themselves and reports back when done — treat the change as uncommitted until they do.
+
+## Repository hygiene
+
+- Preserve unrelated work in a dirty worktree.
+- Do not commit `.env`, database files, trained OCR data, generated build output,
+  or secrets.
+- Commits and pull requests are attributed to the human pushing them. Do not add
+  AI co-author trailers.

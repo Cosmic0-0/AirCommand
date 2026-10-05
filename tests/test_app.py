@@ -49,6 +49,10 @@ def _fake_proc() -> FakeProcRunner:
     return FakeProcRunner(script={
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
         "airodump-ng": _slow_lines(300, 0.001),
+        # Every test here closes the app via on_close() -> Engine.shutdown() ->
+        # release_to_managed(), which now restarts NetworkManager (ADR-0005) --
+        # needed or FakeProcRunner KeyErrors on "systemctl" the moment that runs.
+        "systemctl": ["Synchronizing state..."],
     })
 
 
@@ -161,6 +165,33 @@ def test_reconciliation_banner_reflects_a_real_stale_job_found_at_startup(mock_r
         if popen.poll() is None:
             popen.kill()
             popen.wait()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_check_kill_failure_at_startup_surfaces_error_and_disables_pause_resume(mock_run, tmp_path, monkeypatch):
+    # "airmon-ng check kill" failing (RadioCommandFailed, see rf.py) during the
+    # auto-start Discovery call in App.__init__ must not crash construction --
+    # it should be caught, surfaced via the status bar, and leave the
+    # pause/resume button disabled (nothing to pause/resume if Discovery never
+    # started -- see app.py's new except block).
+    mock_run.return_value = _completed(0)
+    monkeypatch.setattr(App, "_ask_sudo_password_dialog", lambda self, error=None: PASSWORD)
+
+    proc = FakeProcRunner(
+        script={
+            "airmon-ng": ["sudo: a password is required"],
+            "systemctl": ["Synchronizing state..."],
+        },
+        returncodes={"airmon-ng": 1},
+    )
+
+    app = App(db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=proc)
+    try:
+        assert app._discovery_handle is None
+        assert app.status_bar._error_label.cget("text") != ""
+        assert str(app._pause_resume_button.cget("state")) == "disabled"
+    finally:
+        app.on_close()
 
 
 def _banner_label_text(banner) -> str:
