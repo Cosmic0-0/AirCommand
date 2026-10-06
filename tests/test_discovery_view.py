@@ -47,9 +47,9 @@ DISCOVERY_NOISE = [
 
 
 def _write_csv_on_spawn(argv: list[str]) -> None:
-    if "--write-csv" not in argv:
+    if "--write" not in argv:
         return
-    prefix = argv[argv.index("--write-csv") + 1]
+    prefix = argv[argv.index("--write") + 1]
     Path(f"{prefix}-01.csv").write_text(CSV_CONTENT)
 
 

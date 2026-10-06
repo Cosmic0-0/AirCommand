@@ -6,11 +6,11 @@ reads via engine.capture.list_handshakes()/list_audit_log().
 
 Fixture trap: aircrack-ng's own argv also carries "-w /dev/null" (its wordlist
 argument), unrelated to airodump-ng's "-w <cap_path>" capture-file flag -- and
-Discovery's own airodump-ng invocation uses "--write-csv" instead of "-w" at
-all. _write_cap_file_on_spawn below is guarded on both argv[0] == "airodump-ng"
-and "-w" actually being present, so it only ever fires for Capture's own
-airodump-ng spawn -- never aircrack-ng's, and never Discovery's (test 4 starts
-Discovery first, to hold the RF reservation).
+Discovery's own airodump-ng invocation uses "--write" (long form) instead of
+"-w" at all. _write_cap_file_on_spawn below is guarded on both argv[0] ==
+"airodump-ng" and "-w" actually being present, so it only ever fires for
+Capture's own airodump-ng spawn -- never aircrack-ng's, and never Discovery's
+(test 4 starts Discovery first, to hold the RF reservation).
 
 One real-thread-timing subtlety, verified empirically against this repo's
 actual threading.Thread/Event behavior (see tests/test_jobs.py for this
@@ -84,8 +84,8 @@ def _write_cap_file_on_spawn(argv: list[str]) -> None:
     to hash. Guarded on argv[0] == "airodump-ng" first (aircrack-ng's own argv
     also contains "-w", for its unrelated /dev/null wordlist argument) and on
     "-w" actually being present (Discovery's airodump-ng invocation uses
-    "--write-csv" instead, and this callback is reused for the AdapterBusy
-    test, which starts Discovery before Capture)."""
+    "--write" instead, and this callback is reused for the AdapterBusy test,
+    which starts Discovery before Capture)."""
     if argv[0] != "airodump-ng" or "-w" not in argv:
         return
     cap_path = Path(argv[argv.index("-w") + 1])

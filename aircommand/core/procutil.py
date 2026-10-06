@@ -260,7 +260,7 @@ class FakeProcRunner:
         touching a real tool. on_spawn, if given, is called with the full argv on
         every spawn() call, before the ProcHandle is built -- the seam a test uses
         to simulate a tool that writes a real on-disk artifact (airodump-ng's
-        --write-csv/-w, hashcat's --outfile) instead of only producing stdout. Kept
+        --write/-w, hashcat's --outfile) instead of only producing stdout. Kept
         as a plain callback rather than flag-parsing logic here, since different
         drivers invoke the same tool name with different flags -- see
         docs/roadmap.md Phase 1 item 0. returncodes/stderr map that same argv[0]
