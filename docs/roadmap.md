@@ -252,6 +252,29 @@ spawning with `--write` (dropping the invalid `-csv` suffix) — the rest of thi
 item's design (poll the on-disk CSV, don't trust stdout) was and remains
 correct.
 
+**Revisited once more, after ADR-0008's `ProcHandle.poll()` fix landed:**
+re-reading this loop against Capture's own `finally` block (which already
+infers and publishes `StopReason.ERROR` when `aireplay-ng`/`airodump-ng` dies
+on its own) turned up a gap Discovery never had closed: its `_drive` loop had
+no terminal event at all. Airodump-ng dying unexpectedly mid-run (crash,
+unplugged adapter, killed externally) left the loop exiting via the
+`handle.poll() is not None` branch with nothing published — the GUI had no way
+to learn Discovery had silently stopped, and `NetworksView` would just stop
+updating with no explanation. Fixed by adding `DiscoveryStopped` (mirrors
+`CaptureStopped`'s `reason` field; Discovery only ever produces `CANCELLED` or
+`ERROR`, never `COMPLETED`), published from `_drive`'s `finally` block before
+`mark_terminal`, and wired in `app.py` to flip the Pause/Resume button to
+"Resume Discovery" and surface a status-bar error on `ERROR` specifically
+(not on the ordinary `CANCELLED` Pause-button path, which the click handler
+already reflects synchronously). This event is the same one
+`docs/design/gui-structure.md`'s "Open questions / deferred" section had
+already named and deferred for a *different* reason (letting other panels
+observe "the radio is now actually free") — that consumption still isn't
+wired, see its own updated note; only the failure-detection use here is done.
+Not ADR-worthy — applies an already-established pattern (Capture's own shape)
+to the one driver that hadn't gotten it yet, same reasoning as Phase 3 item
+0's `EnumerationFailed` addition below.
+
 ### 1. `capture.py` [DONE]
 
 The only `Handshake` mint site; drives **three** tools, not two (see below); is

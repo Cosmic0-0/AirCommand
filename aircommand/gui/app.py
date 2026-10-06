@@ -11,8 +11,10 @@ from typing import Optional
 import customtkinter as ctk
 
 from aircommand.core import Engine, InvalidSudoPasswordError, RadioCommandFailed
+from aircommand.core.domain import StopReason
 from aircommand.core.events import (
     DeauthFired,
+    DiscoveryStopped,
     HandshakeCaptured,
     NetworkDiscovered,
     NetworkSightingUpdated,
@@ -93,6 +95,8 @@ class App(ctk.CTk):
             # Nothing to pause/resume if Discovery never started -- the "else"
             # branch below would otherwise call .cancel() on None.
             self._pause_resume_button.configure(state="disabled")
+        else:
+            self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=self._discovery_handle.job_id)
 
     def _ask_sudo_password_dialog(self, error: Optional[str] = None) -> Optional[str]:
         dialog = SudoPasswordDialog(self, error=error)
@@ -122,12 +126,23 @@ class App(ctk.CTk):
             except RadioCommandFailed as e:
                 self.status_bar.show_error(f"Discovery couldn't resume: {e}")
                 return  # stay paused; don't touch the stale handle or button text
+            self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=self._discovery_handle.job_id)
             self._discovery_paused = False
             self._pause_resume_button.configure(text="Pause Discovery")
         else:
             self._discovery_handle.cancel()
             self._discovery_paused = True
             self._pause_resume_button.configure(text="Resume Discovery")
+
+    def _on_discovery_stopped(self, event: DiscoveryStopped) -> None:
+        if event.reason != StopReason.ERROR:
+            return  # CANCELLED is the normal Pause-button/shutdown path, already
+            # reflected synchronously by the click handler above -- nothing to add.
+        self.status_bar.show_error(
+            "Discovery stopped unexpectedly — check your adapter/sudo session, then Resume"
+        )
+        self._discovery_paused = True
+        self._pause_resume_button.configure(text="Resume Discovery")
 
     def _build_target_actions_tab(self) -> None:
         tab = self.tabview.add("Target Actions")
