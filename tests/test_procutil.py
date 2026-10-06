@@ -30,7 +30,7 @@ def _real_run_privileged(argv: list[str]) -> subprocess.Popen:
     result correctly, not to re-prove real sudo elevation (which needs actual
     root and can't be exercised on this machine -- see module docstring)."""
     return subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, process_group=0
     )
 
 
@@ -48,8 +48,8 @@ def test_spawn_unprivileged_pid_and_pgid_match_the_real_process():
 
     handle = runner.spawn(["python3", "-c", "import time; time.sleep(2)"], privileged=False)
     try:
-        # True because SubprocessRunner passes start_new_session=True, making the
-        # spawned process its own session+group leader -- checked against the
+        # True because SubprocessRunner passes process_group=0, making the
+        # spawned process its own process group leader -- checked against the
         # real OS, not just asserted from the Popen object's own pid.
         assert os.getpgid(handle.pid) == handle.pgid
     finally:

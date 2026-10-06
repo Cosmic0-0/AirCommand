@@ -131,8 +131,9 @@ class _RealProcHandle:
     def pgid(self) -> int:
         # == self._popen.pid — valid because every Popen this class wraps (both
         # branches of SubprocessRunner.spawn below, and SudoSession.run_privileged
-        # in privilege.py) passes start_new_session=True, making the spawned
-        # process its own session AND process group leader, so pid == pgid.
+        # in privilege.py) passes process_group=0, making the spawned process its
+        # own process group leader (pid == pgid) WITHOUT also making it a new
+        # session leader (that was the bug — see run_privileged's own comment).
         # Confirmed against this repo's target OS (Linux) semantics, not assumed.
         return self._popen.pid
 
@@ -203,13 +204,17 @@ class SubprocessRunner:
             popen = self._sudo_run_privileged(argv)
         else:
             popen = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      text=True, start_new_session=True)
+                                      text=True, process_group=0)
         return _RealProcHandle(popen, privileged=privileged, run_privileged=self._sudo_run_privileged)
         # Both branches must produce a Popen with the SAME shape (stdout=PIPE,
-        # stderr=PIPE, text=True, start_new_session=True) — privilege.py's
-        # run_privileged already does this on its own side for the privileged
-        # branch, matched here for the unprivileged one so _RealProcHandle can
-        # treat both uniformly.
+        # stderr=PIPE, text=True, process_group=0) — privilege.py's run_privileged
+        # already does this on its own side for the privileged branch (see its own
+        # comment for why process_group=0 and not start_new_session=True — the
+        # latter broke sudo's session-scoped credential cache on real hardware),
+        # matched here for the unprivileged one so _RealProcHandle can treat both
+        # uniformly. Nothing in this (unprivileged) branch actually needed the
+        # new-session side effect either — it only ever existed for the pgid
+        # guarantee below.
 
 
 class _FakeProcHandle:

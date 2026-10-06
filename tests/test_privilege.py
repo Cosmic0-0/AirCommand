@@ -133,7 +133,7 @@ def test_run_privileged_invokes_sudo_dash_n_with_matching_popen_shape(mock_popen
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
+        process_group=0,
     )
     assert result is mock_popen.return_value
 
