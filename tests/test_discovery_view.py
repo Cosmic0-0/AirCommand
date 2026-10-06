@@ -37,13 +37,11 @@ CSV_CONTENT = (
     f"{BSSID_1}, 2024-01-01 10:00:00, 2024-01-01 10:00:05, 6, 54, WPA2, CCMP, PSK, -40, 10, 0, 0.0.0.0, 4, Net1, \n"
 )
 
-# A finite scripted stdout stream: handle.lines() exhausting naturally is what
-# drives Discovery._drive's finally block (mark_terminal), so wait_for_test()
-# below returns instead of hanging -- same reasoning as test_discovery_acceptance.py.
-DISCOVERY_NOISE = [
-    "CH  6 ][ Elapsed: 4 s ][ 2024-01-01 10:00",
-    " BSSID              PWR RXQ  Beacons  #Data  CH  MB   ENC  CIPHER AUTH ESSID",
-]
+# _drive's loop is a plain wall-clock loop now, driven by ProcHandle.poll()
+# for liveness, not handle.lines() -- see test_discovery_acceptance.py's module
+# docstring for the full real-hardware finding. One tick is enough for this
+# test to see the CSV file get polled once.
+DISCOVERY_TICK_COUNT = 1
 
 
 def _write_csv_on_spawn(argv: list[str]) -> None:
@@ -93,10 +91,14 @@ def make_target_removed(bssid) -> TargetRemoved:
 
 def test_seeds_from_networks_discovered_by_a_real_discovery_job(tmp_path):
     proc = FakeProcRunner(
-        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": DISCOVERY_NOISE},
+        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
         on_spawn=_write_csv_on_spawn,
+        running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
     )
-    engine = _make_engine(tmp_path, proc=proc, discovery_poll_interval=timedelta(seconds=0))
+    engine = _make_engine(
+        tmp_path, proc=proc, discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
     handle = engine.discovery.start()
     handle.wait_for_test(timeout=2.0)
 

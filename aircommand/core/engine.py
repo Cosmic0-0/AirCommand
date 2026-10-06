@@ -16,7 +16,7 @@ from aircommand.core.crack import Crack
 from aircommand.core.discovery import DEFAULT_DISCOVERY_POLL_INTERVAL, Discovery
 from aircommand.core.enumerate import Enumerator
 from aircommand.core.events import Event, EventBus, Subscription
-from aircommand.core.jobs import JobId, JobRegistry
+from aircommand.core.jobs import DEFAULT_DRIVE_TICK_INTERVAL, JobId, JobRegistry
 from aircommand.core.persistence.db import Database
 from aircommand.core.persistence.sighting_batch import SightingBatcher
 from aircommand.core.privilege import SudoSession
@@ -42,6 +42,7 @@ class Engine:
         proc: Optional[ProcRunner] = None,
         discovery_poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
         capture_handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
+        drive_tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
     ) -> None:
         self._db = Database(db_path)
         self._bus = EventBus()
@@ -68,11 +69,13 @@ class Engine:
         self.discovery = Discovery(
             self._db.networks, self._bus, self._jobs, self._rf, self._proc,
             self._work_dir, self._db.new_connection_scope, discovery_poll_interval,
+            drive_tick_interval,
         )
         self.capture = Capture(
             self.targets, self._db.handshakes, self._db.audit_log, self._bus,
             self._jobs, self._rf, self._proc, self._work_dir,
             self._db.new_connection_scope, capture_handshake_check_interval,
+            drive_tick_interval,
         )
         self.enumerate = Enumerator(
             self.targets, self._db.enum_results, self._bus, self._jobs, self._rf, self._proc,

@@ -16,23 +16,20 @@ One real-thread-timing subtlety, verified empirically against this repo's
 actual threading.Thread/Event behavior (see tests/test_jobs.py for this
 codebase's existing comfort with real-thread-timing tests) rather than assumed:
 
-1. Calling handle.cancel() immediately (zero delay) after start_passive()/
-   start_deauth_assisted() reliably wins the race against the driver thread's
-   very first loop iteration on this system (threading.Thread.start() blocks
-   the calling thread until the new thread has begun bootstrapping, which in
-   practice hands the new thread the CPU for its whole run -- and with a
-   plain, instantly-iterable list of scripted lines, "whole run" reliably
-   means the driver thread exhausts every line and reaches its own finally
-   block before this thread's next line ever executes, regardless of how many
-   lines are scripted). Since the cancellation check comes before the deauth/
-   handshake-check logic in the loop body, an immediate cancel would make the
-   scripted aircrack-ng/aireplay-ng behavior below never actually get
-   exercised -- or, if delayed naively, risks the loop exhausting on its own
-   first (reason=ERROR instead of CANCELLED). _slow_lines() below sidesteps
-   both failure modes with real (but tiny) per-line delays, so a short real
-   sleep before cancel() reliably lands mid-loop: enough real iterations
-   happen first to exercise what each scenario is actually meant to prove,
-   while the scripted stream is far from exhausted when cancellation lands.
+1. _drive's main loop no longer iterates handle.lines() at all (see capture.py's
+   own comment -- a real-hardware finding that gating cancellation/deauth/
+   handshake-check timing on the spawned tool's own stdout chatter is
+   unreliable). It's a plain wall-clock loop instead, driven by
+   ProcHandle.poll() for liveness. FakeProcHandle.poll() reports "already
+   exited" immediately unless told to report "still running" for a number of
+   polls first (running_polls=, see procutil.py) -- so every script below
+   gives "airodump-ng" a generous running_polls budget (plenty of margin for
+   whatever each test needs to exercise) and _make_engine passes a tiny
+   drive_tick_interval, so that budget covers comfortably more real wall-clock
+   time than any test actually waits, without making the suite slow. A test
+   that wants the loop to keep going past its very first check (anything
+   beyond "finds the handshake on the first check") needs running_polls of at
+   least 2; this file just uses one generous shared value throughout.
 """
 
 from __future__ import annotations
@@ -53,12 +50,6 @@ from aircommand.core.rf import AdapterBusy
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
-# Content is unused by _drive (see capture.py's `for _line in handle.lines()`) --
-# only the count matters. Used only for the handshake-found-on-first-check
-# scenario, which breaks out on its very first iteration regardless -- no real
-# delay needed there, so a plain, instantly-iterable list is enough.
-CAPTURE_NOISE = [f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00" for i in range(150)]
-
 NO_HANDSHAKE_OUTPUT = ["No valid WPA handshakes found"]
 CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 
@@ -69,12 +60,17 @@ CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 # matching what every existing assertion in this file already assumes.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
-# See module docstring, point 1. Real but tiny -- comfortably shorter than any
-# human-perceptible delay, long enough (given _slow_lines' own per-line delay
-# below) to let several loop iterations run for real before a same-process
-# .cancel() call lands, and comfortably shorter than _slow_lines' own total
-# runtime so cancellation always lands well before the scripted stream would
-# ever exhaust naturally.
+# See module docstring, point 1. Generous shared running_polls budget (times
+# DRIVE_TICK_INTERVAL below) for every "airodump-ng" entry in this file --
+# comfortably more real time than any test actually waits before cancelling,
+# without making the suite slow (each tick is 1ms).
+AIRODUMP_RUNNING_POLLS = 1000
+DRIVE_TICK_INTERVAL = timedelta(seconds=0.001)
+
+# Real but tiny -- comfortably shorter than any human-perceptible delay, and
+# than AIRODUMP_RUNNING_POLLS * DRIVE_TICK_INTERVAL's own ~1s budget, so
+# cancellation always lands well before the fake process would ever "exit" on
+# its own.
 PRE_CANCEL_SETTLE_S = 0.02
 
 
@@ -92,28 +88,19 @@ def _write_cap_file_on_spawn(argv: list[str]) -> None:
     cap_path.write_bytes(CAP_FILE_BYTES)
 
 
-def _slow_lines(count: int, delay_s: float):
-    """A scripted line stream that sleeps for real before each line -- used
-    only for Discovery's airodump-ng in the AdapterBusy test (module docstring
-    point 1 applies to Discovery's own driver thread too: with a plain list of
-    noise lines, Discovery's loop -- nothing here ever cancels it -- reliably
-    runs to completion and releases the RF reservation before this test's very
-    next line executes). FakeProcRunner only ever iterates whatever's under a
-    script key via `yield from`, so any iterable works, not just a list."""
-    for i in range(count):
-        time.sleep(delay_s)
-        yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
-
-
 def _make_engine(tmp_path, script: dict[str, list[str]]) -> Engine:
     return Engine(
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script=script, on_spawn=_write_cap_file_on_spawn),
+        proc=FakeProcRunner(
+            script=script, on_spawn=_write_cap_file_on_spawn,
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
         # Zero interval: Pacer.due() fires on every check, same trick
         # discovery_poll_interval already uses -- see test_discovery_acceptance.py.
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
     )
 
 
@@ -122,7 +109,7 @@ def test_passive_capture_finds_handshake_on_first_check(tmp_path):
         tmp_path,
         script={
             "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-            "airodump-ng": CAPTURE_NOISE[:3],
+            "airodump-ng": [],  # content unused -- see module docstring point 1
             "aircrack-ng": ["   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"],
         },
     )
@@ -154,7 +141,7 @@ def test_passive_capture_never_finds_handshake_gets_cancelled(tmp_path):
         tmp_path,
         script={
             "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-            "airodump-ng": _slow_lines(1000, 0.001),
+            "airodump-ng": [],  # content unused -- see module docstring point 1
             "aircrack-ng": NO_HANDSHAKE_OUTPUT,
         },
     )
@@ -182,7 +169,7 @@ def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
         tmp_path,
         script={
             "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-            "airodump-ng": _slow_lines(1000, 0.001),
+            "airodump-ng": [],  # content unused -- see module docstring point 1
             "aircrack-ng": NO_HANDSHAKE_OUTPUT,
             "aireplay-ng": [],  # only .wait()'d, never .lines()'d -- see capture.py
         },
@@ -214,14 +201,14 @@ def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
 def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path):
     engine = _make_engine(
         tmp_path,
-        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": _slow_lines(30, 0.01)},
+        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     # Reserves the adapter synchronously inside .start() itself, before
-    # Discovery's driver thread even runs -- deterministic. The slow scripted
-    # stdout (module docstring point 1) is what keeps Discovery's thread
-    # actually still holding that reservation by the time the next line runs.
+    # Discovery's driver thread even runs -- deterministic. AIRODUMP_RUNNING_POLLS
+    # (module docstring point 1) is what keeps Discovery's thread actually still
+    # holding that reservation by the time the next line runs.
     engine.discovery.start()
 
     with pytest.raises(AdapterBusy):

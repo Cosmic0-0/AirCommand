@@ -16,6 +16,20 @@ from typing import Optional
 from aircommand.core.domain import JobId, JobKind, StaleJob
 from aircommand.core.persistence.db import JobRepository
 
+# How often a driver's own wall-clock loop (Discovery/Capture's _drive, see
+# their own comments) wakes to check cancellation, process liveness
+# (ProcHandle.poll()), and its Pacer(s) -- NOT how often any one of those
+# Pacers itself fires. Added after a real-hardware finding: gating those
+# checks on the spawned tool's own stdout chatter (the previous design) is
+# unreliable -- confirmed directly that real `airodump-ng` run through `sudo`
+# with a piped stdout can stop producing output indefinitely after its first
+# line, likely because sudo allocates a pty for the child and a curses-style
+# redrawing tool can hang against a pty with no real terminal behind it.
+# Short enough that cancellation feels responsive without busy-looping;
+# overridable per-instance purely for test injectability, same reason every
+# other interval in this codebase is (see Discovery/Capture's own __init__).
+DEFAULT_DRIVE_TICK_INTERVAL = timedelta(seconds=0.5)
+
 
 class Pacer:
     """Rate-gates a periodic check inside a driver loop that iterates far faster

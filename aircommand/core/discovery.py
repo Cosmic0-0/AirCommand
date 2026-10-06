@@ -5,6 +5,7 @@ open to any Network, requires no authorization. See CONTEXT.md: 'Discovery'.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,7 +13,14 @@ from typing import Callable
 
 from aircommand.core.domain import DiscoveryOptions, JobKind, Network
 from aircommand.core.events import EventBus, NetworkDiscovered, NetworkSightingUpdated
-from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry, Pacer
+from aircommand.core.jobs import (
+    DEFAULT_DRIVE_TICK_INTERVAL,
+    CancellationToken,
+    JobHandle,
+    JobId,
+    JobRegistry,
+    Pacer,
+)
 from aircommand.core.parse import parse_airodump_csv_line
 from aircommand.core.persistence.db import ConnectionScope, NetworkRepository
 from aircommand.core.procutil import ProcRunner
@@ -36,6 +44,7 @@ class Discovery:
         work_dir: Path,
         new_connection_scope: Callable[..., ConnectionScope],
         poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
+        tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
     ) -> None:
         self._repo = repo  # main-connection repo -- list_networks() (main-thread read) only
         self._bus = bus
@@ -45,6 +54,7 @@ class Discovery:
         self._work_dir = work_dir
         self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._poll_interval = poll_interval
+        self._tick_interval_s = tick_interval.total_seconds()
 
     def start(self, options: DiscoveryOptions = DiscoveryOptions()) -> JobHandle:
         reservation = self._rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
@@ -83,30 +93,44 @@ class Discovery:
             # FakeProcRunner never validates argv against the real binary):
             # this used to pass "--write-csv", which doesn't exist -- real
             # airodump-ng (confirmed against --help) only has "--write"/"-w",
-            # with csv included in its default --output-format set. The bogus
-            # flag made airodump-ng exit instantly with "unrecognized option"
-            # (exit 1, zero stdout lines), which this method's own for-loop
-            # below treats identically to "ran fine, found nothing" -- so this
-            # was silently broken from the start, independent of every
-            # monitor-mode/sudo issue fixed before it (see rf.py/privilege.py).
+            # with csv included in its default --output-format set. Fixed, but
+            # that alone wasn't enough -- see the loop below's own comment for
+            # the deeper, structural bug this one was hiding behind.
             handle = self._proc.spawn(
                 ["airodump-ng", "--write", str(csv_prefix), adapter], privileged=True
             )
             self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}",
                                        repo=db_scope.jobs)
-            for _line in handle.lines():
-                # _line's CONTENT is deliberately unused -- see docs/roadmap.md
-                # Phase 1 item 0. handle.lines() still drives this loop for what
-                # it's actually good for: detecting cancellation below, and
-                # detecting the process dying (this for-loop ends naturally
-                # either way). Network data comes from polling csv_path instead,
-                # since airodump-ng's stdout carries its live interactive display,
-                # not parseable CSV rows.
+            # SECOND BUG FOUND ON REAL HARDWARE, independent of the flag typo
+            # above: this loop used to be `for _line in handle.lines(): ...`,
+            # gating cancellation checks and CSV polling entirely on
+            # airodump-ng producing a new stdout line. Confirmed directly
+            # (two separate standalone repros, not assumed) that real
+            # airodump-ng run through `sudo` with a piped stdout can stop
+            # producing output indefinitely after its very first line --
+            # almost certainly because sudo allocates a pty for the child,
+            # and a curses-style redrawing tool can hang against a pty with
+            # no real terminal behind it. The underlying airodump-ng process
+            # keeps running and keeps writing csv_path correctly the whole
+            # time (confirmed on real hardware too) -- only the OLD loop's
+            # own cancellation/polling logic went silent, forever, since
+            # nothing ever drove another iteration. Fixed by decoupling
+            # entirely from handle.lines(): a plain wall-clock loop checks
+            # cancellation and the Pacer every tick_interval regardless of
+            # what the subprocess's stdout is doing, and ProcHandle.poll()
+            # (non-blocking) replaces "the for-loop ended" as the signal that
+            # the process died on its own. stdout is still drained in the
+            # background either way (procutil.py's _RealProcHandle), so this
+            # isn't at risk of the classic two-pipe write-side deadlock.
+            while True:
                 if token.is_cancelled():
                     handle.terminate()
                     break
+                if handle.poll() is not None:
+                    break  # process exited on its own -- nothing left to poll for
                 if pacer.due():
                     self._poll_csv(csv_path, db_scope.networks)
+                time.sleep(self._tick_interval_s)
         finally:
             # Must run even if a poll crashes the loop (e.g. a malformed-but-
             # BSSID-valid row — parse_airodump_csv_line deliberately lets that

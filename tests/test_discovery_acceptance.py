@@ -4,9 +4,12 @@ docs/design/core-gui-boundary.md 'Usage (caller's view)', headless call site.
 
 airodump-ng writes network data to <prefix>-01.csv on disk, not to stdout --
 stdout carries its live interactive display instead (see docs/roadmap.md Phase 1
-item 0). These tests script stdout with exactly that kind of interactive-display
-noise, never CSV, so the only way a network can be discovered here is via the
-on-disk poll -- proving the fix rather than the bug it replaced.
+item 0). _drive's loop doesn't touch handle.lines() content at all anymore
+(see discovery.py's own comment on a later, deeper real-hardware finding: even
+*gating ticks on stdout arriving* was unreliable) -- it's a plain wall-clock
+loop now, driven by ProcHandle.poll() for liveness. These tests feed
+"airodump-ng" an empty scripted line list (content is simply never read) and
+control how many poll ticks happen via FakeProcRunner's running_polls= instead.
 """
 
 from __future__ import annotations
@@ -41,18 +44,16 @@ CSV_CONTENT = (
     + "\n"
 )
 
-# airodump-ng's actual stdout: its live interactive display, redrawn in place --
-# never CSV. Not one comma-separated field in sight, so if the old bug (parsing
-# stdout line-by-line as CSV) were still present, parse_airodump_csv_line would
-# reject every one of these and zero networks would ever be discovered. Four
-# lines -> four poll ticks (with the zero poll interval below), enough to prove
-# "discovered once, then updated on every later tick" rather than just once.
-DISCOVERY_NOISE = [
-    "CH  6 ][ Elapsed: 4 s ][ 2024-01-01 10:00",
-    " BSSID              PWR RXQ  Beacons  #Data  CH  MB   ENC  CIPHER AUTH ESSID",
-    "CH  6 ][ Elapsed: 8 s ][ 2024-01-01 10:00",
-    " BSSID              PWR RXQ  Beacons  #Data  CH  MB   ENC  CIPHER AUTH ESSID",
-]
+# _drive's loop no longer iterates handle.lines() at all (see discovery.py's
+# own comment -- a real-hardware finding that gating CSV polling on the
+# spawned tool's own stdout chatter is unreliable). It's a plain wall-clock
+# loop instead, driven by ProcHandle.poll() for liveness: FakeProcHandle.poll()
+# reports "still running" for exactly this many calls before reporting
+# "exited", so this number IS the poll-tick count now (with the zero poll
+# interval below, each tick fires the Pacer) -- same role DISCOVERY_NOISE's
+# line count used to play, enough to prove "discovered once, then updated on
+# every later tick" rather than just once.
+DISCOVERY_TICK_COUNT = 4
 
 # RadioController.reserve() now really spawns "airmon-ng" on its first
 # monitor-mode use (docs/roadmap.md Phase 2 item 1) -- every script below needs
@@ -77,20 +78,22 @@ def _write_csv_on_spawn(argv: list[str]) -> None:
 
 def test_discovery_polls_csv_file_not_stdout_for_networks(tmp_path):
     """The regression test. Networks can only appear here because the on-disk
-    CSV file was read -- the scripted stdout (DISCOVERY_NOISE) could never have
-    parsed as CSV, so this would discover nothing under the old, buggy behavior."""
+    CSV file was read -- _drive's loop never touches handle.lines() content at
+    all now, so this would discover nothing if _poll_csv itself were broken."""
     engine = Engine(
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
         proc=FakeProcRunner(
-            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": DISCOVERY_NOISE},
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
             on_spawn=_write_csv_on_spawn,
+            running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
         ),
-        # Zero interval: Pacer.due() fires on every check, so every one of the
-        # scripted noise lines above drives its own poll tick -- fast and
-        # deterministic, no real sleeping needed to exercise several iterations.
+        # Zero interval: Pacer.due() fires on every tick. Zero tick interval:
+        # fast and deterministic, no real sleeping needed to exercise several
+        # iterations -- DISCOVERY_TICK_COUNT alone controls how many happen.
         discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
     discovered = []
     sighting_updates = []
@@ -108,7 +111,7 @@ def test_discovery_polls_csv_file_not_stdout_for_networks(tmp_path):
 
     # The CSV file is unchanged on every tick after the first read, so every
     # later tick updates the existing sighting instead of re-discovering it.
-    assert len(sighting_updates) == 2 * (len(DISCOVERY_NOISE) - 1)
+    assert len(sighting_updates) == 2 * (DISCOVERY_TICK_COUNT - 1)
     assert {u.network.bssid for u in sighting_updates} == expected_bssids
 
     networks = engine.discovery.list_networks()
@@ -124,8 +127,12 @@ def test_discovery_survives_csv_file_never_appearing(tmp_path):
         work_dir=tmp_path,
         adapter="wlan0",
         # no on_spawn -- csv never written
-        proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": DISCOVERY_NOISE}),
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
+        ),
         discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
 
     handle = engine.discovery.start()
