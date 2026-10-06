@@ -24,7 +24,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from aircommand.core.domain import MacAddress
+from aircommand.core.domain import CrackResultRow, Exhausted, MacAddress, StopReason
 from aircommand.core.engine import Engine
 from aircommand.core.events import CrackProgress, CrackResult, HandshakeCaptured
 from aircommand.core.procutil import FakeProcRunner
@@ -222,6 +222,38 @@ def test_crack_panel_end_to_end_successful_crack(tmp_path):
 
         assert len(panel._results_body.winfo_children()) >= 1
         assert panel._start_button.cget("state") == "normal"
+    finally:
+        root.destroy()
+
+
+def test_crack_panel_format_result_distinguishes_error_stop_reason_from_completed(tmp_path):
+    """ADR-0009: a crashed hashcat run leaves outcome=Exhausted() unchanged
+    (CrackOutcome is a sealed Found|Exhausted|Aborted set, see domain.py) --
+    stop_reason=ERROR is the only signal that it wasn't a legitimately
+    exhausted wordlist. _format_result must check stop_reason before falling
+    back to the outcome-based text, or a crash would silently display as a
+    plain "Exhausted (not found)", the same distinction
+    CapturePanel._on_stopped already surfaces via event.reason.value.
+    """
+    engine = _make_engine(tmp_path, _base_script([]))
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = CrackPanel(root, fake_app)
+
+        common = dict(
+            id=1, handshake_id=1, outcome=Exhausted(), wordlist_path=Path("wordlist.txt"),
+            started_at=datetime.now(), finished_at=datetime.now(),
+        )
+        completed_row = CrackResultRow(stop_reason=StopReason.COMPLETED, **common)
+        error_row = CrackResultRow(stop_reason=StopReason.ERROR, **common)
+
+        completed_text = panel._format_result(completed_row)
+        error_text = panel._format_result(error_row)
+
+        assert "Exhausted (not found)" in completed_text
+        assert "Exhausted (not found)" not in error_text
+        assert completed_text != error_text
     finally:
         root.destroy()
 

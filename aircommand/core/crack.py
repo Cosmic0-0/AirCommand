@@ -70,10 +70,15 @@ class Crack:
         # that (already-known-writable) location rather than adding a work_dir param
         # to Crack just for this one file.
         outfile_path = handshake.cap_file_path.parent / f"{job_id}-hashcat.outfile"
-        # This thread's own connection -- never self._repo (the main connection)
-        # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
-        db_scope = self._new_connection_scope()
+        # ADR-0009: db_scope/handle start out None and open/spawn INSIDE the try, so
+        # a raise from _new_connection_scope() itself still reaches finally below --
+        # without this, no row is written for the job and mark_terminal never runs.
+        db_scope = None
+        handle = None
         try:
+            # This thread's own connection -- never self._repo (the main connection)
+            # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
+            db_scope = self._new_connection_scope()
             handle = self._proc.spawn(
                 ["hashcat", "-m", "22000", str(handshake.cap_file_path), str(wordlist_path),
                  "--status", "--status-json",
@@ -91,6 +96,10 @@ class Crack:
                     self._bus.publish(CrackProgress(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                         job_id=job_id, hashrate=status.hashrate, eta=status.eta, percent=status.percent))
         finally:
+            # ADR-0009: hashcat's real exit code, read once the stream loop above
+            # has ended (cancelled or exhausted) -- None if spawn() itself never
+            # even ran.
+            returncode = handle.wait() if handle is not None else None
             # Check a clean on-disk artifact after the fact, not a live stream value —
             # same idiom as Discovery's CSV and Capture's handshake check. Never branch
             # on hashcat's numeric --status-json status field (unconfirmed meaning).
@@ -102,16 +111,27 @@ class Crack:
             outcome = (Found(key=plaintext) if plaintext
                        else Aborted() if token.is_cancelled()
                        else Exhausted())
-            stop_reason = StopReason.CANCELLED if token.is_cancelled() else StopReason.COMPLETED
-            row = db_scope.crack_results.insert(handshake_id=handshake.id, outcome=outcome,
-                wordlist_path=wordlist_path, started_at=started_at, finished_at=datetime.now(),
-                stop_reason=stop_reason)  # sync write
-            self._bus.publish(CrackResult(event_id=uuid.uuid4(), occurred_at=datetime.now(),
-                                           job_id=job_id, result=row))   # DurableEvent
+            # ADR-0009: a crashed hashcat run (bad args, no GPU driver, an unreadable
+            # .cap file) used to be indistinguishable from a legitimately exhausted
+            # wordlist -- both leave an empty outfile. Trust COMPLETED only when there's
+            # plaintext or a clean exit code; outcome itself stays Exhausted() either way
+            # (CrackOutcome is a sealed Found|Exhausted|Aborted set, see domain.py) --
+            # stop_reason is the only new signal, same precedent as Capture's own
+            # StopReason.ERROR usage.
+            stop_reason = (StopReason.CANCELLED if token.is_cancelled()
+                           else StopReason.COMPLETED if (plaintext or returncode == 0)
+                           else StopReason.ERROR)
+            if db_scope is not None:
+                row = db_scope.crack_results.insert(handshake_id=handshake.id, outcome=outcome,
+                    wordlist_path=wordlist_path, started_at=started_at, finished_at=datetime.now(),
+                    stop_reason=stop_reason)  # sync write
+                self._bus.publish(CrackResult(event_id=uuid.uuid4(), occurred_at=datetime.now(),
+                                               job_id=job_id, result=row))   # DurableEvent
             # mark_terminal LAST, deliberately, same reason as capture.py's _drive: it's
             # what unblocks JobHandle.wait_for_test(), so publish CrackResult first -- a
             # caller that wakes on mark_terminal should be able to trust the event already
             # fired, not race it. (This ordering bug was found for real in Capture's
             # acceptance tests; apply the fix here too, don't reintroduce it.)
-            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
-            db_scope.close()
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
+            if db_scope is not None:
+                db_scope.close()

@@ -15,7 +15,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from aircommand.core import CrackResultRow, Handshake, JobHandle
-from aircommand.core.domain import Exhausted, Found
+from aircommand.core.domain import Exhausted, Found, StopReason
 from aircommand.core.events import CrackProgress, CrackResult
 
 
@@ -136,6 +136,14 @@ class CrackPanel(ctk.CTkFrame):
             ctk.CTkLabel(self._results_body, text=self._format_result(result), anchor="w").pack(side="top", fill="x")
 
     def _format_result(self, result: CrackResultRow) -> str:
+        # ADR-0009: a crashed hashcat run leaves outcome=Exhausted() (CrackOutcome
+        # has no fourth variant for this) with stop_reason=ERROR as the only signal
+        # -- check it first, same distinction CapturePanel._on_stopped already
+        # surfaces via event.reason.value, or this would silently display a crash
+        # as a plain "Exhausted (not found)".
+        if result.stop_reason == StopReason.ERROR:
+            return (f"Failed to complete (exit error) — wordlist {result.wordlist_path.name} — "
+                    f"{result.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
         if isinstance(result.outcome, Found):
             outcome_text = f"Found: {result.outcome.key}"
         elif isinstance(result.outcome, Exhausted):

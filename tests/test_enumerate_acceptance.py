@@ -237,6 +237,55 @@ def test_failed_scan_publishes_enumeration_failed_and_cleans_up():
     assert thread_exceptions[0].exc_type is OSError
 
 
+def test_enumerate_releases_rf_reservation_even_if_new_connection_scope_raises():
+    """ADR-0009 regression: _drive used to call self._new_connection_scope()
+    BEFORE its own try:, so a raise there skipped `finally` (the RF release
+    inside it included) entirely -- leaking the reservation for the rest of
+    the live session. Proves both halves of the fix: the first job's thread
+    still terminates (wait_for_test doesn't hang) and the reservation it held
+    is genuinely released -- a second start_scan() right after succeeds
+    instead of raising AdapterBusy.
+    """
+
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    enumerator, allowlist, bus, jobs = _make_enumerator({"nmap": [NMAP_XML]}, fake_get_subnet)
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    real_new_connection_scope = enumerator._new_connection_scope
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connection scope failed")
+        return real_new_connection_scope(*args, **kwargs)
+
+    enumerator._new_connection_scope = raise_on_first_call
+
+    # Unlike Discovery/Capture, Enumerator._drive HAS an except Exception clause
+    # that re-raises after publishing EnumerationFailed -- the raise above is
+    # still caught there (it sits inside the now-widened try) before
+    # propagating out of the thread uncaught. Suppress the default excepthook's
+    # traceback spam for this expected-and-scripted case, same pattern this
+    # file's own test_failed_scan_publishes_enumeration_failed_and_cleans_up
+    # already uses.
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        first_handle = enumerator.start_scan(target)
+        first_handle.wait_for_test(timeout=2.0)  # must not hang
+    finally:
+        threading.excepthook = original_hook
+
+    # The real assertion: RadioController's reservation from the first (failed)
+    # job was released -- a second start_scan() right after succeeds rather
+    # than raising AdapterBusy.
+    second_handle = enumerator.start_scan(target)
+    second_handle.wait_for_test(timeout=2.0)
+
+
 def test_get_interface_subnet_against_real_loopback_interface():
     """Real ioctl call, no fake, no mocking -- validates the struct-packing/
     ioctl logic against actual Linux behavior rather than only against

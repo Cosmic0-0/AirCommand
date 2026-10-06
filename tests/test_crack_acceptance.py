@@ -120,7 +120,10 @@ def _make_on_spawn(hashcat_key: Optional[str]) -> Callable[[list[str]], None]:
     return on_spawn
 
 
-def _make_engine(tmp_path, script: dict, hashcat_key: Optional[str] = None) -> Engine:
+def _make_engine(
+    tmp_path, script: dict, hashcat_key: Optional[str] = None,
+    returncodes: Optional[dict[str, int]] = None,
+) -> Engine:
     return Engine(
         db_path=":memory:",
         work_dir=tmp_path,
@@ -128,6 +131,7 @@ def _make_engine(tmp_path, script: dict, hashcat_key: Optional[str] = None) -> E
         proc=FakeProcRunner(
             script=script, on_spawn=_make_on_spawn(hashcat_key),
             running_polls={"airodump-ng": 1},
+            returncodes=returncodes or {},
         ),
         # Zero interval: Pacer.due() fires on every check -- same trick
         # test_capture_acceptance.py's _make_engine uses, needed here for the
@@ -252,6 +256,37 @@ def test_crack_exhausts_wordlist_without_finding_key(tmp_path):
     assert engine.crack.list_results(handshake) == [result_row]
 
 
+def test_crack_records_error_stop_reason_when_hashcat_crashes(tmp_path):
+    """ADR-0009 regression: a crashed hashcat run (bad args, no GPU driver, an
+    unreadable .cap file) used to be indistinguishable from a legitimately
+    exhausted wordlist -- both leave an empty outfile, and the old code never
+    checked hashcat's real exit code at all. returncodes={"hashcat": 1} plus
+    hashcat_key=None (no outfile written, matching a real crash leaving
+    nothing behind) and an empty scripted "hashcat" stdout together simulate
+    exactly that: hashcat dying immediately, nothing to iterate, no outfile.
+    outcome stays Exhausted() (CrackOutcome has no fourth variant for this --
+    see domain.py); stop_reason is the only signal that should change.
+    """
+    engine = _make_engine(tmp_path, _base_script([]), hashcat_key=None, returncodes={"hashcat": 1})
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    handle = engine.crack.start(handshake, wordlist_path)
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(results) == 1
+    result_row = results[0].result
+    assert isinstance(result_row.outcome, Exhausted)
+    assert result_row.handshake_id == handshake.id
+    assert result_row.stop_reason == StopReason.ERROR
+
+    assert engine.crack.list_results(handshake) == [result_row]
+
+
 def test_crack_cancelled_before_finishing(tmp_path):
     engine = _make_engine(
         tmp_path, _base_script(_slow_hashcat_lines(1000, 0.001)), hashcat_key=None
@@ -276,6 +311,66 @@ def test_crack_cancelled_before_finishing(tmp_path):
     assert result_row.stop_reason == StopReason.CANCELLED
 
     assert engine.crack.list_results(handshake) == [result_row]
+
+
+def test_crack_cleans_up_even_if_new_connection_scope_raises(tmp_path):
+    """ADR-0009 regression: _drive used to call self._new_connection_scope()
+    BEFORE its own try:, so a raise there skipped `finally` entirely -- no
+    mark_terminal() call at all. Crack takes no RF reservation (unlike
+    Discovery/Capture/Enumerate -- "hashcat doesn't touch the radio"), so the
+    externally visible symptom isn't AdapterBusy; it's JobRegistry's
+    in-memory bookkeeping for the job never getting cleaned up, i.e.
+    wait_for_test() hanging forever. Proves the fix: the first job's thread
+    still terminates (no row is written for it -- db_scope never opened, so
+    no CrackResult publishes either, per crack.py's own guard), and a second
+    crack job started right after still completes normally.
+    """
+    engine = _make_engine(tmp_path, _base_script([]), hashcat_key=None)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    real_new_connection_scope = engine.crack._new_connection_scope
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connection scope failed")
+        return real_new_connection_scope(*args, **kwargs)
+
+    engine.crack._new_connection_scope = raise_on_first_call
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+
+    # No except clause in Crack._drive -- the raise above propagates out of
+    # the (daemon) thread uncaught, same as any other unexpected exception
+    # there. Suppress the default excepthook's traceback spam for this
+    # expected-and-scripted case, same pattern test_discovery_acceptance.py's
+    # and test_capture_acceptance.py's own ADR-0009 regression tests use.
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        first_handle = engine.crack.start(handshake, wordlist_path)
+        first_handle.wait_for_test(timeout=2.0)  # must not hang
+    finally:
+        threading.excepthook = original_hook
+
+    assert results == []  # no connection ever opened -- nothing to write or publish
+
+    # The real assertion: JobRegistry's in-memory bookkeeping for the first
+    # job was cleaned up correctly (mark_terminal ran, even with repo=None,
+    # falling back to the main connection from the wrong thread -- exactly
+    # what jobs.py's own mark_terminal hardening guards against) -- a second
+    # crack job right after completes normally, proving the live session
+    # isn't wedged.
+    second_handle = engine.crack.start(handshake, wordlist_path)
+    second_handle.wait_for_test(timeout=2.0)
+
+    assert len(results) == 1
+    assert results[0].job_id == second_handle.job_id
 
 
 def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str]], None]:

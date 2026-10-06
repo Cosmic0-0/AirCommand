@@ -35,6 +35,7 @@ codebase's existing comfort with real-thread-timing tests) rather than assumed:
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -213,6 +214,57 @@ def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path
 
     with pytest.raises(AdapterBusy):
         engine.capture.start_passive(target)
+
+
+def test_capture_releases_rf_reservation_even_if_new_connection_scope_raises(tmp_path):
+    """ADR-0009 regression: _drive used to call self._new_connection_scope()
+    BEFORE its own try:, so a raise there skipped `finally` (the RF release
+    inside it included) entirely -- leaking the reservation for the rest of
+    the live session. Proves both halves of the fix: the first job's thread
+    still terminates (wait_for_test doesn't hang) and the reservation it held
+    is genuinely released -- a second start_passive() right after succeeds
+    instead of raising AdapterBusy.
+    """
+    engine = _make_engine(
+        tmp_path,
+        script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+            "airodump-ng": [],  # content unused -- see module docstring point 1
+            "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+        },
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    real_new_connection_scope = engine.capture._new_connection_scope
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connection scope failed")
+        return real_new_connection_scope(*args, **kwargs)
+
+    engine.capture._new_connection_scope = raise_on_first_call
+
+    # No except clause in Capture._drive -- the raise above propagates out of
+    # the (daemon) thread uncaught, same as any other unexpected exception
+    # there. Suppress the default excepthook's traceback spam for this
+    # expected-and-scripted case, same pattern test_enumerate_acceptance.py's
+    # own failure test already uses.
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        first_handle = engine.capture.start_passive(target)
+        first_handle.wait_for_test(timeout=2.0)  # must not hang
+    finally:
+        threading.excepthook = original_hook
+
+    # The real assertion: RadioController's reservation from the first (failed)
+    # job was released -- a second start_passive() right after succeeds rather
+    # than raising AdapterBusy.
+    second_handle = engine.capture.start_passive(target)
+    second_handle.cancel()
+    second_handle.wait_for_test(timeout=2.0)
 
 
 def test_not_a_target_error_when_target_removed_after_fetch(tmp_path):

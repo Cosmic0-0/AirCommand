@@ -114,11 +114,15 @@ class Capture:
         burst_count = 0
         handshake_pacer = Pacer(self._handshake_check_interval)
         deauth_pacer = Pacer(deauth.interval) if deauth is not None else None
-        # This thread's own connection -- never self._audit/self._handshakes (the
-        # main connection) from in here. See persistence/db.py's Database/
-        # ConnectionScope docstrings.
-        db_scope = self._new_connection_scope()
+        # ADR-0009: db_scope starts out None and opens INSIDE the try, so a raise
+        # from _new_connection_scope() itself still reaches finally below --
+        # without this, the RF reservation leaks for the rest of the live session.
+        db_scope = None
         try:
+            # This thread's own connection -- never self._audit/self._handshakes (the
+            # main connection) from in here. See persistence/db.py's Database/
+            # ConnectionScope docstrings.
+            db_scope = self._new_connection_scope()
             handle = self._proc.spawn(
                 ["airodump-ng", "-c", str(target.channel), "--bssid", str(target.bssid),
                  "-w", str(cap_path), adapter], privileged=True)
@@ -199,5 +203,6 @@ class Capture:
             # event has already been observed by every subscriber, not race it. (Found via
             # the acceptance tests: with the old ordering, wait_for_test() returning did NOT
             # imply CaptureStopped had fired yet — a real ordering bug, not a test artifact.)
-            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
-            db_scope.close()
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
+            if db_scope is not None:
+                db_scope.close()
