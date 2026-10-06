@@ -57,10 +57,32 @@ class SudoSession:
 
     def run_privileged(self, argv: list[str]) -> subprocess.Popen:
         # Must match procutil.py's SubprocessRunner unprivileged Popen shape exactly
-        # (stdout=PIPE, stderr=PIPE, text=True, start_new_session=True) -- the
-        # wrapping _RealProcHandle (procutil.py) treats both paths identically, and
-        # start_new_session=True is what makes popen.pid a valid pgid for the
-        # SIGTERM/SIGKILL group-signal calls in ProcHandle.terminate()/kill().
+        # (stdout=PIPE, stderr=PIPE, text=True, process_group=0) -- the wrapping
+        # _RealProcHandle (procutil.py) treats both paths identically.
+        #
+        # BUG FOUND ON REAL HARDWARE (not just theorized): this used to pass
+        # start_new_session=True instead of process_group=0. That calls setsid()
+        # in the child, which puts it in a brand-new SESSION with no controlling
+        # tty -- a DIFFERENT session than the one start()'s `sudo -S -v` primed
+        # the credential cache under. With this machine's sudo (no tty_tickets
+        # override in /etc/sudoers*, so the compiled-in default applies: the
+        # cached credential is scoped to the calling tty-or-session), every
+        # single privileged call landed in its own never-before-seen session and
+        # could never match that cache -- so `sudo -n` failed with "a password is
+        # required" on EVERY call, regardless of password correctness, even right
+        # after start() succeeded (confirmed via the GUI: "Privilege: ACTIVE" but
+        # the very next airmon-ng call failed this way). Confirmed empirically
+        # (not just from sudo's docs) that start_new_session=True gives the child
+        # a distinct, unique session id every time, while process_group=0 (Python
+        # 3.11+; this repo targets 3.12) gives the child its own process group --
+        # same pid==pgid guarantee the SIGTERM/SIGKILL group-signal calls in
+        # ProcHandle.terminate()/kill() need -- WITHOUT creating a new session, so
+        # it stays visible to the credential cached under the original session.
+        # This was very likely the real root cause of the original "adapter never
+        # enters monitor mode" bug, not NetworkManager/wpa_supplicant interference
+        # (see docs/adr/0005-networkmanager-check-kill.md) -- that fix is still
+        # correct and needed on its own merits, it just never got a chance to run.
+        #
         # A lapsed cache surfaces as this Popen's process exiting fast with a
         # non-zero code and empty stdout -- the calling job's driver loop notices
         # via its own `for line in handle.lines()` ending immediately, and reports
@@ -75,7 +97,7 @@ class SudoSession:
         return subprocess.Popen(
             ["sudo", "-n", *argv],  # -n so a lapsed cache fails fast (non-zero exit
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # immediately) instead of hanging
-            text=True, start_new_session=True,  # on a prompt with no tty to answer it
+            text=True, process_group=0,  # own pgid, SAME session as the primed credential
         )
 
     def stop(self) -> None:
