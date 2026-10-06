@@ -29,7 +29,7 @@ AP_HEADER = (
 
 # What airodump-ng actually writes to <prefix>-01.csv -- the on-disk artifact
 # _poll_csv reads, rewritten in place each refresh cycle. Two networks, same row
-# shape real airodump-ng --write-csv output uses.
+# shape real airodump-ng --write output uses.
 CSV_CONTENT = (
     "\n".join(
         [
@@ -62,16 +62,16 @@ AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
 
 def _write_csv_on_spawn(argv: list[str]) -> None:
-    """Simulates airodump-ng's --write-csv side effect: writes the real on-disk
+    """Simulates airodump-ng's --write side effect: writes the real on-disk
     artifact _poll_csv reads, at the path airodump-ng itself would use (the
-    --write-csv prefix argument, plus airodump-ng's own "-01.csv" suffix
-    convention -- see Discovery._drive). Guarded on "--write-csv" actually being
+    --write prefix argument, plus airodump-ng's own "-01.csv" suffix
+    convention -- see Discovery._drive). Guarded on "--write" actually being
     present since FakeProcRunner now fires on_spawn for every spawn, including
     RadioController's own "airmon-ng start <adapter>" call (docs/roadmap.md
     Phase 2 item 1), which carries no such flag."""
-    if "--write-csv" not in argv:
+    if "--write" not in argv:
         return
-    prefix = argv[argv.index("--write-csv") + 1]
+    prefix = argv[argv.index("--write") + 1]
     Path(f"{prefix}-01.csv").write_text(CSV_CONTENT)
 
 

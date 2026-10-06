@@ -13,9 +13,10 @@ from aircommand.core.domain import EncryptionType, EnumHost, MacAddress, Network
 
 
 def parse_airodump_csv_line(line: str) -> Network | None:
-    """One line of airodump-ng's --write-csv output -> a Network, or None if the
-    line isn't a network row (airodump's CSV also emits a client-list section in
-    the same file, separated by a blank line and a different header)."""
+    """One line of airodump-ng's --write (csv output format) -> a Network, or
+    None if the line isn't a network row (airodump's CSV also emits a
+    client-list section in the same file, separated by a blank line and a
+    different header)."""
     # AP section field order: 0 BSSID, 1 First time seen, 2 Last time seen,
     # 3 channel, 4 Speed, 5 Privacy, 6 Cipher, 7 Authentication, 8 Power,
     # 9 # beacons, 10 # IV, 11 LAN IP, 12 ID-length, 13 ESSID, [14 Key, often

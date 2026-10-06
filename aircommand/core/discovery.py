@@ -69,8 +69,8 @@ class Discovery:
         # fresh Discovery job's first poll ever reading a stale -01.csv left
         # over from a previous job that wrote to the same fixed path.
         csv_prefix = self._work_dir / f"aircommand-discovery-{job_id}"
-        # airodump-ng's own naming convention for --write-csv <prefix>: it
-        # appends "-01.csv" (incrementing if the file already exists) itself.
+        # airodump-ng's own naming convention for --write <prefix>: it appends
+        # "-01.csv" (incrementing if the file already exists) itself.
         csv_path = Path(f"{csv_prefix}-01.csv")
         pacer = Pacer(self._poll_interval)
         # This thread's own connection -- never self._repo (the main connection)
@@ -79,8 +79,18 @@ class Discovery:
         # instead of every driver sharing one unsynchronized sqlite3.Connection.
         db_scope = self._new_connection_scope()
         try:
+            # BUG FOUND ON REAL HARDWARE (not caught by any test, since
+            # FakeProcRunner never validates argv against the real binary):
+            # this used to pass "--write-csv", which doesn't exist -- real
+            # airodump-ng (confirmed against --help) only has "--write"/"-w",
+            # with csv included in its default --output-format set. The bogus
+            # flag made airodump-ng exit instantly with "unrecognized option"
+            # (exit 1, zero stdout lines), which this method's own for-loop
+            # below treats identically to "ran fine, found nothing" -- so this
+            # was silently broken from the start, independent of every
+            # monitor-mode/sudo issue fixed before it (see rf.py/privilege.py).
             handle = self._proc.spawn(
-                ["airodump-ng", "--write-csv", str(csv_prefix), adapter], privileged=True
+                ["airodump-ng", "--write", str(csv_prefix), adapter], privileged=True
             )
             self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}",
                                        repo=db_scope.jobs)

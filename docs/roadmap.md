@@ -223,6 +223,24 @@ Update `tests/test_discovery_acceptance.py` accordingly — it currently scripts
 `FakeProcRunner` with CSV lines as scripted stdout, which will need to change to
 match whatever the fixed `_drive` actually reads.
 
+**Revisited:** this item's own fix shipped with a second, independent bug baked
+into it, found on real hardware long after this item was marked done: "`--write-csv
+<prefix>`" throughout this writeup (and in the shipped code) is not a real
+airodump-ng flag — confirmed directly against `airodump-ng --help`, which only
+has `--write`/`-w` (CSV is one of several formats in its default
+`--output-format` set, not a separate flag). Real airodump-ng rejected the bogus
+flag with "unrecognized option" and exited immediately (exit 1, no stdout) —
+which `_drive`'s own for-loop over `handle.lines()` couldn't tell apart from
+"ran fine, found nothing," so Discovery silently found zero networks against
+real hardware the whole time, on top of (and independent of) every
+monitor-mode/sudo issue layered on top of it later (ADR-0005,
+`RadioCommandFailed`, the `process_group=0` sudo-session fix). `FakeProcRunner`
+never caught this because it only ever replays scripted lines against whatever
+argv it's given — it doesn't validate argv against the real tool. Fixed by
+spawning with `--write` (dropping the invalid `-csv` suffix) — the rest of this
+item's design (poll the on-disk CSV, don't trust stdout) was and remains
+correct.
+
 ### 1. `capture.py` [DONE]
 
 The only `Handshake` mint site; drives **three** tools, not two (see below); is
