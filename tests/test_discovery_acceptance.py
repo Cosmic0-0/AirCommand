@@ -14,6 +14,7 @@ control how many poll ticks happen via FakeProcRunner's running_polls= instead.
 
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -193,3 +194,57 @@ def test_discovery_publishes_stopped_with_cancelled_reason_when_cancelled(tmp_pa
     assert len(stopped) == 1
     assert stopped[0].job_id == handle.job_id
     assert stopped[0].reason == StopReason.CANCELLED
+
+
+def test_discovery_releases_rf_reservation_even_if_new_connection_scope_raises(tmp_path):
+    """ADR-0009 regression: _drive used to call self._new_connection_scope()
+    BEFORE its own try:, so a raise there skipped `finally` (the RF release
+    inside it included) entirely -- leaking the reservation for the rest of
+    the live session, with every later Discovery/Capture/Enumerate start()
+    raising AdapterBusy. Proves both halves of the fix: the first job's
+    thread still terminates (wait_for_test doesn't hang) and the reservation
+    it held is genuinely released -- a second start() right after succeeds
+    instead of raising AdapterBusy.
+    """
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            on_spawn=_write_csv_on_spawn,
+            running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
+        ),
+        discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
+    real_new_connection_scope = engine.discovery._new_connection_scope
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("connection scope failed")
+        return real_new_connection_scope(*args, **kwargs)
+
+    engine.discovery._new_connection_scope = raise_on_first_call
+
+    # No except clause in Discovery._drive -- the raise above propagates out of
+    # the (daemon) thread uncaught, same as any other unexpected exception
+    # there. Suppress the default excepthook's traceback spam for this
+    # expected-and-scripted case, same pattern test_enumerate_acceptance.py's
+    # own failure test already uses.
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        first_handle = engine.discovery.start()
+        first_handle.wait_for_test(timeout=2.0)  # must not hang
+    finally:
+        threading.excepthook = original_hook
+
+    # The real assertion: RadioController's reservation from the first (failed)
+    # job was released -- a second start() right after succeeds rather than
+    # raising AdapterBusy.
+    second_handle = engine.discovery.start()
+    second_handle.cancel()
+    second_handle.wait_for_test(timeout=2.0)

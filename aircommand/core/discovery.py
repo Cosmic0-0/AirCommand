@@ -83,12 +83,17 @@ class Discovery:
         # "-01.csv" (incrementing if the file already exists) itself.
         csv_path = Path(f"{csv_prefix}-01.csv")
         pacer = Pacer(self._poll_interval)
-        # This thread's own connection -- never self._repo (the main connection)
-        # from in here. See persistence/db.py's Database/ConnectionScope
-        # docstrings: every job-driver thread gets its own connection now,
-        # instead of every driver sharing one unsynchronized sqlite3.Connection.
-        db_scope = self._new_connection_scope()
+        # ADR-0009: db_scope starts out None and the connection open happens
+        # INSIDE the try, so a raise from _new_connection_scope() itself still
+        # reaches finally below -- without this, the RF reservation leaks for
+        # the rest of the live session (every later start() raises AdapterBusy).
+        db_scope = None
         try:
+            # This thread's own connection -- never self._repo (the main connection)
+            # from in here. See persistence/db.py's Database/ConnectionScope
+            # docstrings: every job-driver thread gets its own connection now,
+            # instead of every driver sharing one unsynchronized sqlite3.Connection.
+            db_scope = self._new_connection_scope()
             # BUG FOUND ON REAL HARDWARE (not caught by any test, since
             # FakeProcRunner never validates argv against the real binary):
             # this used to pass "--write-csv", which doesn't exist -- real
@@ -154,8 +159,9 @@ class Discovery:
             reason = StopReason.CANCELLED if token.is_cancelled() else StopReason.ERROR
             self._bus.publish(DiscoveryStopped(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                                 job_id=job_id, reason=reason))
-            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
-            db_scope.close()
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
+            if db_scope is not None:
+                db_scope.close()
 
     def _poll_csv(self, csv_path: Path, networks: NetworkRepository) -> None:
         try:

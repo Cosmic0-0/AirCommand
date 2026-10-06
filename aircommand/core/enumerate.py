@@ -95,10 +95,14 @@ class Enumerator:
         target: Target,
         options: EnumOptions,
     ) -> None:
-        # This thread's own connection -- never self._repo (the main connection)
-        # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
-        db_scope = self._new_connection_scope()
+        # ADR-0009: db_scope starts out None and opens INSIDE the try, so a raise
+        # from _new_connection_scope() itself still reaches finally below --
+        # without this, the RF reservation leaks for the rest of the live session.
+        db_scope = None
         try:
+            # This thread's own connection -- never self._repo (the main connection)
+            # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
+            db_scope = self._new_connection_scope()
             subnet = self._get_subnet(reservation.adapter)   # see module docstring — Option A;
             # lets an OSError here (interface not yet joined to anything) propagate, same as any
             # other unexpected mid-drive error elsewhere in this codebase
@@ -120,8 +124,9 @@ class Enumerator:
                     # threading excepthook, still reaches `finally` below
         finally:
             self._rf.release(reservation)
-            self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
-            db_scope.close()
+            self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
+            if db_scope is not None:
+                db_scope.close()
 
         # Note: token/cancellation isn't actually checkable mid-scan here — nmap's -oX -
         # output is buffered to completion (see the xml= line above), not iterated line by

@@ -275,6 +275,14 @@ Not ADR-worthy — applies an already-established pattern (Capture's own shape)
 to the one driver that hadn't gotten it yet, same reasoning as Phase 3 item
 0's `EnumerationFailed` addition below.
 
+**Found and fixed, during the same re-read:** this loop's own setup
+(`db_scope = self._new_connection_scope()`) used to run *before* its `try:`, same
+as Capture's/Crack's/Enumerator's — if it raised, this loop's `finally` (the
+`DiscoveryStopped` publish above included) never ran at all, leaking the RF
+reservation for the rest of the live session. See
+`docs/adr/0009-driver-thread-failure-safety-net.md` for the full writeup and
+the fix — done, covering all four drivers, not just this one.
+
 ### 1. `capture.py` [DONE]
 
 The only `Handshake` mint site; drives **three** tools, not two (see below); is
@@ -375,6 +383,19 @@ plaintext from it), empty means `Exhausted` (if the process ran to completion) o
 `Aborted` (if cancelled) — this avoids needing to trust an unverified enum and
 matches the same "check a clean on-disk artifact after the fact, not a live stream
 value" idiom used for Discovery's CSV and Capture's handshake check above.
+
+**Found and fixed, re-reading this against Capture's own
+`StopReason.ERROR` pattern:** the "empty outfile means Exhausted" inference above
+is exactly right for a wordlist that genuinely ran to completion, but `_drive`
+used to never actually check whether it did — if `hashcat` died immediately (bad
+args, no GPU driver, an unreadable `.cap`), the empty outfile looked identical to
+a real exhausted run, and the crash got durably recorded as
+`stop_reason=StopReason.COMPLETED`. Wrong data in a security-audit trail, not
+just a missing error message. See
+`docs/adr/0009-driver-thread-failure-safety-net.md` for the fix — done: checks
+`hashcat`'s real exit code via `handle.wait()`, and uses the existing
+`StopReason.ERROR` value (same as Capture already does) rather than inventing a
+fourth `CrackOutcome` variant.
 
 ### 3. `enumerate.py` [DONE]
 

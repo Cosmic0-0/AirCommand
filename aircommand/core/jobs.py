@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+import logging
 import threading
 import time
 import uuid
@@ -15,6 +16,8 @@ from typing import Optional
 
 from aircommand.core.domain import JobId, JobKind, StaleJob
 from aircommand.core.persistence.db import JobRepository
+
+logger = logging.getLogger(__name__)
 
 # How often a driver's own wall-clock loop (Discovery/Capture's _drive, see
 # their own comments) wakes to check cancellation, process liveness
@@ -155,7 +158,18 @@ class JobRegistry:
         #
         # `repo`: see record_process's docstring above -- same reasoning, same
         # default.
-        (repo or self._repo).mark_terminal(job_id)
+        #
+        # The in-memory cleanup below must run even if this write fails (ADR-0009):
+        # e.g. a driver whose own _new_connection_scope() raised has no `repo` to
+        # pass, and the main-connection fallback is check_same_thread-bound to
+        # another thread, so it raises ProgrammingError from here. Swallowing (and
+        # logging) is correct -- the stale RUNNING row is ADR-0004 reconciliation's
+        # job on next launch -- whereas leaking _tokens/_terminal_events would hang
+        # wait_for_test() and misreport the job as still active.
+        try:
+            (repo or self._repo).mark_terminal(job_id)
+        except Exception:
+            logger.exception("mark_terminal DB write failed for job %s", job_id)
         with self._lock:
             self._tokens.pop(job_id, None)
             event = self._terminal_events.get(job_id)
