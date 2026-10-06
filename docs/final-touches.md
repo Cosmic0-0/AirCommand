@@ -1,12 +1,14 @@
 # Final touches — what's left before v1 is actually finished
 
 Phase 1 (core engine), Phase 2 (real subprocess/hardware code), and Phase 3
-(GUI) are all complete per `docs/roadmap.md`: 194 tests pass, all headless
-(`FakeProcRunner`, no real subprocess/root/hardware), and an independent
-review pass (2026-09-20) re-verified the Phase 3 GUI commits against
-`docs/design/gui-structure.md` line by line, reproduced and re-fixed the one
-flaky test found, and found no spec drift or security gaps. One stale comment
-(`aircommand/core/reconciliation.py`) was corrected as part of that pass.
+(GUI) are all complete per `docs/roadmap.md`: 201 tests pass (194 headless via
+`FakeProcRunner` as of Phase 3's own completion, plus 7 added since while
+fixing the real-hardware bugs item 2 below found — see its own entry), and an
+independent review pass (2026-09-20) re-verified the Phase 3 GUI commits
+against `docs/design/gui-structure.md` line by line, reproduced and re-fixed
+the one flaky test found, and found no spec drift or security gaps. One stale
+comment (`aircommand/core/reconciliation.py`) was corrected as part of that
+pass.
 
 Nothing below is a design question. Everything here is either a small
 mechanical gap or a hands-on validation step — there is no more "should this
@@ -65,10 +67,20 @@ not a suggestion). Concretely:
 
 - [ ] Sudo dialog: enter your password, confirm it accepts a correct one and
       retries cleanly on a wrong one.
-- [ ] Discovery & Targets tab: confirm real networks populate the table (not
+- [x] Discovery & Targets tab: confirm real networks populate the table (not
       just your own — any nearby beacon, per CONTEXT.md's "Discovery is open
       to any Network"), signal/channel/encryption columns look sane, "Add as
-      Target" works against a network you own.
+      Target" works against a network you own. **Done — found and fixed three
+      independent, stacked real-hardware bugs to get here (none visible to any
+      headless test run): a sudo credential-cache bug that made every
+      privileged call fail regardless of password correctness; a literal
+      invalid CLI flag (`--write-csv` isn't real airodump-ng syntax); and
+      Discovery's own driver loop silently going inert whenever airodump-ng's
+      stdout stalled under `sudo`, which it does indefinitely on this
+      hardware. Full writeup: `docs/adr/0008-driver-loops-stop-depending-on-stdout.md`.
+      "Add as Target" itself not yet separately re-confirmed after this fix —
+      worth a quick real click-through, though nothing about this fix touched
+      that path.**
 - [ ] Target Actions tab: passive Capture against your own Target; confirm a
       real Handshake gets captured and shows up in the panel and the Crack
       tab's picker. Try deauth-assisted Capture too — confirm the
