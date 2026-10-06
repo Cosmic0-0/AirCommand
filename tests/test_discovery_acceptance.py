@@ -17,9 +17,9 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from aircommand.core.domain import MacAddress
+from aircommand.core.domain import MacAddress, StopReason
 from aircommand.core.engine import Engine
-from aircommand.core.events import NetworkDiscovered, NetworkSightingUpdated
+from aircommand.core.events import DiscoveryStopped, NetworkDiscovered, NetworkSightingUpdated
 from aircommand.core.procutil import FakeProcRunner
 
 BSSID_1 = "AA:BB:CC:DD:EE:01"
@@ -139,3 +139,57 @@ def test_discovery_survives_csv_file_never_appearing(tmp_path):
     handle.wait_for_test(timeout=2.0)  # must return well inside the timeout, not hang
 
     assert engine.discovery.list_networks() == []
+
+
+def test_discovery_publishes_stopped_with_error_reason_when_airodump_dies_unexpectedly(tmp_path):
+    """The gap this closes: until now, airodump-ng dying on its own (crash,
+    unplugged adapter, killed externally) published NOTHING -- the GUI had no
+    way to learn Discovery had silently stopped. FakeProcHandle.poll() reports
+    "exited" after DISCOVERY_TICK_COUNT calls, simulating exactly that."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
+        ),
+        discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
+    stopped = []
+    engine.subscribe(stopped.append, DiscoveryStopped)
+
+    handle = engine.discovery.start()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(stopped) == 1
+    assert stopped[0].job_id == handle.job_id
+    assert stopped[0].reason == StopReason.ERROR
+
+
+def test_discovery_publishes_stopped_with_cancelled_reason_when_cancelled(tmp_path):
+    """The Pause button's path: cancelling well before airodump-ng would ever
+    exit on its own must report CANCELLED, not ERROR."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            # Large enough that cancel() below always wins the race.
+            running_polls={"airodump-ng": 10_000},
+        ),
+        discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
+    stopped = []
+    engine.subscribe(stopped.append, DiscoveryStopped)
+
+    handle = engine.discovery.start()
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(stopped) == 1
+    assert stopped[0].job_id == handle.job_id
+    assert stopped[0].reason == StopReason.CANCELLED

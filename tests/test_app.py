@@ -107,6 +107,29 @@ def test_on_close_shuts_down_engine_and_destroys_window(mock_run, tmp_path, monk
         app.winfo_exists()
 
 
+@patch("aircommand.core.privilege.subprocess.run")
+def test_discovery_dying_unexpectedly_surfaces_error_and_flips_to_resume(mock_run, tmp_path, monkeypatch):
+    """The gap this closes: airodump-ng dying on its own used to leave the GUI
+    with no signal at all -- NetworksView just stopped updating silently.
+    _fake_proc()'s "airodump-ng" entry carries no running_polls override, so
+    FakeProcHandle.poll() reports "exited" on the very first call (see
+    procutil.py's running_polls default of 0) -- i.e. the process "dies
+    unexpectedly" as soon as Discovery's drive loop checks."""
+    mock_run.return_value = _completed(0)
+    monkeypatch.setattr(App, "_ask_sudo_password_dialog", lambda self, error=None: PASSWORD)
+
+    app = App(db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=_fake_proc())
+    try:
+        app._discovery_handle.wait_for_test(timeout=2.0)
+        app.pump._tick()  # drain the queued DiscoveryStopped event into the GUI handler
+
+        assert app.status_bar._error_label.cget("text") != ""
+        assert app._discovery_paused is True
+        assert app._pause_resume_button.cget("text") == "Resume Discovery"
+    finally:
+        app.on_close()
+
+
 def test_incorrect_password_is_retried_then_succeeds(tmp_path, monkeypatch):
     # sudo -k, sudo -S -v (rejected), sudo -k, sudo -S -v (accepted), plus
     # padding in case a keepalive tick or two fires for real before shutdown.

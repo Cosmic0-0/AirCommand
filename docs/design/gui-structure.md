@@ -540,13 +540,18 @@ gotten it yet, rather than choosing between real alternatives.
 
 ## Open questions / deferred (not blocking implementation)
 
-- **No `DiscoveryStopped`-equivalent event exists.** `EnumeratePanel`'s
-  `TargetSelector`/Discovery's own Pause button can't observe "the radio is
-  now actually free" — only send the cancel request. Acceptable per "Target
-  Actions tab" above (the failure mode, if the race is lost, is a caught,
-  visible `AdapterBusy`, not silence). Worth adding later purely as UX polish
-  (e.g. graying out Start buttons while Discovery is mid-stop); not required
-  for a correct v1.
+- **`DiscoveryStopped` now exists** (added for an unrelated reason — see
+  `docs/roadmap.md` Phase 1 item 0's latest "Revisited" note: Discovery dying
+  unexpectedly used to publish nothing at all, unlike Capture's
+  `CaptureStopped(reason=ERROR)`). `app.py` consumes it for that purpose only
+  (status-bar error + flipping its own Pause/Resume button on `ERROR`). The
+  original ask here — `EnumeratePanel`'s `TargetSelector`/other panels
+  observing "the radio is now actually free" to gray out Start buttons while
+  Discovery is mid-stop — is **still not wired**; nothing outside `app.py`
+  subscribes to this event yet. Still acceptable per "Target Actions tab"
+  above (the failure mode, if that race is lost, is a caught, visible
+  `AdapterBusy`, not silence); still worth adding later purely as UX polish,
+  not required for a correct v1.
 - **WPA3/SAE handling** stays exactly as unresolved as `core-gui-boundary.md`
   already left it. No GUI-side gap today since nothing mints a
   `HandshakeKind.WPA3_SAE` handshake yet — see "Crack tab" above.

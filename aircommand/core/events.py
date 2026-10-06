@@ -58,6 +58,23 @@ class NetworkSightingUpdated(TelemetryEvent):
     network: Network  # full snapshot — the event payload IS the cache update
 
 
+@dataclass(frozen=True)
+class DiscoveryStopped(DurableEvent):
+    """Discovery's _drive loop has no natural 'done' state of its own -- it only
+    ends via cancellation (the Pause button, or Engine.shutdown()) or the
+    underlying airodump-ng process dying unexpectedly (crash, unplugged
+    adapter, killed externally). Mirrors CaptureStopped's reason field, but
+    Discovery never produces StopReason.COMPLETED: only CANCELLED or ERROR.
+    Added because this event didn't exist at all before -- airodump-ng dying
+    mid-run left the GUI with no way to learn Discovery had silently stopped
+    (see discovery.py's own comment at the publish call site). Also answers
+    docs/design/gui-structure.md's deferred 'no DiscoveryStopped-equivalent
+    event exists' open question."""
+
+    job_id: JobId
+    reason: "StopReason"
+
+
 # --- Allowlist -------------------------------------------------------------------
 
 @dataclass(frozen=True)

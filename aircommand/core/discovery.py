@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from aircommand.core.domain import DiscoveryOptions, JobKind, Network
-from aircommand.core.events import EventBus, NetworkDiscovered, NetworkSightingUpdated
+from aircommand.core.domain import DiscoveryOptions, JobKind, Network, StopReason
+from aircommand.core.events import DiscoveryStopped, EventBus, NetworkDiscovered, NetworkSightingUpdated
 from aircommand.core.jobs import (
     DEFAULT_DRIVE_TICK_INTERVAL,
     CancellationToken,
@@ -138,6 +138,22 @@ class Discovery:
             # jobs row leak forever, and no later Discovery/Capture/Enumerate can
             # start.
             self._rf.release(reservation)
+            # GAP FOUND (not hardware-triggered -- found by re-reading this loop
+            # against Capture's equivalent finally block, which already does
+            # this): until now, airodump-ng dying unexpectedly mid-run (crash,
+            # unplugged adapter, killed externally) left this loop exiting via
+            # the handle.poll() branch above with NOTHING published. Discovery
+            # had no terminal event at all, unlike Capture's
+            # CaptureStopped(reason=StopReason.ERROR) -- the GUI had no way to
+            # learn Discovery had silently died; NetworksView would just stop
+            # updating with no explanation. Fixed the same way: Discovery has
+            # no COMPLETED state of its own (it runs until paused/cancelled),
+            # so the only two ways this loop ever ends are CANCELLED (the Pause
+            # button, or Engine.shutdown()) or ERROR (the process died on its
+            # own -- the only other way out of the while loop above).
+            reason = StopReason.CANCELLED if token.is_cancelled() else StopReason.ERROR
+            self._bus.publish(DiscoveryStopped(event_id=uuid.uuid4(), occurred_at=datetime.now(),
+                                                job_id=job_id, reason=reason))
             self._jobs.mark_terminal(job_id, repo=db_scope.jobs)
             db_scope.close()
 
