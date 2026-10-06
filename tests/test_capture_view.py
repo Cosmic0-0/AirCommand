@@ -23,13 +23,19 @@ import customtkinter as ctk
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
-CAPTURE_NOISE = [f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00" for i in range(150)]
 NO_HANDSHAKE_OUTPUT = ["No valid WPA handshakes found"]
 CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 
 # RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use --
 # see test_capture_acceptance.py's identical constant/comment.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
+
+# _drive's loop is a plain wall-clock loop now, driven by ProcHandle.poll() for
+# liveness, not handle.lines() content -- see test_capture_acceptance.py's
+# module docstring for the full real-hardware finding. Same generous shared
+# running_polls/tick_interval choice as that file, for the same reason.
+AIRODUMP_RUNNING_POLLS = 1000
+DRIVE_TICK_INTERVAL = timedelta(seconds=0.001)
 
 PRE_CANCEL_SETTLE_S = 0.02
 
@@ -41,12 +47,6 @@ def _write_cap_file_on_spawn(argv: list[str]) -> None:
         return
     cap_path = Path(argv[argv.index("-w") + 1])
     cap_path.write_bytes(CAP_FILE_BYTES)
-
-
-def _slow_lines(count: int, delay_s: float):
-    for i in range(count):
-        time.sleep(delay_s)
-        yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
 
 
 class _FakeRoot:
@@ -74,8 +74,12 @@ def _make_engine(tmp_path, script: dict) -> Engine:
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script=script, on_spawn=_write_cap_file_on_spawn),
+        proc=FakeProcRunner(
+            script=script, on_spawn=_write_cap_file_on_spawn,
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
     )
 
 
@@ -94,7 +98,7 @@ def _tick_until(pump: GuiEventPump, predicate, timeout: float = 2.0) -> None:
 
 
 def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(tmp_path):
-    engine = _make_engine(tmp_path, {"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": _slow_lines(30, 0.01)})
+    engine = _make_engine(tmp_path, {"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []})
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
     engine.discovery.start()  # reserves the adapter synchronously -- see
     # test_capture_acceptance.py's own AdapterBusy test for the timing rationale.
@@ -135,7 +139,7 @@ def test_deauth_confirm_declined_does_not_start_a_job(tmp_path):
 def test_deauth_confirm_accepted_starts_a_job(tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-        "airodump-ng": _slow_lines(1000, 0.001),
+        "airodump-ng": [],
         "aircrack-ng": NO_HANDSHAKE_OUTPUT,
         "aireplay-ng": [],
     })
@@ -161,7 +165,7 @@ def test_deauth_confirm_accepted_starts_a_job(tmp_path):
 def test_passive_capture_end_to_end_reaches_a_handshake_and_resets_on_stop(tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-        "airodump-ng": CAPTURE_NOISE[:3],
+        "airodump-ng": [],
         "aircrack-ng": ["   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"],
     })
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
@@ -198,7 +202,7 @@ def test_passive_capture_end_to_end_reaches_a_handshake_and_resets_on_stop(tmp_p
 def test_cancel_button_cancels_an_in_progress_capture(tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-        "airodump-ng": _slow_lines(1000, 0.001),
+        "airodump-ng": [],
         "aircrack-ng": NO_HANDSHAKE_OUTPUT,
     })
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")

@@ -58,8 +58,12 @@ def _make_engine(tmp_path, script: dict, hashcat_key=None) -> Engine:
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script=script, on_spawn=_make_on_spawn(hashcat_key)),
+        proc=FakeProcRunner(
+            script=script, on_spawn=_make_on_spawn(hashcat_key),
+            running_polls={"airodump-ng": 1},
+        ),
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
 
 

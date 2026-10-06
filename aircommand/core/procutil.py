@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import itertools
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -49,6 +50,22 @@ class ProcHandle(Protocol):
 
     def wait(self) -> int:
         """Blocks until the process exits; returns its exit code."""
+        ...
+
+    def poll(self) -> Optional[int]:
+        """Non-blocking liveness check: None if the process is still running,
+        its exit code if it has already exited. Never blocks -- unlike wait(),
+        and unlike lines() (which only yields on the tool's own schedule).
+        Added after a real-hardware finding: Discovery/Capture used to gate
+        their cancellation checks and periodic polling entirely on handle.
+        lines() producing a new stdout line, which silently stops working if
+        the spawned tool's stdout stalls -- confirmed directly on real
+        hardware that `airodump-ng` run through `sudo` with a piped (not
+        file-redirected) stdout can stop producing output indefinitely after
+        its first line, almost certainly because sudo allocates a pty for the
+        child and a curses-style redrawing tool can hang against a pty with
+        no real terminal behind it. poll() lets a driver's own wall-clock loop
+        detect "the process already exited" without depending on that."""
         ...
 
     def stderr_tail(self) -> list[str]:
@@ -105,23 +122,46 @@ class _RealProcHandle:
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=200)
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
-        # STDERR DEADLOCK NOTE: stdout and stderr are both PIPE (a fixed OS pipe
-        # buffer, ~64KB on Linux). Every driver's _drive only ever reads
-        # handle.lines() (stdout). If a spawned tool writes enough to stderr
-        # (warnings/chatter — airodump-ng/aircrack-ng/hashcat can all do this) to
-        # fill that pipe with nobody draining it, the child blocks trying to
-        # write more, and anything waiting on its stdout blocks right along with
-        # it — a classic two-pipe subprocess deadlock. Fixed with a small
-        # always-on drain thread per handle that reads stderr into a bounded
+        # STDOUT/STDERR DEADLOCK NOTE: stdout and stderr are both PIPE (a fixed
+        # OS pipe buffer, ~64KB on Linux). If a spawned tool writes enough to
+        # either one (warnings/chatter on stderr — airodump-ng/aircrack-ng/
+        # hashcat can all do this; a curses-style redraw on stdout) with
+        # nobody draining it, the child blocks trying to write more — a
+        # classic two-pipe subprocess deadlock. Fixed with a small always-on
+        # drain thread per handle PER STREAM: stderr's reads into a bounded
         # ring buffer (kept for future diagnostics, e.g. surfacing in an error
-        # message — nothing reads it yet, and that's fine) and otherwise
-        # discards it; never blocks, never raises. Deliberately NOT
-        # stderr=subprocess.STDOUT: hashcat's --status-json assumes one JSON
-        # object per stdout line, and merging stderr in would inject non-JSON
-        # lines into that stream. (parse_hashcat_status_line already tolerates a
-        # stray non-JSON line by returning None, so this wouldn't actually break
-        # anything today — but keep the streams separate on principle, since the
-        # next stdout consumer added might not be as forgiving.)
+        # message) and discards it; stdout's (added after a real-hardware
+        # finding — see poll()'s docstring and discovery.py/capture.py's own
+        # comments: their driver loops stopped reading handle.lines() for
+        # cancellation/liveness entirely, since that depends on the spawned
+        # tool's stdout being reliably chatty, which real `airodump-ng` run
+        # through `sudo` with a piped stdout is NOT) feeds a queue instead of
+        # discarding, so lines() below still works for callers that DO want
+        # the content (crack.py's hashcat --status-json stream) while stdout
+        # still gets drained continuously even when nobody calls lines() at
+        # all. Both threads never block the caller, never raise. Deliberately
+        # NOT stderr=subprocess.STDOUT: hashcat's --status-json assumes one
+        # JSON object per stdout line, and merging stderr in would inject
+        # non-JSON lines into that stream. (parse_hashcat_status_line already
+        # tolerates a stray non-JSON line by returning None, so this wouldn't
+        # actually break anything today — but keep the streams separate on
+        # principle, since the next stdout consumer added might not be as
+        # forgiving.)
+        # Bounded, not unbounded: Discovery/Capture's own long-running
+        # airodump-ng handle never calls lines() at all (see poll()'s
+        # docstring), so on hardware where this tool's stdout DOESN'T stall
+        # (the stall is this repo's confirmed-on-real-hardware reality, not a
+        # guarantee for every driver/adapter) this queue would otherwise grow
+        # unboundedly for the entire session with nothing ever consuming it --
+        # pure memory waste for content that's deliberately unused by those two
+        # callers. 10_000 lines (~a few hundred KB at most) is generously past
+        # what any ACTIVELY-consumed caller (crack.py/enumerate.py/rf.py/
+        # capture.py's one-shots) ever needs buffered, since each of those
+        # drains in lockstep as content arrives -- see _drain_stdout's own
+        # comment for what happens once this bound is actually hit.
+        self._stdout_queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=10_000)
+        self._stdout_thread = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stdout_thread.start()
 
     @property
     def pid(self) -> int:
@@ -138,9 +178,18 @@ class _RealProcHandle:
         return self._popen.pid
 
     def lines(self) -> Iterator[str]:
-        assert self._popen.stdout is not None
-        for line in self._popen.stdout:
-            yield line.rstrip("\n")
+        # Consumes the queue _drain_stdout feeds, rather than reading
+        # self._popen.stdout directly -- that background thread is what
+        # guarantees stdout gets drained even when NOTHING calls lines() at
+        # all (see __init__'s deadlock note). None is _drain_stdout's own EOF
+        # sentinel. Every real call site in this codebase calls lines() at
+        # most once per handle (verified directly, not assumed) so a single
+        # consumer draining this queue is the only usage shape that exists.
+        while True:
+            line = self._stdout_queue.get()
+            if line is None:
+                return
+            yield line
 
     def terminate(self) -> None:
         self._signal(signal.SIGTERM)
@@ -173,6 +222,9 @@ class _RealProcHandle:
     def wait(self) -> int:
         return self._popen.wait()
 
+    def poll(self) -> Optional[int]:
+        return self._popen.poll()
+
     def stderr_tail(self) -> list[str]:
         # wait() only waits for the PROCESS to exit, not for _drain_stderr's
         # thread to finish flushing whatever was left in the pipe — a small
@@ -189,6 +241,25 @@ class _RealProcHandle:
             self._stderr_tail.append(line.rstrip("\n"))
         # loop ends naturally when the process closes stderr, i.e. on exit — no
         # cancellation token needed, this thread just dies with the process
+
+    def _drain_stdout(self) -> None:
+        assert self._popen.stdout is not None
+        for line in self._popen.stdout:
+            try:
+                self._stdout_queue.put_nowait(line.rstrip("\n"))
+            except queue.Full:
+                pass  # See __init__'s comment: nobody's draining lines() (the
+                # Discovery/Capture case) -- discard rather than block, since
+                # blocking here would reintroduce the exact write-side pipe
+                # deadlock this thread exists to prevent.
+        # Sentinel uses a blocking put, deliberately not put_nowait: by now
+        # content production has stopped, so an ACTIVELY-consumed queue (one a
+        # real lines() caller is draining) has room well before this point --
+        # this only blocks in the already-discarding case above (nobody ever
+        # going to call lines()), where blocking forever is harmless (daemon
+        # thread, same "just dies with the process" fate as _drain_stderr).
+        self._stdout_queue.put(None)
+        # Same "ends naturally on exit" reasoning as _drain_stderr above.
 
 
 class SubprocessRunner:
@@ -219,11 +290,20 @@ class SubprocessRunner:
 
 class _FakeProcHandle:
     def __init__(
-        self, scripted_lines: list[str], *, returncode: int = 0, stderr_lines: Optional[list[str]] = None
+        self, scripted_lines: list[str], *, returncode: int = 0, stderr_lines: Optional[list[str]] = None,
+        running_polls: int = 0,
     ) -> None:
         self._scripted_lines = scripted_lines
         self._returncode = returncode
         self._stderr_lines = stderr_lines or []
+        # How many poll() calls return None ("still running") before poll()
+        # starts returning returncode -- a test's way to keep Discovery/
+        # Capture's wall-clock loop (see discovery.py/capture.py) iterating
+        # for a controlled number of ticks, now that loop no longer ends by
+        # exhausting scripted_lines the way it used to. Defaults to 0 (report
+        # as already-exited from the first poll) so every existing script=
+        # call site that doesn't care about this is unaffected.
+        self._running_polls_remaining = running_polls
         self.pid = next(_fake_pid_counter)
         self.pgid = self.pid  # ProcHandle.pgid's own contract: == pid, one session per spawn
 
@@ -237,6 +317,12 @@ class _FakeProcHandle:
         pass
 
     def wait(self) -> int:
+        return self._returncode
+
+    def poll(self) -> Optional[int]:
+        if self._running_polls_remaining > 0:
+            self._running_polls_remaining -= 1
+            return None
         return self._returncode
 
     def stderr_tail(self) -> list[str]:
@@ -254,6 +340,7 @@ class FakeProcRunner:
         on_spawn: Optional[Callable[[list[str]], None]] = None,
         returncodes: Optional[dict[str, int]] = None,
         stderr: Optional[dict[str, list[str]]] = None,
+        running_polls: Optional[dict[str, int]] = None,
     ) -> None:
         """script maps a recognizable argv[0] (e.g. 'airodump-ng') to the lines it
         should yield, so a test can drive Discovery/Capture/Crack/Enumerate without
@@ -265,11 +352,15 @@ class FakeProcRunner:
         drivers invoke the same tool name with different flags -- see
         docs/roadmap.md Phase 1 item 0. returncodes/stderr map that same argv[0]
         key to a scripted exit code / stderr tail, each defaulting to "succeeded,
-        nothing captured" so every existing script= call site is unaffected."""
+        nothing captured" so every existing script= call site is unaffected.
+        running_polls maps argv[0] to how many poll() calls should report "still
+        running" before reporting exited -- see _FakeProcHandle's own docstring;
+        defaults to 0 (same reasoning)."""
         self._script = script
         self._on_spawn = on_spawn
         self._returncodes = returncodes or {}
         self._stderr = stderr or {}
+        self._running_polls = running_polls or {}
 
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
         if self._on_spawn is not None:
@@ -278,6 +369,7 @@ class FakeProcRunner:
             self._script[argv[0]],
             returncode=self._returncodes.get(argv[0], 0),
             stderr_lines=self._stderr.get(argv[0]),
+            running_polls=self._running_polls.get(argv[0], 0),
         )
         # A KeyError on that lookup means the test scripted the wrong argv[0] --
         # a test-author bug, not something this fake should paper over.

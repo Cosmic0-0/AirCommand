@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import timedelta
 
 import customtkinter as ctk
 
@@ -52,12 +53,6 @@ NMAP_XML = """<?xml version="1.0"?>
 </host>
 </nmaprun>
 """
-
-
-def _slow_lines(count: int, delay_s: float):
-    for i in range(count):
-        time.sleep(delay_s)
-        yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
 
 
 class _FakeRoot:
@@ -131,9 +126,20 @@ def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
 
 
 def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(tmp_path):
+    # Discovery's _drive loop is a plain wall-clock loop now, driven by
+    # ProcHandle.poll() for liveness, not handle.lines() content -- see
+    # test_capture_acceptance.py's module docstring for the full real-hardware
+    # finding. running_polls below (plus a tiny drive_tick_interval) keeps
+    # Discovery's thread genuinely still holding the RF reservation by the
+    # time the very next line below runs -- same idiom as that file's own
+    # AdapterBusy test.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
-        proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": _slow_lines(30, 0.01)}),
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            running_polls={"airodump-ng": 1000},
+        ),
+        drive_tick_interval=timedelta(seconds=0.001),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
     engine.discovery.start()  # reserves the adapter synchronously -- same

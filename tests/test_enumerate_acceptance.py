@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import timedelta
 
 import pytest
 
@@ -87,16 +88,6 @@ NMAP_XML = """<?xml version="1.0"?>
 </host>
 </nmaprun>
 """
-
-
-def _slow_lines(count: int, delay_s: float):
-    """Real (but tiny) per-line delay -- same helper, same reasoning, as
-    test_capture_acceptance.py's own _slow_lines: keeps Discovery's driver
-    thread demonstrably still holding the RF reservation by the time this
-    test's very next line (the enumerate.start_scan() call) runs."""
-    for i in range(count):
-        time.sleep(delay_s)
-        yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
 
 
 def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, EventBus, JobRegistry]:
@@ -146,6 +137,13 @@ def test_successful_scan_publishes_nmap_scan_completed_with_both_hosts():
 
 
 def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path):
+    # Discovery's _drive loop is a plain wall-clock loop now, driven by
+    # ProcHandle.poll() for liveness, not handle.lines() content -- see
+    # test_capture_acceptance.py's module docstring for the full real-hardware
+    # finding. running_polls below (plus a tiny drive_tick_interval) keeps
+    # Discovery's driver thread demonstrably still holding the RF reservation
+    # by the time this test's very next line (the enumerate.start_scan() call)
+    # runs -- same idiom as that file's own AdapterBusy test.
     engine = Engine(
         db_path=":memory:",
         work_dir=tmp_path,
@@ -153,10 +151,14 @@ def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path
         # RadioController.reserve() now really spawns "airmon-ng" on its first
         # monitor-mode use (docs/roadmap.md Phase 2 item 1) -- no rename-
         # announcement line, so it falls back to the original "wlan0" name.
-        proc=FakeProcRunner(script={
-            "airmon-ng": ["monitor mode already enabled on wlan0"],
-            "airodump-ng": _slow_lines(30, 0.01),
-        }),
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": ["monitor mode already enabled on wlan0"],
+                "airodump-ng": [],
+            },
+            running_polls={"airodump-ng": 1000},
+        ),
+        drive_tick_interval=timedelta(seconds=0.001),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 

@@ -5,17 +5,15 @@ tests/test_capture_view.py / tests/test_crack_view.py).
 Deauth-burst generation reuses tests/test_capture_acceptance.py's own
 aireplay-ng scripting / DeauthOptions shape (interval=0 zero-interval trick,
 explicit max_bursts, "aireplay-ng": [] since it's only .wait()'d, never
-.lines()'d). Unlike that file's own long-running-stream + real-thread-timing
-cancel() scenarios (needed there to prove max_bursts caps a stream that would
-otherwise keep firing), these tests only need "at least one real DeauthFired
-fired and was durably written" -- so airodump-ng is scripted with a short,
-plain, instantly-iterable list (CAPTURE_NOISE[:3], imported directly from that
-file, same idiom test_capture_acceptance.py's own handshake-found-on-first-check
-test already uses for a driver thread that's meant to run to natural
-completion on its own, no cancel() needed). This also means the same
-script dict's plain-list values (not generators) can be reused across TWO
-separate deauth-assisted Captures on the same FakeProcRunner instance --
-required for the two-Target filter test below.
+.lines()'d). Unlike that file's own long-running + real-thread-timing cancel()
+scenarios (needed there to prove max_bursts caps a stream that would otherwise
+keep firing), these tests only need "at least one real DeauthFired fired and
+was durably written" and no cancel() at all -- so "airodump-ng" is given
+running_polls=1 (FakeProcRunner; _drive's loop is a plain wall-clock loop now,
+driven by ProcHandle.poll() for liveness -- see test_capture_acceptance.py's
+module docstring for the full real-hardware finding), just enough for exactly
+one deauth burst to fire (max_bursts=1) before the fake process reports
+"exited" and the loop ends on its own, no cancel() needed.
 """
 
 from __future__ import annotations
@@ -33,11 +31,7 @@ from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.audit_log_view import AuditLogView
 from aircommand.gui.event_pump import GuiEventPump
 
-from tests.test_capture_acceptance import (
-    AIRMON_NO_RENAME_OUTPUT,
-    CAPTURE_NOISE,
-    NO_HANDSHAKE_OUTPUT,
-)
+from tests.test_capture_acceptance import AIRMON_NO_RENAME_OUTPUT, NO_HANDSHAKE_OUTPUT
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 BSSID_2 = MacAddress(value="AA:BB:CC:DD:EE:02")
@@ -59,13 +53,17 @@ def _make_engine(tmp_path) -> Engine:
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script={
-            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-            "airodump-ng": CAPTURE_NOISE[:3],
-            "aircrack-ng": NO_HANDSHAKE_OUTPUT,
-            "aireplay-ng": [],
-        }),
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": [],
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "aireplay-ng": [],
+            },
+            running_polls={"airodump-ng": 1},
+        ),
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
 
 
@@ -89,8 +87,9 @@ def _fire_deauth_burst(engine: Engine, target) -> None:
     row and publishes DeauthFired synchronously, strictly before the
     loop can exit, and mark_terminal (what wait_for_test() unblocks on) is
     published last of all, so both are guaranteed done by the time this
-    returns. No cancel() is needed: CAPTURE_NOISE[:3] is a short, plain list,
-    so the driver thread reaches its own natural end on its own."""
+    returns. No cancel() is needed: running_polls=1 (see _make_engine) means
+    the driver thread reaches its own natural end on its own, right after
+    firing the one burst max_bursts=1 allows."""
     handle = engine.capture.start_deauth_assisted(
         target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=1)
     )

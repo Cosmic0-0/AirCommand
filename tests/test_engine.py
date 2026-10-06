@@ -33,17 +33,17 @@ PASSWORD = "correct-horse-battery-staple"
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 NO_HANDSHAKE_OUTPUT = ["No valid WPA handshakes found"]
 
-# Real but tiny per-line delay so a still-RUNNING Capture job is genuinely
-# still in its loop by the time shutdown() cancels it, without the scripted
-# stream ever exhausting on its own first -- same idiom (and same reasoning)
-# as test_capture_acceptance.py's _slow_lines/PRE_CANCEL_SETTLE_S.
+# Real but tiny tick interval, and a generous running_polls budget for
+# "airodump-ng" below, so a still-RUNNING Capture job is genuinely still in its
+# loop by the time shutdown() cancels it, without the fake process ever
+# "exiting" on its own first -- same idiom (and same reasoning) as
+# test_capture_acceptance.py's AIRODUMP_RUNNING_POLLS/DRIVE_TICK_INTERVAL/
+# PRE_CANCEL_SETTLE_S (Capture's _drive loop is a plain wall-clock loop now,
+# driven by ProcHandle.poll() for liveness, not handle.lines() content -- see
+# that file's module docstring for the full real-hardware finding).
 PRE_SHUTDOWN_SETTLE_S = 0.02
-
-
-def _slow_lines(count: int, delay_s: float):
-    for i in range(count):
-        time.sleep(delay_s)
-        yield f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00"
+AIRODUMP_RUNNING_POLLS = 1000
+DRIVE_TICK_INTERVAL = timedelta(seconds=0.001)
 
 
 def _completed(returncode: int) -> subprocess.CompletedProcess:
@@ -86,15 +86,17 @@ def test_shutdown_cancels_running_job_stops_privilege_releases_adapter_and_close
         proc=FakeProcRunner(
             script={
                 "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-                "airodump-ng": _slow_lines(1000, 0.001),
+                "airodump-ng": [],  # content unused -- see AIRODUMP_RUNNING_POLLS's comment
                 "aircrack-ng": NO_HANDSHAKE_OUTPUT,
                 "systemctl": ["Synchronizing state..."],
             },
             on_spawn=on_spawn,
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
         ),
         # Long enough that the handshake-check Pacer never fires during this
         # short test, so the scripted aircrack-ng entry above is defensive only.
         capture_handshake_check_interval=timedelta(seconds=999),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
     )
 
     engine.privilege.start(PASSWORD)
@@ -152,13 +154,15 @@ def test_shutdown_still_stops_privilege_and_closes_db_when_network_manager_resta
         proc=FakeProcRunner(
             script={
                 "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
-                "airodump-ng": _slow_lines(1000, 0.001),
+                "airodump-ng": [],  # content unused -- see AIRODUMP_RUNNING_POLLS's comment
                 "aircrack-ng": NO_HANDSHAKE_OUTPUT,
                 "systemctl": ["Failed to restart NetworkManager.service: Access denied"],
             },
             returncodes={"systemctl": 1},
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
         ),
         capture_handshake_check_interval=timedelta(seconds=999),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
     )
 
     engine.privilege.start(PASSWORD)

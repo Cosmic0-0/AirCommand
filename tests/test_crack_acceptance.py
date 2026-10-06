@@ -54,10 +54,12 @@ BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
 # Gets Capture's own driver to find a handshake on its very first check (same
 # recipe, same reasoning, as test_capture_acceptance.py's
-# test_passive_capture_finds_handshake_on_first_check): a plain, instantly-
-# iterable list is fine here because the loop breaks out on iteration 1
-# regardless, before any cancellation-race concern could ever apply.
-CAPTURE_NOISE = [f"CH 6 ][ Elapsed: {i} s ][ 2024-01-01 10:00" for i in range(3)]
+# test_passive_capture_finds_handshake_on_first_check). Capture's _drive loop
+# is a plain wall-clock loop now, driven by ProcHandle.poll() for liveness,
+# not handle.lines() content (see test_capture_acceptance.py's module
+# docstring for the full real-hardware finding) -- running_polls=1 for
+# "airodump-ng" (see _make_engine) is enough for the loop to run its body
+# exactly once, where it breaks out immediately on finding the handshake.
 AIRCRACK_HANDSHAKE_FOUND = "   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"
 CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 
@@ -123,12 +125,16 @@ def _make_engine(tmp_path, script: dict, hashcat_key: Optional[str] = None) -> E
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
-        proc=FakeProcRunner(script=script, on_spawn=_make_on_spawn(hashcat_key)),
+        proc=FakeProcRunner(
+            script=script, on_spawn=_make_on_spawn(hashcat_key),
+            running_polls={"airodump-ng": 1},
+        ),
         # Zero interval: Pacer.due() fires on every check -- same trick
         # test_capture_acceptance.py's _make_engine uses, needed here for the
         # same reason (Capture's handshake check runs as part of getting a
         # Handshake at all, even though this file is testing Crack).
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
 
 
@@ -173,7 +179,7 @@ def _base_script(hashcat_lines) -> dict:
         # first monitor-mode use (docs/roadmap.md Phase 2 item 1) -- no rename-
         # announcement line, so it falls back to the original "wlan0" name.
         "airmon-ng": ["monitor mode already enabled on wlan0"],
-        "airodump-ng": CAPTURE_NOISE,
+        "airodump-ng": [],  # content unused -- see AIRCRACK_HANDSHAKE_FOUND's comment
         "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
         "hashcat": hashcat_lines,
     }
@@ -315,13 +321,15 @@ def test_concurrent_crack_jobs_all_complete_with_distinct_results_and_no_sqlite_
         proc=FakeProcRunner(
             script={
                 "airmon-ng": ["monitor mode already enabled on wlan0"],
-                "airodump-ng": CAPTURE_NOISE,
+                "airodump-ng": [],  # content unused -- see AIRCRACK_HANDSHAKE_FOUND's comment
                 "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
                 "hashcat": [],  # outcome decided by outfile content only, not scripted stdout
             },
             on_spawn=_make_stress_on_spawn(wordlist_to_key),
+            running_polls={"airodump-ng": 1},
         ),
         capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 

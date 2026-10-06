@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,7 +30,14 @@ from aircommand.core.events import (
     EventBus,
     HandshakeCaptured,
 )
-from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry, Pacer
+from aircommand.core.jobs import (
+    DEFAULT_DRIVE_TICK_INTERVAL,
+    CancellationToken,
+    JobHandle,
+    JobId,
+    JobRegistry,
+    Pacer,
+)
 from aircommand.core.parse import parse_aircrack_handshake_check
 from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, HandshakeRepository
 from aircommand.core.procutil import ProcRunner
@@ -56,6 +64,7 @@ class Capture:
         work_dir: Path,
         new_connection_scope: Callable[..., ConnectionScope],
         handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
+        tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
     ) -> None:
         self._allowlist = allowlist
         self._handshakes = handshakes  # main-connection repo -- list_handshakes() (main-thread read) only
@@ -67,6 +76,7 @@ class Capture:
         self._work_dir = work_dir
         self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._handshake_check_interval = handshake_check_interval
+        self._tick_interval_s = tick_interval.total_seconds()
 
     def start_passive(self, target: Target) -> JobHandle:
         return self._start(target, deauth=None)
@@ -119,11 +129,26 @@ class Capture:
             # immediately and never outlive this loop, so they don't need their own
             # record_process() call.
 
-            for _line in handle.lines():   # content unused — same reasoning as
-                                            # discovery.py's fix; drives cancellation/death detection only
+            # BUG FOUND ON REAL HARDWARE: this loop used to be `for _line in
+            # handle.lines(): ...`, gating cancellation/deauth/handshake-check
+            # timing entirely on airodump-ng producing a new stdout line. See
+            # discovery.py's identical fix and its comment for the full
+            # finding -- confirmed directly (not assumed) that real
+            # airodump-ng run through `sudo` with a piped stdout can stop
+            # producing output indefinitely after its first line, which would
+            # have silently frozen deauth bursts, handshake checks, and
+            # cancellation here too (not yet hardware-observed for Capture
+            # specifically, since real-hardware Capture testing is still an
+            # open docs/final-touches.md item -- but it shares the exact same
+            # vulnerable shape as the Discovery bug that WAS observed, against
+            # the same tool). Fixed the same way: a plain wall-clock loop,
+            # decoupled from handle.lines() entirely.
+            while True:
                 if token.is_cancelled():
                     handle.terminate()
                     break
+                if handle.poll() is not None:
+                    break  # process died unexpectedly -- ERROR, inferred below
 
                 can_still_deauth = (deauth is not None and deauth.max_bursts is None
                                      or (deauth is not None and burst_count < deauth.max_bursts))
@@ -156,6 +181,7 @@ class Capture:
                                                              handshake=handshake))
                         handle.terminate()
                         break
+                time.sleep(self._tick_interval_s)
         finally:
             self._rf.release(reservation)
             # Precedence matters: a cancel racing with a just-seen handshake still reports
