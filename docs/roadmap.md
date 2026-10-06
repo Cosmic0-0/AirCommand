@@ -46,6 +46,17 @@ nominate themselves) — not something a future headless session can pick up
 unattended. See "Phase 2" below for the authoritative, up-to-date state of
 each item — this paragraph is a pointer, not a duplicate.
 
+**Item 5 (real hands-on hardware validation) is now partially underway, not
+just "actionable":** the Discovery & Targets tab was driven for real against
+real hardware and a real `sudo` password, and real networks now populate the
+table correctly. Getting there surfaced and fixed three independent, stacked
+real-hardware bugs — none of them visible to any headless `pytest` run — see
+`docs/adr/0008-driver-loops-stop-depending-on-stdout.md` for the full chain
+and `docs/final-touches.md` item 2 for which parts of the hands-on checklist
+are checked off vs. still open. Don't assume the rest of item 5's checklist
+(Capture, Enumerate, Crack, crash/reconciliation) is also done just because
+Discovery is — it isn't, see that checklist.
+
 **This machine's real constraints, updated — CHANGED since this paragraph
 originally shipped, don't trust an older copy:** real Linux Mint, not a VM.
 `aircrack-ng`, `hashcat`, and `nmap` are now installed (`sudo apt install
@@ -443,6 +454,22 @@ just a warning, it silently kept the adapter out of monitor mode with nothing
 surfacing that in the GUI. `RadioController` now runs `airmon-ng check kill`
 and restarts NetworkManager automatically around every monitor<->managed
 transition, not just at startup/shutdown.
+
+**Revisited again, a layer deeper:** even after the above, `sudo -n` on every
+privileged call (including `check kill` itself) failed with "a password is
+required" regardless of a correct password, on every single call. Root cause:
+`SudoSession.run_privileged()` (this item's own real `SubprocessRunner.spawn`
+work) passed `start_new_session=True` to every privileged `Popen`, which
+creates a brand-new session each time — invisible to sudo's session-scoped
+credential cache (no `tty_tickets` override in this machine's sudoers, so the
+compiled-in default applies), so the credential cached at `SudoSession.start()`
+could never be found again. Fixed by switching to `process_group=0` (Python
+3.11+), which still gives the child its own process group (preserving the
+`pid == pgid` guarantee `terminate()`/`kill()` need) without creating a new
+session. See `docs/adr/0008-driver-loops-stop-depending-on-stdout.md` for the
+full chain this was one link in — this bug, once fixed, immediately exposed a
+second (`--write-csv` isn't a real flag) and a third (driver loops silently
+stalling when airodump-ng's stdout goes quiet under `sudo`).
 
 **Found only once item 4 (below) actually unblocked `Database` and let the
 Discovery/Capture/Enumerate *acceptance* tests run for the first time** (they
