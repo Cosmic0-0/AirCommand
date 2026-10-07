@@ -1001,3 +1001,81 @@ If you stop partway through any future work, leave the working tree in a state
 where `git status`/recent commit messages make it obvious exactly what's done, what's
 mid-flight, and what's next — the next session (a review pass, per the user) needs to
 be able to reconstruct that without you there to ask.
+
+**Update, 2026-10-07**: worked a user-supplied punch list of 5 real bugs/UX
+issues (`ThingsToChange.txt`, triaged in a prior session) found using the app
+for real. 4 of the 5 are done this session; the 5th (Discovery session-vs-
+history scope, already has ADR-0007 from an earlier pass) is a scope
+decision, deliberately left for a dedicated session — see that ADR before
+touching schema/persistence.
+
+- **Column misalignment (item 1).** Confirmed empirically (not assumed) that
+  only `discovery_view.py` (`NetworksView`, `TargetPicker`) and
+  `enumerate_view.py` (`EnumeratePanel`) actually have the two-separate-grids
+  shape that causes this — `capture_view.py`/`crack_view.py`/`audit_log_view.py`
+  render one composed-string row per line via plain `.pack()`, no `.grid()`
+  call anywhere in those three files, so there's nothing for this bug to
+  affect there. Also confirmed directly that Tk grid's `uniform` column-group
+  option — the obvious-looking fix — does NOT synchronize widths across two
+  separate grid-master widgets, only within one. New shared helper
+  (`aircommand/gui/table.py`): fixed per-column pixel widths shared between
+  header and body, with overlong body values truncated (`…`) so a long SSID/
+  label/hostname can't blow the column back out past that fixed width. All
+  three affected views now go through it. Verified both by direct pixel-width
+  measurement (a standalone Tk script, not the real app) and visually, by
+  running the real app with a deliberately overlong SSID and screenshotting
+  the result.
+- **Capture Cancel (item 3).** Already fixed by ADR-0008 — confirmed, not
+  assumed: existing `FakeProcRunner`-based acceptance coverage already
+  exercises it, and a new standalone harness spawns a REAL OS subprocess that
+  reproduces ADR-0008's exact documented stall shape (one stdout line, then
+  silence, process stays alive) wrapped in the real `_RealProcHandle`, and
+  confirms `cancel()` reliably terminates it. Not yet re-confirmed: a real
+  `aireplay-ng` process via the actual GUI Cancel button on real hardware —
+  see `docs/final-touches.md` item 2's own checklist entry for that.
+- **Found while verifying item 3, not part of the original 5**: a real bug in
+  `capture.py`'s `.cap` file handling, confirmed against the real `airodump-ng`
+  binary's own format string via `strings` (not just docs) — it appends
+  `-01.<ext>` to whatever prefix `-w`/`--write` is given, for every output
+  format, same as `discovery.py`'s already-known `.csv` case. `capture.py`
+  was passing a prefix that already ended in `.cap` and reading back that
+  exact (now-wrong) path, so the real on-disk file would have been
+  `<bssid>-<job_id>.cap-01.cap`, not what `cap_path.read_bytes()` was looking
+  for — every real handshake capture would have raised `FileNotFoundError`
+  mid-loop, silently misreported as `CaptureStopped(reason=COMPLETED)` with
+  no `HandshakeCaptured` ever published. Fixed the same way `discovery.py`
+  already was (separate prefix/resolved-path variables); the three test
+  fixtures that had been masking this (writing to the literal `-w` argument
+  instead of its real `-01.cap`-suffixed path) are fixed too.
+- **Slow, silent close (item 4).** `Engine.shutdown()` itself is untouched —
+  tried and reverted a version that split it to run the slow half on a
+  background thread (blocked on `Database`'s main connection being
+  `check_same_thread=True`, bound to whichever thread constructs `Engine`;
+  confirmed empirically). That version, plus its `self.after()`-polling
+  rejoin, measurably destabilized this project's own test suite — every GUI
+  test's `on_close()` paid enough real Tk/X11 window-creation overhead to
+  intermittently starve an unrelated real-thread-timing test under full-suite
+  load (bisected directly, not assumed). Reverted to the simpler fix
+  `docs/final-touches.md`'s own framing already sanctioned as an acceptable
+  minimum: `App.on_close()` shows a small modal ("Closing AirCommand… please
+  wait"), forces it to paint via `update_idletasks()`, *then* calls the
+  existing synchronous `engine.shutdown()`. No Engine changes, no new test
+  flakiness — full suite confirmed stable (211 passing, repeated runs) after
+  reverting the threaded version.
+- **Two windows at startup (item 5).** `App.__init__` now `self.withdraw()`s
+  right after `super().__init__()` and `self.deiconify()`s once the sudo
+  prompt has succeeded and the full UI is built. Verified directly against
+  the real X11 display (`wmctrl`/`xprop`, not just code review): exactly one
+  window (the sudo dialog) shows during the prompt, exactly one (the main
+  window) after. No automated regression test for this one — an attempt at
+  one (querying `.state()`/`.winfo_viewable()` on a withdrawn window from
+  inside the sudo-dialog callback) reproduced the exact same kind of
+  full-suite destabilization item 4's reverted version did, for reasons not
+  fully root-caused before deciding it wasn't worth chasing further given the
+  real-X11 verification already in hand.
+
+Full suite: 211 passing (up from 211; same count — item 1/3/4/5 fixes didn't
+add new automated tests, by the above reasoning on each one, beyond the
+`capture.py` cap-path fix's existing acceptance coverage already catching the
+fixture fix). Verified stable across many repeated full-suite runs, not just
+one green run — see item 4's own entry above for why that mattered here.

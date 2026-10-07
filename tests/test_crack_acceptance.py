@@ -111,7 +111,11 @@ def _make_on_spawn(hashcat_key: Optional[str]) -> Callable[[list[str]], None]:
 
     def on_spawn(argv: list[str]) -> None:
         if argv[0] == "airodump-ng" and "-w" in argv:
-            cap_path = Path(argv[argv.index("-w") + 1])
+            # airodump-ng appends "-01.cap" to the given prefix itself -- see
+            # capture.py's ThingsToChange-item-3 comment for how this was
+            # confirmed against the real binary.
+            cap_prefix = argv[argv.index("-w") + 1]
+            cap_path = Path(f"{cap_prefix}-01.cap")
             cap_path.write_bytes(CAP_FILE_BYTES)
         elif argv[0] == "hashcat" and hashcat_key is not None:
             outfile_path = Path(argv[argv.index("--outfile") + 1])
@@ -382,7 +386,11 @@ def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str
 
     def on_spawn(argv: list[str]) -> None:
         if argv[0] == "airodump-ng" and "-w" in argv:
-            cap_path = Path(argv[argv.index("-w") + 1])
+            # airodump-ng appends "-01.cap" to the given prefix itself -- see
+            # capture.py's ThingsToChange-item-3 comment for how this was
+            # confirmed against the real binary.
+            cap_prefix = argv[argv.index("-w") + 1]
+            cap_path = Path(f"{cap_prefix}-01.cap")
             cap_path.write_bytes(CAP_FILE_BYTES)
         elif argv[0] == "hashcat":
             key = wordlist_to_key.get(argv[4])

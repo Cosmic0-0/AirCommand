@@ -45,7 +45,14 @@ def _write_cap_file_on_spawn(argv: list[str]) -> None:
     docstring for why the guard needs both checks."""
     if argv[0] != "airodump-ng" or "-w" not in argv:
         return
-    cap_path = Path(argv[argv.index("-w") + 1])
+    # airodump-ng's OWN naming convention (confirmed against the real binary's
+    # format string, see capture.py's ThingsToChange-item-3 comment): it
+    # appends "-01.cap" to the prefix it's given -- it does NOT write the
+    # prefix verbatim. Matching that here, not the prefix, is what makes this
+    # fixture catch the real-hardware FileNotFoundError that masqueraded as
+    # passing for as long as this fixture wrote to the bare prefix instead.
+    cap_prefix = argv[argv.index("-w") + 1]
+    cap_path = Path(f"{cap_prefix}-01.cap")
     cap_path.write_bytes(CAP_FILE_BYTES)
 
 

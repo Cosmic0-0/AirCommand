@@ -85,11 +85,26 @@ not a suggestion). Concretely:
       real Handshake gets captured and shows up in the panel and the Crack
       tab's picker. Try deauth-assisted Capture too — confirm the
       confirmation dialog actually appears, and that every burst shows up
-      live in the Audit Log tab, not just at the end.
+      live in the Audit Log tab, not just at the end. **A real blocker here
+      was found and fixed 2026-10-07, before this item was ever attempted for
+      real: `capture.py` was reading its own `.cap` file at the wrong path
+      (confirmed against the real `airodump-ng` binary's format string, not
+      assumed) — every real handshake capture would have raised
+      `FileNotFoundError` mid-loop and silently reported as a plain
+      `COMPLETED` with no Handshake ever recorded. See `docs/roadmap.md`'s
+      2026-10-07 entry. Still genuinely unverified: this checklist item
+      itself, on real hardware, now that the blocker is gone.**
 - [ ] Cancel button: start a deauth-assisted Capture, click Cancel mid-run,
       confirm the UI actually returns to its idle state (this was unit-tested
       against `FakeProcRunner`, but never against a real, slower-to-terminate
-      `aireplay-ng` process).
+      `aireplay-ng` process). **Partially re-verified 2026-10-07 (see
+      `docs/roadmap.md`'s entry for that date): a new standalone harness
+      spawns a REAL OS subprocess reproducing ADR-0008's documented stdout-
+      stall shape and confirms `cancel()` reliably terminates it, through the
+      same `_RealProcHandle` production code real `aireplay-ng` would go
+      through. What that harness does NOT cover, and what this checklist item
+      still needs: the real GUI's Cancel button, a real `aireplay-ng`
+      process, real hardware.**
 - [ ] Enumerate panel: join the Target's network via your OS's normal wifi
       settings first (AirCommand doesn't do this itself, by design — see
       `enumerate.py`'s own docstring), then run Enumerate and confirm real

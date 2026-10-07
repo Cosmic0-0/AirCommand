@@ -109,7 +109,21 @@ class Capture:
         deauth: Optional[DeauthOptions],
     ) -> None:
         adapter = reservation.adapter
-        cap_path = self._work_dir / f"{target.bssid}-{job_id}.cap"
+        # REAL-HARDWARE BUG (found while re-verifying ThingsToChange item 3,
+        # confirmed against the installed airodump-ng binary's own format
+        # string -- `strings` on it shows "%s-%02d.%s" -- not just assumed from
+        # docs): airodump-ng appends "-01.<ext>" to WHATEVER prefix --write/-w
+        # is given, for every output format it writes (.cap included, not just
+        # discovery.py's .csv). The previous cap_path here already ended in
+        # ".cap" and was passed AS the prefix, so the real file airodump-ng
+        # would have written is "<bssid>-<job_id>.cap-01.cap", not the
+        # "<bssid>-<job_id>.cap" this code read back -- cap_path.read_bytes()
+        # below would raise FileNotFoundError on every real capture, the exact
+        # bug class discovery.py's own csv_prefix/csv_path split already fixed
+        # for Discovery. Same fix here: pass an extension-less prefix, compute
+        # the real on-disk path airodump-ng will actually create.
+        cap_prefix = self._work_dir / f"{target.bssid}-{job_id}"
+        cap_path = Path(f"{cap_prefix}-01.cap")
         handshake_seen = False
         burst_count = 0
         handshake_pacer = Pacer(self._handshake_check_interval)
@@ -125,7 +139,7 @@ class Capture:
             db_scope = self._new_connection_scope()
             handle = self._proc.spawn(
                 ["airodump-ng", "-c", str(target.channel), "--bssid", str(target.bssid),
-                 "-w", str(cap_path), adapter], privileged=True)
+                 "-w", str(cap_prefix), adapter], privileged=True)
             self._jobs.record_process(job_id, handle.pid, handle.pgid,
                 f"airodump-ng {target.bssid} {adapter}", repo=db_scope.jobs)  # ADR-0004 — the long-running
             # airodump-ng process is what orphan cleanup needs to find; the short-lived
