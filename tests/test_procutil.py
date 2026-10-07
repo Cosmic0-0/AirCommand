@@ -18,7 +18,12 @@ import threading
 import time
 from unittest.mock import Mock
 
-from aircommand.core.procutil import SubprocessRunner, is_process_group_alive, terminate_process_group
+from aircommand.core.procutil import (
+    SubprocessRunner,
+    is_process_group_alive,
+    summarize_stderr,
+    terminate_process_group,
+)
 
 WAIT_TIMEOUT_S = 5.0
 
@@ -223,3 +228,32 @@ def test_terminate_process_group_returns_false_when_nothing_to_signal():
     )
 
     assert signaled is False
+
+
+# --- summarize_stderr (a driver's own ERROR-reason diagnostic hint) --------------
+# Pure function, no real process needed -- unlike the rest of this file (see its
+# own module docstring), but this is still procutil.py's own module, and these
+# are the only tests this function has.
+
+def test_summarize_stderr_returns_none_for_no_lines():
+    assert summarize_stderr([]) is None
+
+
+def test_summarize_stderr_returns_none_when_every_line_is_blank():
+    assert summarize_stderr(["", "   ", "\n"]) is None
+
+
+def test_summarize_stderr_joins_non_blank_lines_with_a_separator():
+    assert summarize_stderr(["first", "", "second"]) == "first | second"
+
+
+def test_summarize_stderr_keeps_only_the_last_few_lines():
+    lines = [f"line {i}" for i in range(10)]
+    result = summarize_stderr(lines)
+    assert result == "line 7 | line 8 | line 9"   # last 3 -- see _STDERR_SUMMARY_MAX_LINES
+
+
+def test_summarize_stderr_truncates_an_unreasonably_long_result():
+    result = summarize_stderr(["x" * 1000])
+    assert len(result) <= 300   # see _STDERR_SUMMARY_MAX_CHARS
+    assert result.endswith("…")

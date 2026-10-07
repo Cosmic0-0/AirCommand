@@ -172,6 +172,40 @@ def test_passive_capture_never_finds_handshake_gets_cancelled(tmp_path):
     assert stopped[0].reason == StopReason.CANCELLED
 
 
+def test_passive_capture_publishes_error_detail_when_airodump_dies_unexpectedly(tmp_path):
+    """Mirrors test_discovery_acceptance.py's own equivalent test -- same real
+    gap (found tonight, on real hardware, debugging an unrelated Discovery
+    death): StopReason.ERROR alone carried no detail anywhere in this
+    codebase. Constructs its own Engine rather than reusing _make_engine --
+    this is the one test in this file that needs a SHORT running_polls budget
+    (so airodump-ng "dies" quickly) and a scripted stderr, neither of which
+    _make_engine's shared helper takes a param for; not worth widening it for
+    a single one-off scenario (same call this file's own module docstring
+    already makes for AIRODUMP_RUNNING_POLLS's one shared value)."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            running_polls={"airodump-ng": 2},
+            stderr={"airodump-ng": ["ioctl(SIOCSIWMODE) failed: Device or resource busy"]},
+        ),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    stopped = []
+    engine.subscribe(stopped.append, CaptureStopped)
+
+    handle = engine.capture.start_passive(target)
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(stopped) == 1
+    assert stopped[0].reason == StopReason.ERROR
+    assert stopped[0].error_detail == "ioctl(SIOCSIWMODE) failed: Device or resource busy"
+
+
 def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
     engine = _make_engine(
         tmp_path,

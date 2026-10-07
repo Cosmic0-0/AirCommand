@@ -69,10 +69,18 @@ class DiscoveryStopped(DurableEvent):
     mid-run left the GUI with no way to learn Discovery had silently stopped
     (see discovery.py's own comment at the publish call site). Also answers
     docs/design/gui-structure.md's deferred 'no DiscoveryStopped-equivalent
-    event exists' open question."""
+    event exists' open question.
+
+    error_detail: a short, best-effort hint from the dead process's own
+    stderr (procutil.py's summarize_stderr()) -- populated only when reason
+    is ERROR, None otherwise (there's nothing to explain for a CANCELLED
+    stop). Added after a real, unexplained Discovery death on real hardware
+    where this event's reason=ERROR was all the GUI could show -- no
+    driver anywhere in this codebase had ever surfaced stderr before."""
 
     job_id: JobId
     reason: "StopReason"
+    error_detail: Optional[str] = None
 
 
 # --- Allowlist -------------------------------------------------------------------
@@ -114,9 +122,14 @@ class HandshakeCaptured(DurableEvent):
 
 @dataclass(frozen=True)
 class CaptureStopped(DurableEvent):
+    """error_detail: same meaning and same reasoning as DiscoveryStopped's own
+    field -- a short stderr-derived hint, populated only when reason is
+    ERROR. See that class's docstring."""
+
     job_id: JobId
     target_id: int
     reason: "StopReason"
+    error_detail: Optional[str] = None
 
 
 # --- Enumeration -------------------------------------------------------------------

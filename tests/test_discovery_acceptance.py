@@ -146,7 +146,15 @@ def test_discovery_publishes_stopped_with_error_reason_when_airodump_dies_unexpe
     """The gap this closes: until now, airodump-ng dying on its own (crash,
     unplugged adapter, killed externally) published NOTHING -- the GUI had no
     way to learn Discovery had silently stopped. FakeProcHandle.poll() reports
-    "exited" after DISCOVERY_TICK_COUNT calls, simulating exactly that."""
+    "exited" after DISCOVERY_TICK_COUNT calls, simulating exactly that.
+
+    Also covers a real-hardware-driven follow-up gap found the same way: an
+    ERROR reason alone carried no detail at all about WHY, anywhere in this
+    codebase -- error_detail (summarize_stderr() over the dead process's own
+    stderr) is what closes that. A real adapter/driver issue wouldn't
+    necessarily write anything useful to stderr, so this only asserts the
+    plumbing works when the process DOES -- see test_procutil.py for
+    summarize_stderr()'s own behavior on empty/blank input."""
     engine = Engine(
         db_path=":memory:",
         work_dir=tmp_path,
@@ -154,6 +162,7 @@ def test_discovery_publishes_stopped_with_error_reason_when_airodump_dies_unexpe
         proc=FakeProcRunner(
             script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
             running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
+            stderr={"airodump-ng": ["some startup chatter", "fatal: no such device"]},
         ),
         discovery_poll_interval=timedelta(seconds=0),
         drive_tick_interval=timedelta(seconds=0),
@@ -167,6 +176,7 @@ def test_discovery_publishes_stopped_with_error_reason_when_airodump_dies_unexpe
     assert len(stopped) == 1
     assert stopped[0].job_id == handle.job_id
     assert stopped[0].reason == StopReason.ERROR
+    assert stopped[0].error_detail == "some startup chatter | fatal: no such device"
 
 
 def test_discovery_publishes_stopped_with_cancelled_reason_when_cancelled(tmp_path):
@@ -194,6 +204,7 @@ def test_discovery_publishes_stopped_with_cancelled_reason_when_cancelled(tmp_pa
     assert len(stopped) == 1
     assert stopped[0].job_id == handle.job_id
     assert stopped[0].reason == StopReason.CANCELLED
+    assert stopped[0].error_detail is None  # nothing to explain on the normal Pause-button path
 
 
 def test_discovery_releases_rf_reservation_even_if_new_connection_scope_raises(tmp_path):

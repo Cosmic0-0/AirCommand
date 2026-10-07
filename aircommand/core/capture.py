@@ -40,7 +40,7 @@ from aircommand.core.jobs import (
 )
 from aircommand.core.parse import parse_aircrack_handshake_check
 from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, HandshakeRepository
-from aircommand.core.procutil import ProcRunner
+from aircommand.core.procutil import ProcRunner, summarize_stderr
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
 # How often _drive spawns a one-shot `aircrack-ng -b <bssid> -w /dev/null
@@ -132,6 +132,7 @@ class Capture:
         # from _new_connection_scope() itself still reaches finally below --
         # without this, the RF reservation leaks for the rest of the live session.
         db_scope = None
+        handle = None
         try:
             # This thread's own connection -- never self._audit/self._handshakes (the
             # main connection) from in here. See persistence/db.py's Database/
@@ -209,8 +210,16 @@ class Capture:
             reason = (StopReason.CANCELLED if token.is_cancelled()
                       else StopReason.COMPLETED if handshake_seen
                       else StopReason.ERROR)
+            # Best-effort diagnostic hint for the ERROR case -- see
+            # procutil.py's summarize_stderr() and DiscoveryStopped's
+            # docstring (events.py) for why this exists at all.
+            error_detail = (
+                summarize_stderr(handle.stderr_tail()) if reason == StopReason.ERROR and handle is not None
+                else None
+            )
             self._bus.publish(CaptureStopped(event_id=uuid.uuid4(), occurred_at=datetime.now(),
-                                              job_id=job_id, target_id=target.id, reason=reason))
+                                              job_id=job_id, target_id=target.id, reason=reason,
+                                              error_detail=error_detail))
             # mark_terminal is LAST, deliberately: it's what unblocks JobHandle.wait_for_test()
             # (and, in spirit, any future external "is this job done" signal). Publishing
             # CaptureStopped first means a caller that wakes on mark_terminal can trust the

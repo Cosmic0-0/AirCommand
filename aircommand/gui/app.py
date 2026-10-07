@@ -146,9 +146,10 @@ class App(ctk.CTk):
         if event.reason != StopReason.ERROR:
             return  # CANCELLED is the normal Pause-button/shutdown path, already
             # reflected synchronously by the click handler above -- nothing to add.
-        self.status_bar.show_error(
-            "Discovery stopped unexpectedly — check your adapter/sudo session, then Resume"
-        )
+        message = "Discovery stopped unexpectedly — check your adapter/sudo session, then Resume"
+        if event.error_detail is not None:   # best-effort hint from airodump-ng's own
+            message += f" ({event.error_detail})"   # stderr -- see events.py's own docstring
+        self.status_bar.show_error(message)
         self._discovery_paused = True
         self._pause_resume_button.configure(text="Resume Discovery")
 
