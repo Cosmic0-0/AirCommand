@@ -788,7 +788,8 @@ afterward rather than returning falsy — confirmed empirically, asserted via
 ### 3. `NetworksView`/`TargetPicker` (Discovery & Targets tab) [DONE]
 
 `aircommand/gui/discovery_view.py` (new): `NetworksView` (seeded from
-`engine.discovery.list_networks()`, updated live via `NetworkDiscovered`/
+`engine.discovery.list_networks()` -- **no longer, see ADR-0010 and the
+2026-10-07 session-scoping entry at the end of this file**; updated live via `NetworkDiscovered`/
 `NetworkSightingUpdated`) and `TargetPicker` (seeded from
 `engine.targets.list()`, updated live via `TargetAdded`/`TargetRemoved`), per
 the design doc's own section. Two gaps resolved that the design doc leaves
@@ -1007,7 +1008,8 @@ issues (`ThingsToChange.txt`, triaged in a prior session) found using the app
 for real. 4 of the 5 are done this session; the 5th (Discovery session-vs-
 history scope, already has ADR-0007 from an earlier pass) is a scope
 decision, deliberately left for a dedicated session — see that ADR before
-touching schema/persistence.
+touching schema/persistence. **(Done in that dedicated session: see the last
+"Update" at the end of this file and ADR-0010.)**
 
 - **Column misalignment (item 1).** Confirmed empirically (not assumed) that
   only `discovery_view.py` (`NetworksView`, `TargetPicker`) and
@@ -1138,3 +1140,58 @@ lead to start from, not a fresh dmesg session.
 
 Full suite: 217 passing (up from 211 — 6 new tests for this fix). Verified
 stable across repeated full-suite runs.
+
+**Update, 2026-10-07, last item of the punch list: Discovery's table is now
+session-scoped** (`ThingsToChange.txt` item 2; built on a feature branch,
+reviewed by the user, and merged to `main` the same day).
+Scoped with the user first, not decided unilaterally; the full reasoning and the
+rejected alternatives are in `docs/adr/0010-discovery-table-is-session-scoped.md`,
+which supersedes the archive half of ADR-0007. What was decided: no all-time
+archive view (the Target allowlist already keeps what is worth keeping); the
+table shows the current **Discovery session** only (begins at launch or at a
+click of the new **New Session** button, survives Pause/Resume) and starts empty
+every launch instead of seeding from the DB; New Session is greyed out until
+Pause, then clears the table and starts a fresh scan. Because a fresh airodump-ng
+process starts with an empty list, no per-network filtering, `job_id` tag, or
+schema change was needed. The `networks` table is still written but nothing in
+the GUI reads it any more (deliberate, recorded in the ADR).
+
+What changed: `NetworksView` no longer seeds and gains `clear()`; `App` gains the
+New Session button, a **Pausing…** state (Pause now waits for the old scan's
+`DiscoveryStopped`, published after the adapter is released, before offering
+Resume/New Session), and one shared start path for Resume and New Session. That
+shared path also now reports `AdapterBusy` in the status bar — previously Resume
+caught only `RadioCommandFailed`, so Resume while Capture held the radio raised
+an uncaught exception in the Tk callback. A small fix, but it is a behavior change
+beyond the literal ask.
+
+Verified: suite 217 -> 230, five consecutive full-suite runs green (plus the
+implementer's own). Mutation-checked: the implementer broke the code 13 ways and
+I broke it 4 more (Pause flipping early, clearing before `start()` succeeds,
+`AdapterBusy` uncaught, New Session never re-disabled); every one was caught by the
+intended test. The real `App` was also driven through every state in a real Tk
+window on the real X display and screenshotted (idle/Pausing…/paused/cleared/
+refilled). **Not real hardware**: privileged calls were mocked and airodump-ng was
+`FakeProcRunner`. ADR-0010's claim that a mid-session restart skips `airmon-ng` and
+the NetworkManager restart rests on reading `rf.py`'s `release()` and is asserted
+against `FakeProcRunner`'s spawn log, not confirmed on the real adapter — see the
+new bullet in `docs/final-touches.md` item 2.
+
+Found along the way, test-side only: GUI tests that block the main thread while a
+Discovery driver thread allocates can stall, because a garbage-collection pass in
+the driver thread runs `tkinter.font.Font.__del__` for fonts left over from earlier
+tests' destroyed windows, and a Tk call from a non-main thread waits for an event
+loop the blocked test isn't running. The new `make_live_app` fixture in
+`tests/test_app.py` collects on the main thread, then disables GC for the test. The
+existing tests dodge this only because their drivers are short-lived. Whether the
+same thing can stall the real app (main thread blocked in `Engine.shutdown()`
+joining a driver stuck in a font `__del__`, right after New Session destroyed many
+widgets) is an inference, not something reproduced; the real main thread normally
+sits in `mainloop()` and services the call.
+
+All 5 items of the punch list are now done, and `ThingsToChange.txt` was deleted
+once they were. Code comments still cite its item numbers, so for the record:
+1 = Discovery table's columns and rows were misaligned; 2 = the table showed every
+network ever seen (this entry); 3 = a handshake Capture could not be cancelled;
+4 = closing the program was slow with no sign it was closing; 5 = two windows at
+launch (the sudo prompt, with the main window sitting on top of it).

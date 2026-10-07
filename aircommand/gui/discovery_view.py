@@ -10,6 +10,11 @@ table.py's build_header()/add_row()/update_row() -- see that module's
 docstring for why a plain pack()+grid() header above a CTkScrollableFrame
 body can't just size its columns to fit its own content (ThingsToChange
 item 1).
+
+NetworksView is session-scoped (ADR-0010): it starts empty and shows only what
+the current Discovery session has heard, so it is never seeded from the
+database. clear() is how App's "New Session" button ends one session and
+begins the next.
 """
 
 from __future__ import annotations
@@ -39,11 +44,15 @@ class NetworksView(ctk.CTkFrame):
         self._body = ctk.CTkScrollableFrame(self)
         self._body.pack(fill="both", expand=True)
 
-        for network in app.engine.discovery.list_networks():
-            self._upsert(network)
-
     def upsert_row(self, event) -> None:
         self._upsert(event.network)
+
+    def clear(self) -> None:
+        for row in self._rows.values():
+            for label in row["labels"]:
+                label.destroy()
+            row["button"].destroy()
+        self._rows.clear()   # _upsert's row_index = len(self._rows) restarts at 0
 
     def _upsert(self, network: Network) -> None:
         values = (
