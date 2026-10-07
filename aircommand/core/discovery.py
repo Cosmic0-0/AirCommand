@@ -23,7 +23,7 @@ from aircommand.core.jobs import (
 )
 from aircommand.core.parse import parse_airodump_csv_line
 from aircommand.core.persistence.db import ConnectionScope, NetworkRepository
-from aircommand.core.procutil import ProcRunner
+from aircommand.core.procutil import ProcRunner, summarize_stderr
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
 # airodump-ng doesn't stream CSV to stdout (see docs/roadmap.md Phase 1 item 0) --
@@ -88,6 +88,7 @@ class Discovery:
         # reaches finally below -- without this, the RF reservation leaks for
         # the rest of the live session (every later start() raises AdapterBusy).
         db_scope = None
+        handle = None
         try:
             # This thread's own connection -- never self._repo (the main connection)
             # from in here. See persistence/db.py's Database/ConnectionScope
@@ -157,8 +158,18 @@ class Discovery:
             # button, or Engine.shutdown()) or ERROR (the process died on its
             # own -- the only other way out of the while loop above).
             reason = StopReason.CANCELLED if token.is_cancelled() else StopReason.ERROR
+            # Best-effort diagnostic hint for the ERROR case -- see
+            # procutil.py's summarize_stderr() and DiscoveryStopped's own
+            # docstring for why this exists at all. None for CANCELLED
+            # (nothing to explain) and also None if handle was never bound
+            # (spawn() itself never ran) or airodump-ng wrote nothing to
+            # stderr on its way out.
+            error_detail = (
+                summarize_stderr(handle.stderr_tail()) if reason == StopReason.ERROR and handle is not None
+                else None
+            )
             self._bus.publish(DiscoveryStopped(event_id=uuid.uuid4(), occurred_at=datetime.now(),
-                                                job_id=job_id, reason=reason))
+                                                job_id=job_id, reason=reason, error_detail=error_detail))
             self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
             if db_scope is not None:
                 db_scope.close()

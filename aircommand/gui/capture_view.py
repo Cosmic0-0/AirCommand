@@ -120,7 +120,10 @@ class CapturePanel(ctk.CTkFrame):
 
     def _on_stopped(self, event) -> None:
         self.active_handle = None
-        self._status_label.configure(text=f"Stopped ({event.reason.value})")
+        text = f"Stopped ({event.reason.value})"
+        if event.error_detail is not None:   # best-effort hint from airodump-ng's own
+            text += f" — {event.error_detail}"   # stderr -- see events.py's own docstring
+        self._status_label.configure(text=text)
         self._update_button_states()
 
     def _on_burst(self, event) -> None:

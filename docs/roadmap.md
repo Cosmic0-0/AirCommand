@@ -1079,3 +1079,50 @@ add new automated tests, by the above reasoning on each one, beyond the
 `capture.py` cap-path fix's existing acceptance coverage already catching the
 fixture fix). Verified stable across many repeated full-suite runs, not just
 one green run — see item 4's own entry above for why that mattered here.
+
+**Update, same day, later**: real-hardware testing right after the above
+(a genuinely sustained Discovery session, not just "confirm it populates")
+hit `DiscoveryStopped(reason=ERROR)` for real — the underlying `airodump-ng`
+process exited on its own mid-session. Investigated as a possible regression
+from the work above; ruled out, not assumed:
+
+- `discovery.py`, `rf.py`, `procutil.py`, `privilege.py` — the only files
+  that could plausibly cause this — have zero diff in the commit above
+  (checked via `git diff`, not inferred).
+- `DiscoveryStopped` itself (the event that produced the message) was added
+  in `6b9dea3`, the day *before* this session — not new today.
+- `journalctl -k`/`dmesg` for the relevant window showed no USB disconnect,
+  firmware crash, driver reset, OOM-kill, or segfault — ruling out the usual
+  external explanations too, though the machine's free memory was genuinely
+  tight (1.6GB free of 14GB) at the time.
+
+**Root cause of tonight's specific death is still unknown** — real-hardware-
+only, can't be reproduced in a headless session, and nothing in the kernel
+log explains it. What got fixed instead, found while investigating: no job
+driver in this codebase (Discovery, Capture, Enumerate, Crack) had EVER
+surfaced a dead process's own `stderr` — `StopReason.ERROR` carried zero
+detail anywhere, despite `ProcHandle.stderr_tail()` already existing and
+already being used for `RadioCommandFailed` in `rf.py`. Added
+`procutil.py`'s `summarize_stderr()` (last few non-blank stderr lines,
+truncated for a status-bar-length display) and a new `error_detail: Optional[str]`
+field on `DiscoveryStopped`/`CaptureStopped` (`events.py`), populated only on
+`StopReason.ERROR`, wired through to both `App._on_discovery_stopped` and
+`CapturePanel._on_stopped`'s displayed message. Verified three ways: new
+`summarize_stderr()` unit tests (`test_procutil.py`), new
+Discovery/Capture acceptance tests asserting `error_detail` through
+`FakeProcRunner`'s scripted stderr, and a standalone real-subprocess harness
+(a real OS process that writes to stderr and exits non-zero, through the
+real `_RealProcHandle`, not `FakeProcRunner`) confirming the real plumbing
+end to end. Enumerate/Crack deliberately NOT touched the same way:
+`EnumerationFailed` already carries a meaningful `error: str` from its own
+exception message (a different, already-adequate gap), and Crack's
+equivalent would mean a `CrackResultRow`/schema change, a bigger decision
+not worth rushing under tonight's time pressure — revisit separately if it
+turns out to matter.
+
+Next time `DiscoveryStopped`/`CaptureStopped` fires with `reason=ERROR`, the
+GUI itself should show *why* (airodump-ng's own last stderr lines) — if it
+recurs, that's the next real lead, not another dmesg session.
+
+Full suite: 217 passing (up from 211 — 6 new tests for this fix). Verified
+stable across repeated full-suite runs.

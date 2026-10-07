@@ -375,6 +375,35 @@ class FakeProcRunner:
         # a test-author bug, not something this fake should paper over.
 
 
+# How much of ProcHandle.stderr_tail() a driver's own ERROR-reason event carries
+# as a human-readable hint. Found while debugging a real, unexplained Discovery
+# death: StopReason.ERROR previously carried no detail at all anywhere in this
+# codebase (confirmed by grep -- no driver ever called stderr_tail(), despite
+# it already existing and already being used for RadioCommandFailed in rf.py),
+# so there was no way to learn WHY a process died short of re-running it by
+# hand in a real terminal. A few lines is enough for a short status-bar hint;
+# the full (bounded, 200-line) tail is still available via stderr_tail() itself
+# for anything that wants more than this summary.
+_STDERR_SUMMARY_MAX_LINES = 3
+_STDERR_SUMMARY_MAX_CHARS = 300
+
+
+def summarize_stderr(lines: list[str]) -> "str | None":
+    """Collapses a ProcHandle.stderr_tail() result into a short, single-line-ish
+    hint for a DurableEvent's error_detail field -- None if there's nothing
+    (the common case: a tool that writes nothing to stderr on its way out,
+    e.g. an adapter yanked out from under it). Takes the LAST few non-blank
+    lines (closest to the actual death, not startup chatter), truncating if
+    even that's unreasonably long for a status-bar-style display."""
+    non_blank = [line.strip() for line in lines if line.strip()]
+    if not non_blank:
+        return None
+    summary = " | ".join(non_blank[-_STDERR_SUMMARY_MAX_LINES:])
+    if len(summary) > _STDERR_SUMMARY_MAX_CHARS:
+        summary = summary[: _STDERR_SUMMARY_MAX_CHARS - 1] + "…"
+    return summary
+
+
 # --- Startup orphan reconciliation (ADR-0004) -------------------------------------
 #
 # These are plain functions, not part of ProcRunner/ProcHandle: reconciliation acts
