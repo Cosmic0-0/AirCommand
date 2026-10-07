@@ -89,7 +89,9 @@ def make_target_removed(bssid) -> TargetRemoved:
 # --- NetworksView ------------------------------------------------------------------
 
 
-def test_seeds_from_networks_discovered_by_a_real_discovery_job(tmp_path):
+def test_does_not_seed_from_networks_persisted_by_an_earlier_discovery_job(tmp_path):
+    """ADR-0010: the table is session-scoped and starts empty, even though the
+    database already holds a Network a previous Discovery job persisted."""
     proc = FakeProcRunner(
         script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
         on_spawn=_write_csv_on_spawn,
@@ -101,14 +103,50 @@ def test_seeds_from_networks_discovered_by_a_real_discovery_job(tmp_path):
     )
     handle = engine.discovery.start()
     handle.wait_for_test(timeout=2.0)
+    assert engine.discovery.list_networks() != []   # really persisted -- the premise of this test
 
     root = ctk.CTk()
     try:
         view = NetworksView(root, _FakeApp(engine))
-        bssid = MacAddress.parse(BSSID_1)
-        assert bssid in view._rows
-        ssid_label = view._rows[bssid]["labels"][0]
-        assert ssid_label.cget("text") == "Net1"
+        assert view._rows == {}
+    finally:
+        root.destroy()
+
+
+def test_clear_removes_every_row_and_destroys_its_widgets(tmp_path):
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
+        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+        old_widgets = [
+            widget for row in view._rows.values() for widget in (*row["labels"], row["button"])
+        ]
+        assert len(old_widgets) == 2 * (len(view._COLUMNS) + 1)
+
+        view.clear()
+
+        assert view._rows == {}
+        assert all(not widget.winfo_exists() for widget in old_widgets)
+    finally:
+        root.destroy()
+
+
+def test_upsert_after_clear_starts_again_at_grid_row_zero(tmp_path):
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
+        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+
+        view.clear()
+        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+
+        row = view._rows[MacAddress.parse(BSSID_2)]
+        assert row["labels"][0].grid_info()["row"] == 0
+        assert row["button"].grid_info()["row"] == 0
     finally:
         root.destroy()
 

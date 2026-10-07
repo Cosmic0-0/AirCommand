@@ -10,7 +10,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from aircommand.core import Engine, InvalidSudoPasswordError, RadioCommandFailed
+from aircommand.core import AdapterBusy, Engine, InvalidSudoPasswordError, RadioCommandFailed
 from aircommand.core.domain import StopReason
 from aircommand.core.events import (
     DeauthFired,
@@ -113,11 +113,21 @@ class App(ctk.CTk):
 
     def _build_discovery_targets_tab(self) -> None:
         tab = self.tabview.add("Discovery & Targets")
+        # _discovery_paused is True only once the scan has ACTUALLY stopped;
+        # _discovery_stopping covers the Pause-click -> DiscoveryStopped gap
+        # (ADR-0010).
         self._discovery_paused = False
+        self._discovery_stopping = False
+        button_row = ctk.CTkFrame(tab, fg_color="transparent")
+        button_row.pack(side="top", anchor="w", padx=10, pady=(10, 0))
         self._pause_resume_button = ctk.CTkButton(
-            tab, text="Pause Discovery", command=self._on_pause_resume_discovery_clicked
+            button_row, text="Pause Discovery", command=self._on_pause_resume_discovery_clicked
         )
-        self._pause_resume_button.pack(side="top", anchor="w", padx=10, pady=(10, 0))
+        self._pause_resume_button.pack(side="left")
+        self._new_session_button = ctk.CTkButton(
+            button_row, text="New Session", state="disabled", command=self._on_new_session_clicked
+        )
+        self._new_session_button.pack(side="left", padx=(10, 0))
         self.networks_view = NetworksView(tab, self)
         self.networks_view.pack(side="top", fill="both", expand=True, padx=10, pady=(5, 5))
         self.target_picker = TargetPicker(tab, self)
@@ -128,30 +138,58 @@ class App(ctk.CTk):
         self.pump.on(TargetRemoved, self.target_picker.remove_row)
 
     def _on_pause_resume_discovery_clicked(self) -> None:
-        if self._discovery_paused:
-            try:
-                self._discovery_handle = self.engine.discovery.start()
-            except RadioCommandFailed as e:
-                self.status_bar.show_error(f"Discovery couldn't resume: {e}")
-                return  # stay paused; don't touch the stale handle or button text
-            self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=self._discovery_handle.job_id)
-            self._discovery_paused = False
-            self._pause_resume_button.configure(text="Pause Discovery")
+        if self._discovery_stopping:
+            return   # defensive: the button is already disabled while Pausing
+        elif self._discovery_paused:
+            self._start_discovery(new_session=False)
         else:
+            # Cancel is async (up to one driver tick, plus a privileged kill),
+            # and the adapter is only released once the driver finishes -- so
+            # this click can't flip to Resume yet, or a fast Resume click would
+            # hit AdapterBusy. _on_discovery_stopped finishes the transition.
+            self._discovery_stopping = True
+            self._pause_resume_button.configure(text="Pausing…", state="disabled")
             self._discovery_handle.cancel()
-            self._discovery_paused = True
-            self._pause_resume_button.configure(text="Resume Discovery")
+
+    def _on_new_session_clicked(self) -> None:
+        if not self._discovery_paused:
+            return   # defensive: the button is only enabled while paused
+        self._start_discovery(new_session=True)
+
+    def _start_discovery(self, *, new_session: bool) -> None:
+        """Shared by Resume (keeps the table) and New Session (clears it) --
+        ADR-0010."""
+        try:
+            handle = self.engine.discovery.start()
+        except (RadioCommandFailed, AdapterBusy) as e:
+            what = "start a new session" if new_session else "resume"
+            self.status_bar.show_error(f"Discovery couldn't {what}: {e}")
+            return  # stay paused; table and buttons untouched
+        self._discovery_handle = handle
+        self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=handle.job_id)
+        if new_session:
+            self.networks_view.clear()   # only once start() succeeded, so a failed
+            # start leaves the old rows in place
+        self._discovery_paused = False
+        self._pause_resume_button.configure(text="Pause Discovery", state="normal")
+        self._new_session_button.configure(state="disabled")
 
     def _on_discovery_stopped(self, event: DiscoveryStopped) -> None:
-        if event.reason != StopReason.ERROR:
-            return  # CANCELLED is the normal Pause-button/shutdown path, already
-            # reflected synchronously by the click handler above -- nothing to add.
-        message = "Discovery stopped unexpectedly — check your adapter/sudo session, then Resume"
-        if event.error_detail is not None:   # best-effort hint from airodump-ng's own
-            message += f" ({event.error_detail})"   # stderr -- see events.py's own docstring
-        self.status_bar.show_error(message)
+        if event.reason == StopReason.ERROR:
+            message = "Discovery stopped unexpectedly — check your adapter/sudo session, then Resume"
+            if event.error_detail is not None:   # best-effort hint from airodump-ng's own
+                message += f" ({event.error_detail})"   # stderr -- see events.py's own docstring
+            self.status_bar.show_error(message)
+        elif not self._discovery_stopping:
+            return  # CANCELLED not from the Pause button (e.g. Engine.shutdown() during
+            # close) -- nothing to do.
+        # The buttons wait for this event rather than the click because the driver
+        # releases the adapter before publishing DiscoveryStopped, so Resume/New
+        # Session are safe to start from here (ADR-0010).
+        self._discovery_stopping = False
         self._discovery_paused = True
-        self._pause_resume_button.configure(text="Resume Discovery")
+        self._pause_resume_button.configure(text="Resume Discovery", state="normal")
+        self._new_session_button.configure(state="normal")
 
     def _build_target_actions_tab(self) -> None:
         tab = self.tabview.add("Target Actions")

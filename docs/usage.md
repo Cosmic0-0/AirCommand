@@ -69,7 +69,10 @@ exist. Pass `--help` to see all options.
 
 Passive listening — this needs no authorization and runs against any nearby
 network. The table fills in as beacons are seen: SSID, BSSID, channel,
-encryption, signal, last seen.
+encryption, signal, last seen. It shows the current Discovery session only:
+it starts empty every time you launch AirCommand, and it is not a history of
+every network ever seen. Networks you want to keep are the ones you add as
+Targets.
 
 - **Add as Target**: click it on a row to authorize that specific network for
   gated Actions (Capture, Enumerate). You'll be asked for a label (e.g.
@@ -81,7 +84,15 @@ encryption, signal, last seen.
   channel-hopping mode indefinitely, which blocks Capture and Enumerate
   outright (you'll see a "Radio busy" error if you don't pause first). Click
   Pause before switching to the Target Actions tab to actually do something
-  with a Target; Resume afterward to keep watching for new networks.
+  with a Target; Resume afterward to keep watching for new networks. Pause
+  takes about a second to finish (the button reads "Pausing…" and both
+  buttons are greyed out until the scan has really stopped). While paused the
+  table stays as it was, so you can still "Add as Target" from it. Resume
+  continues the same table.
+- **New Session**: greyed out while Discovery is scanning; click Pause first,
+  then New Session to clear the table and start a fresh scan, without closing
+  and reopening AirCommand. Anything still in range reappears within a few
+  seconds. Nothing is lost: Targets are untouched.
 
 ### Target Actions
 
