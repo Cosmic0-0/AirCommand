@@ -291,7 +291,7 @@ class SubprocessRunner:
 class _FakeProcHandle:
     def __init__(
         self, scripted_lines: list[str], *, returncode: int = 0, stderr_lines: Optional[list[str]] = None,
-        running_polls: int = 0,
+        running_polls: int = 0, ignore_terminate: bool = False,
     ) -> None:
         self._scripted_lines = scripted_lines
         self._returncode = returncode
@@ -304,6 +304,16 @@ class _FakeProcHandle:
         # as already-exited from the first poll) so every existing script=
         # call site that doesn't care about this is unaffected.
         self._running_polls_remaining = running_polls
+        # Simulates a real aircrack-ng-suite process that doesn't honor
+        # SIGTERM (ProcHandle.kill()'s own docstring; see docs/adr/0011 for
+        # why Capture._drive now escalates to kill() on a live Cancel, not
+        # just startup orphan cleanup): while True, poll() keeps reporting
+        # "still running" regardless of running_polls_remaining, UNTIL kill()
+        # is called -- terminate() alone (already a no-op below, same as
+        # ever) never ends it. Defaults to False so every existing call site
+        # is unaffected.
+        self._ignore_terminate = ignore_terminate
+        self._killed = False
         self.pid = next(_fake_pid_counter)
         self.pgid = self.pid  # ProcHandle.pgid's own contract: == pid, one session per spawn
 
@@ -314,12 +324,16 @@ class _FakeProcHandle:
         pass
 
     def kill(self) -> None:
-        pass
+        self._killed = True
 
     def wait(self) -> int:
         return self._returncode
 
     def poll(self) -> Optional[int]:
+        if self._killed:
+            return self._returncode
+        if self._ignore_terminate:
+            return None
         if self._running_polls_remaining > 0:
             self._running_polls_remaining -= 1
             return None
@@ -341,6 +355,7 @@ class FakeProcRunner:
         returncodes: Optional[dict[str, int]] = None,
         stderr: Optional[dict[str, list[str]]] = None,
         running_polls: Optional[dict[str, int]] = None,
+        ignore_terminate: Optional[set[str]] = None,
     ) -> None:
         """script maps a recognizable argv[0] (e.g. 'airodump-ng') to the lines it
         should yield, so a test can drive Discovery/Capture/Crack/Enumerate without
@@ -355,12 +370,16 @@ class FakeProcRunner:
         nothing captured" so every existing script= call site is unaffected.
         running_polls maps argv[0] to how many poll() calls should report "still
         running" before reporting exited -- see _FakeProcHandle's own docstring;
-        defaults to 0 (same reasoning)."""
+        defaults to 0 (same reasoning). ignore_terminate is a set of argv[0] keys
+        whose handle should simulate ignoring SIGTERM entirely (only kill() ends
+        it) -- see _FakeProcHandle's own docstring; defaults to empty (same
+        reasoning)."""
         self._script = script
         self._on_spawn = on_spawn
         self._returncodes = returncodes or {}
         self._stderr = stderr or {}
         self._running_polls = running_polls or {}
+        self._ignore_terminate = ignore_terminate or set()
 
     def spawn(self, argv: list[str], *, privileged: bool) -> ProcHandle:
         if self._on_spawn is not None:
@@ -370,6 +389,7 @@ class FakeProcRunner:
             returncode=self._returncodes.get(argv[0], 0),
             stderr_lines=self._stderr.get(argv[0]),
             running_polls=self._running_polls.get(argv[0], 0),
+            ignore_terminate=argv[0] in self._ignore_terminate,
         )
         # A KeyError on that lookup means the test scripted the wrong argv[0] --
         # a test-author bug, not something this fake should paper over.
