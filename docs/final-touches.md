@@ -58,6 +58,37 @@ assumed, does `-b` really suppress the interactive network-selection prompt
 for an unambiguous single-BSSID capture, does the exit code/stdout shape hold
 up across a couple of real access points (not just one).
 
+**Partially answered 2026-10-07, while debugging the Cancel hang (ADR-0011)
+— two real problems CONFIRMED, this item is NOT closed:**
+
+- **Confirmed**: `-b` does suppress the interactive network-selection prompt
+  for an unambiguous single-BSSID capture — but it suppresses the *entire*
+  per-network summary table along with it, not just the prompt.
+  `parse_aircrack_handshake_check`'s `"handshake)"` text only appeared, in
+  testing, in that table — and only when `-b` was *omitted* (letting
+  `aircrack-ng` show its own selection menu). With `-b` given and matching
+  exactly one BSSID (every real call `capture.py` makes), `aircrack-ng`
+  skips straight to attempting that AP instead of printing the table.
+  **Not yet confirmed against a REAL captured handshake** (only against
+  synthetic `.cap` files without one, and a hand-crafted synthetic 4-way
+  handshake that `aircrack-ng` itself didn't recognize as EAPOL data for
+  reasons not root-caused — see ADR-0011's own Consequences) — but if it
+  holds, `parse_aircrack_handshake_check` may never see its expected text
+  via the exact invocation this codebase uses, regardless of the next bullet.
+- **Confirmed**: real `aircrack-ng` rejects `/dev/null` outright as a `-w`
+  dictionary file (`ERROR: Processing dictionary file /dev/null (No such
+  file or directory)` — it needs a seekable regular file, a character
+  device doesn't qualify) and falls through to "Please specify a dictionary
+  (option -w)" without attempting to crack or list anything further.
+  `/dev/null` was always meant as a "we don't actually want to crack, just
+  detect" placeholder — it doesn't work that way against the real binary.
+
+Needs its own session with a REAL captured handshake on real hardware (not
+more synthetic `.cap` crafting — that hit a wall, see ADR-0011) to confirm
+whether finding one holds, then very likely a real redesign of the
+detection mechanism (not a tweak) — a design decision, not routine
+implementation, per CLAUDE.md's model tiering.
+
 ## 2. Drive the real GUI end-to-end, for real
 
 Once item 0 exists: launch AirCommand for real, with your real sudo password,
@@ -106,14 +137,42 @@ not a suggestion). Concretely:
 - [ ] Cancel button: start a deauth-assisted Capture, click Cancel mid-run,
       confirm the UI actually returns to its idle state (this was unit-tested
       against `FakeProcRunner`, but never against a real, slower-to-terminate
-      `aireplay-ng` process). **Partially re-verified 2026-10-07 (see
-      `docs/roadmap.md`'s entry for that date): a new standalone harness
-      spawns a REAL OS subprocess reproducing ADR-0008's documented stdout-
-      stall shape and confirms `cancel()` reliably terminates it, through the
-      same `_RealProcHandle` production code real `aireplay-ng` would go
-      through. What that harness does NOT cover, and what this checklist item
-      still needs: the real GUI's Cancel button, a real `aireplay-ng`
-      process, real hardware.**
+      `aireplay-ng` process). **Re-opened 2026-10-07, after the entry below
+      turned out to be wrong**: the "already fixed by ADR-0008, confirmed"
+      claim two updates below only ever covered `aireplay-ng`'s own stdout-
+      stall shape, via a standalone harness — not a PASSIVE Capture (no
+      `aireplay-ng` involved at all), not the real GUI Cancel button, and not
+      real hardware. The user hit exactly that gap for real: a passive
+      Capture's Cancel button did nothing, no error, UI stuck on
+      "Capturing…" forever, only fixable by closing the app. Root-caused and
+      fixed — see `docs/adr/0011-capture-cancel-hang-on-real-aircrack-ng.md`
+      for the full writeup: real `aircrack-ng`, confirmed via `strace`, hangs
+      indefinitely (a worker thread calls a raw `exit()` instead of
+      `exit_group()`/`pthread_exit()`, never waking the main thread's own
+      wait) when `capture.py`'s periodic handshake-check runs against a
+      `.cap` file that doesn't exist yet or isn't fully written — a race
+      `Capture._drive`'s own 4-second check interval does not reliably avoid
+      on real hardware. `Capture._drive`'s cancellation loop blocked on that
+      one-shot check's own `handle.lines()`, so it could never get back
+      around to notice `token.is_cancelled()` either. Fixed: a guard (skip
+      the check until the `.cap` file has a full pcap header) plus a bounded,
+      per-tick-cancellable wait around the check (same `ProcHandle.poll()`
+      idiom ADR-0008 already established), plus Cancel now escalates
+      SIGTERM→SIGKILL on the main `airodump-ng` handle too (it wasn't
+      verifying the process actually died before this). Verified: new
+      `FakeProcRunner` acceptance tests for the guard/cancellation/escalation
+      paths, AND a new real-subprocess test file
+      (`tests/test_capture_real_subprocess.py`) that spawns the actual
+      installed `aircrack-ng` against a real empty `.cap` file — confirms the
+      hang is real, and that the fix detects and kills it. **What's STILL not
+      re-confirmed, and what this checklist item still needs**: the real GUI
+      Cancel button, a real `airodump-ng`/`aireplay-ng` process, real
+      hardware (`wlx24050f7d7ae0`) — none of the above needed sudo or wifi
+      hardware, since `aircrack-ng` itself never runs privileged.
+      **Two more real, confirmed-but-unfixed bugs surfaced while verifying
+      this, both about whether handshake detection ever actually SUCCEEDS
+      (separate from Cancel) — see item 1 below, now substantially updated,
+      and ADR-0011's own Consequences section for the full detail.**
 - [ ] Enumerate panel: join the Target's network via your OS's normal wifi
       settings first (AirCommand doesn't do this itself, by design — see
       `enumerate.py`'s own docstring), then run Enumerate and confirm real

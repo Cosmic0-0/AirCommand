@@ -308,6 +308,116 @@ def test_capture_releases_rf_reservation_even_if_new_connection_scope_raises(tmp
     second_handle.wait_for_test(timeout=2.0)
 
 
+def test_handshake_check_skipped_until_cap_file_has_a_full_header(tmp_path):
+    """docs/adr/0011: real aircrack-ng hangs indefinitely when given a missing
+    or under-24-byte (pcap global header size) capture file. The very first
+    handshake check can easily race airodump-ng's own startup/flush timing on
+    real hardware -- Capture._drive must never spawn aircrack-ng at all until
+    cap_path exists and has a full header, regardless of what aircrack-ng
+    itself would do with it. No on_spawn cap-file writer here (deliberately,
+    unlike _make_engine's shared one) -- cap_path never exists, so this proves
+    the guard, not just that aircrack-ng was never scripted to run."""
+    spawned = []
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            on_spawn=spawned.append,
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),  # Pacer.due() fires every tick
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    handle = engine.capture.start_passive(target)
+    time.sleep(PRE_CANCEL_SETTLE_S)  # several loop iterations for real, each one a
+    # chance to (wrongly) spawn aircrack-ng against the still-missing cap file
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert all(argv[0] != "aircrack-ng" for argv in spawned), (
+        "aircrack-ng must not be spawned against a cap file that doesn't exist yet"
+    )
+
+
+def test_cancel_is_responsive_while_handshake_check_is_in_flight(tmp_path):
+    """docs/adr/0011's actual Cancel-bug fix: the one-shot aircrack-ng check
+    must never block this loop's own cancellation check. Gives "aircrack-ng" a
+    large running_polls budget (FakeProcHandle.poll() keeps reporting "still
+    running") to simulate a slow-or-stuck check, then cancels while it's
+    in flight and asserts the job still reaches terminal state promptly --
+    not after waiting out that budget. Before this fix (plain
+    "\\n".join(check_handle.lines())), FakeProcHandle.lines() would still
+    return instantly regardless of poll() (it doesn't gate on poll() at all),
+    so this specific scenario couldn't have caught the bug under the OLD code
+    -- it exists to pin the NEW _collect_bounded behavior going forward, not
+    to reproduce the original hang (only a real aircrack-ng process does
+    that -- see tests/test_capture_real_subprocess.py)."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": [],
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+            },
+            on_spawn=_write_cap_file_on_spawn,
+            # Large budgets for BOTH -- aircrack-ng's is the one under test
+            # (simulates a slow-or-stuck check); airodump-ng's just needs to
+            # outlast the test the same way AIRODUMP_RUNNING_POLLS always does.
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS, "aircrack-ng": AIRODUMP_RUNNING_POLLS},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),  # Pacer.due() fires every tick
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    handle = engine.capture.start_passive(target)
+    time.sleep(PRE_CANCEL_SETTLE_S * 3)  # let the loop reach and start the handshake check
+    handle.cancel()
+    # If _collect_bounded still blocked on the check, this would time out --
+    # AIRODUMP_RUNNING_POLLS * DRIVE_TICK_INTERVAL is ~1s, far longer than the
+    # couple of ticks cancellation should actually take.
+    handle.wait_for_test(timeout=2.0)
+
+
+def test_cancel_escalates_to_kill_when_airodump_ignores_sigterm(tmp_path):
+    """docs/adr/0011: ProcHandle.kill()'s own docstring already warned the
+    aircrack-ng suite doesn't always honor SIGTERM -- Capture._drive used to
+    call terminate() exactly once on Cancel and never check whether it
+    actually worked. Simulates that real-world case via ignore_terminate=
+    (poll() keeps reporting "still running" until kill() is called) and
+    asserts the job still reaches terminal state -- proving kill() really
+    gets called, not just that terminate() was attempted."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            ignore_terminate={"airodump-ng"},
+        ),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    # Short grace period -- the default (3s) would make this test slow for no
+    # reason; only the escalation actually happening is under test here.
+    engine.capture._cancel_grace_period = timedelta(seconds=0.05)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    handle = engine.capture.start_passive(target)
+    time.sleep(PRE_CANCEL_SETTLE_S)
+    handle.cancel()
+    # Would hang past this timeout if _terminate_with_escalation never
+    # escalated to kill() -- FakeProcHandle.poll() would report "still
+    # running" forever under ignore_terminate= otherwise.
+    handle.wait_for_test(timeout=2.0)
+
+
 def test_not_a_target_error_when_target_removed_after_fetch(tmp_path):
     # require_target() raises before Capture ever touches the adapter or
     # self._proc, so no tool needs to be scripted at all here.

@@ -40,7 +40,7 @@ from aircommand.core.jobs import (
 )
 from aircommand.core.parse import parse_aircrack_handshake_check
 from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, HandshakeRepository
-from aircommand.core.procutil import ProcRunner, summarize_stderr
+from aircommand.core.procutil import ProcHandle, ProcRunner, summarize_stderr
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
 # How often _drive spawns a one-shot `aircrack-ng -b <bssid> -w /dev/null
@@ -49,6 +49,33 @@ from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 # this). Overridable per-instance purely for test injectability, same reason
 # discovery.py's poll interval is -- see Discovery.__init__.
 DEFAULT_HANDSHAKE_CHECK_INTERVAL = timedelta(seconds=4)
+
+# pcap global header size (magic/version/tz/sigfigs/snaplen/linktype -- 24
+# bytes, fixed by the format). Below this, a real .cap file can't even have
+# its header fully written yet. See docs/adr/0011 -- real aircrack-ng hangs
+# INDEFINITELY (confirmed via strace: a worker thread calls a raw exit()
+# instead of pthread_exit()/exit_group(), leaving the main thread's own
+# futex wait unresolved forever) when given a missing or under-24-byte
+# capture file. The very first handshake check after Capture starts can
+# easily race airodump-ng's own startup/flush timing on real hardware, so
+# this guard is what keeps that hang from being hit in the common case --
+# HANDSHAKE_CHECK_TIMEOUT below is the actual safety net if it's hit anyway.
+_PCAP_GLOBAL_HEADER_BYTES = 24
+
+# Safety net, not the thing that keeps Cancel responsive -- that's
+# _collect_bounded's per-tick token.is_cancelled() check, which bounds
+# cancellation latency to roughly one tick regardless of this value. This is
+# generous on purpose: real aircrack-ng against a real, possibly large
+# capture file is not guaranteed fast, and this only matters for an
+# UNATTENDED hang (nobody clicked Cancel) -- see docs/adr/0011.
+DEFAULT_HANDSHAKE_CHECK_TIMEOUT = timedelta(seconds=30)
+
+# SIGTERM, then this long (polled, not a blind sleep) before escalating to
+# SIGKILL -- same policy procutil.py's terminate_process_group() already
+# uses for startup orphan cleanup (ADR-0004), applied here to the live
+# Cancel path too. ProcHandle.kill()'s own docstring: the aircrack-ng suite
+# doesn't always honor SIGTERM cleanly. See docs/adr/0011.
+DEFAULT_CANCEL_GRACE_PERIOD = timedelta(seconds=3)
 
 
 class Capture:
@@ -65,6 +92,8 @@ class Capture:
         new_connection_scope: Callable[..., ConnectionScope],
         handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
         tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
+        handshake_check_timeout: timedelta = DEFAULT_HANDSHAKE_CHECK_TIMEOUT,
+        cancel_grace_period: timedelta = DEFAULT_CANCEL_GRACE_PERIOD,
     ) -> None:
         self._allowlist = allowlist
         self._handshakes = handshakes  # main-connection repo -- list_handshakes() (main-thread read) only
@@ -77,6 +106,8 @@ class Capture:
         self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._handshake_check_interval = handshake_check_interval
         self._tick_interval_s = tick_interval.total_seconds()
+        self._handshake_check_timeout = handshake_check_timeout
+        self._cancel_grace_period = cancel_grace_period
 
     def start_passive(self, target: Target) -> JobHandle:
         return self._start(target, deauth=None)
@@ -99,6 +130,44 @@ class Capture:
                                           job_id=job_id, target_id=fresh.id))
         threading.Thread(target=self._drive, args=(job_id, token, reservation, fresh, deauth), daemon=True).start()
         return JobHandle(job_id, kind, self._jobs)
+
+    def _terminate_with_escalation(self, handle: ProcHandle) -> None:
+        """SIGTERM, then poll (never a blind time.sleep -- stays on this
+        loop's own tick cadence) for up to _cancel_grace_period before
+        escalating to SIGKILL. See docs/adr/0011: ProcHandle.kill()'s own
+        docstring already warns the aircrack-ng suite doesn't always honor
+        SIGTERM, and procutil.py's terminate_process_group() already uses
+        this exact policy for startup orphan cleanup (ADR-0004) -- this is
+        the same policy applied to a live Cancel click, so a Target's
+        airodump-ng process can't survive it just because the first signal
+        was ignored."""
+        handle.terminate()
+        deadline = time.monotonic() + self._cancel_grace_period.total_seconds()
+        while handle.poll() is None and time.monotonic() < deadline:
+            time.sleep(self._tick_interval_s)
+        if handle.poll() is None:
+            handle.kill()
+
+    def _collect_bounded(self, handle: ProcHandle, token: CancellationToken) -> Optional[str]:
+        """Waits for the one-shot aircrack-ng handshake-check ProcHandle to
+        finish WITHOUT blocking this loop's own cancellation/liveness checks
+        on it -- docs/adr/0011, the same ProcHandle.poll()-based idiom
+        ADR-0008 already established for the main airodump-ng handle, now
+        applied to this second handle too. Returns None (always treated as
+        "nothing to report this round", never as an error) if cancelled
+        mid-check or if the process doesn't finish within
+        _handshake_check_timeout -- killed in either case rather than left
+        running. The timeout is a safety net for an UNATTENDED hang only;
+        cancellation itself is caught on the very next tick regardless of
+        the timeout's length, since that check runs every iteration here,
+        same cadence as the rest of _drive."""
+        deadline = time.monotonic() + self._handshake_check_timeout.total_seconds()
+        while handle.poll() is None:
+            if token.is_cancelled() or time.monotonic() >= deadline:
+                handle.kill()
+                return None
+            time.sleep(self._tick_interval_s)
+        return "\n".join(handle.lines())  # process already exited -- draining is instant, never blocks
 
     def _drive(
         self,
@@ -156,15 +225,17 @@ class Capture:
             # airodump-ng run through `sudo` with a piped stdout can stop
             # producing output indefinitely after its first line, which would
             # have silently frozen deauth bursts, handshake checks, and
-            # cancellation here too (not yet hardware-observed for Capture
-            # specifically, since real-hardware Capture testing is still an
-            # open docs/final-touches.md item -- but it shares the exact same
-            # vulnerable shape as the Discovery bug that WAS observed, against
-            # the same tool). Fixed the same way: a plain wall-clock loop,
-            # decoupled from handle.lines() entirely.
+            # cancellation here too -- shares the exact same vulnerable shape
+            # as the Discovery bug that WAS observed, against the same tool.
+            # Fixed the same way: a plain wall-clock loop, decoupled from
+            # handle.lines() entirely. (A SECOND, separate stdout-blocking
+            # hang was later hardware-confirmed for Capture specifically --
+            # not this airodump-ng handle, but the one-shot aircrack-ng
+            # handshake-check handle below. See docs/adr/0011 and
+            # _collect_bounded's own docstring.)
             while True:
                 if token.is_cancelled():
-                    handle.terminate()
+                    self._terminate_with_escalation(handle)
                     break
                 if handle.poll() is not None:
                     break  # process died unexpectedly -- ERROR, inferred below
@@ -185,21 +256,34 @@ class Capture:
                         fired_at=audit_row.fired_at, frame_count=deauth.burst_size))
 
                 if not handshake_seen and handshake_pacer.due():
-                    check_handle = self._proc.spawn(
-                        ["aircrack-ng", "-b", str(target.bssid), "-w", "/dev/null", str(cap_path)],
-                        privileged=False)
-                    output = "\n".join(check_handle.lines())   # one-shot; exhausting lines()
-                                                                # is enough, same convention as hashcat in crack.py
-                    if parse_aircrack_handshake_check(output):
-                        handshake_seen = True
-                        sha256 = hashlib.sha256(cap_path.read_bytes()).hexdigest()
-                        handshake = db_scope.handshakes.insert(   # repository mints — see its own docstring
-                            target_id=target.id, bssid=target.bssid, capture_job_id=job_id,
-                            cap_file_path=cap_path, cap_file_sha256=sha256, kind=HandshakeKind.WPA2_EAPOL)
-                        self._bus.publish(HandshakeCaptured(event_id=uuid.uuid4(), occurred_at=datetime.now(),
-                                                             handshake=handshake))
-                        handle.terminate()
-                        break
+                    # Guard + bounded wait: see docs/adr/0011. Skipping the
+                    # check until there's a full pcap header to read avoids
+                    # the known real-aircrack-ng hang in the common case;
+                    # _collect_bounded is what actually keeps Cancel
+                    # responsive regardless. A single try/except (rather than
+                    # a separate .exists() then .stat()) avoids a TOCTOU gap
+                    # between the two calls -- not load-bearing (airodump-ng
+                    # only ever appends to this file, never deletes it), just
+                    # as cheap to get right as not.
+                    try:
+                        cap_file_ready = cap_path.stat().st_size >= _PCAP_GLOBAL_HEADER_BYTES
+                    except OSError:
+                        cap_file_ready = False
+                    if cap_file_ready:
+                        check_handle = self._proc.spawn(
+                            ["aircrack-ng", "-b", str(target.bssid), "-w", "/dev/null", str(cap_path)],
+                            privileged=False)
+                        output = self._collect_bounded(check_handle, token)
+                        if output is not None and parse_aircrack_handshake_check(output):
+                            handshake_seen = True
+                            sha256 = hashlib.sha256(cap_path.read_bytes()).hexdigest()
+                            handshake = db_scope.handshakes.insert(   # repository mints — see its own docstring
+                                target_id=target.id, bssid=target.bssid, capture_job_id=job_id,
+                                cap_file_path=cap_path, cap_file_sha256=sha256, kind=HandshakeKind.WPA2_EAPOL)
+                            self._bus.publish(HandshakeCaptured(event_id=uuid.uuid4(), occurred_at=datetime.now(),
+                                                                 handshake=handshake))
+                            self._terminate_with_escalation(handle)
+                            break
                 time.sleep(self._tick_interval_s)
         finally:
             self._rf.release(reservation)
