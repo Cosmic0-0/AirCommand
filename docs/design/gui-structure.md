@@ -139,13 +139,14 @@ adapter (ADR-0002; `discovery.py`'s `_drive` spawns `airodump-ng` with
 
 ## Discovery & Targets tab
 
-**`NetworksView`** — seeds from `engine.discovery.list_networks()` **before**
-`discovery.start()` is called (per startup sequencing above — this is why the
-view is constructed ahead of that last line, not after). This shows
-previously-known networks (persisted across sessions in SQLite) immediately,
-rather than an empty table until the first ~2s CSV poll cycle completes.
-Subscribes, both unfiltered (no `job_id` on either event, so no `only_job`
-possible or needed):
+**`NetworksView`** — starts **empty** and shows the current Discovery session
+only (ADR-0010; see CONTEXT.md's "Discovery session"). It used to seed itself
+from `engine.discovery.list_networks()` so previously-known networks (persisted
+in SQLite) appeared immediately; that seeding is gone, so the table stays empty
+until the first ~2s CSV poll cycle completes. Nothing about construction order
+depends on it any more. `clear()` destroys every row's widgets and empties the
+row map; `App`'s New Session button is its only caller. Subscribes, both
+unfiltered (no `job_id` on either event, so no `only_job` possible or needed):
 
 ```python
 self.pump.on(NetworkDiscovered, self.networks_view.upsert_row)
@@ -196,6 +197,20 @@ control) — Pause calls `self._discovery_handle.cancel()`; Resume calls
 `self.engine.discovery.start()` again and replaces the stored handle. No core
 changes needed; `JobHandle.cancel()` already does exactly this.
 
+**Amended by ADR-0010 (the paragraph above is the original decision, kept as
+history).** Pause no longer flips the button to "Resume Discovery"
+synchronously. Cancelling is asynchronous (the driver notices on its next
+0.5s tick, then releases the adapter), so Pause now moves to a *Pausing*
+state (both buttons disabled, label "Pausing…") and only becomes "Resume
+Discovery" when the old job's `DiscoveryStopped` arrives. That event is
+published after `rf.release()`, so the adapter really is free by then. A
+second button, **New Session**, sits beside Pause/Resume. It is disabled
+while scanning or pausing, and enabled when paused (including after Discovery
+dies on its own). Resume and New Session share one start path: Resume keeps
+the table, New Session clears it, and either one reports `RadioCommandFailed`
+or `AdapterBusy` in the status bar and stays paused if `start()` fails, with
+the table untouched.
+
 Considered and rejected: auto-yielding (App itself cancels Discovery and
 re-starts the requested Action once it's confirmed stopped) — Discovery has no
 terminal event to key off (see Open questions below), so "confirmed stopped"
@@ -205,7 +220,9 @@ solves transparently. Matches this project's operator-drives-it posture better
 too — the user should know what's using the radio, not have it silently
 juggled. Accepted rough edge: rapid Pause-then-immediately-Start-Capture can
 still transiently race `AdapterBusy` against Discovery's own not-yet-completed
-release, since there's no confirmation event; this is caught by the same
+release, since Capture's Start buttons aren't gated on the radio being free
+(the Pausing state above gives the operator a visible "stopped" signal on the
+Pause button, but nothing disables Capture's buttons yet); this is caught by the same
 `except AdapterBusy` handling below, so the failure is visible, not silent —
 same "accepted tradeoff" tier as several items already listed in the core
 design doc.
@@ -523,6 +540,10 @@ gotten it yet, rather than choosing between real alternatives.
 
 ## Decisions made in this pass (and why neither is a new ADR)
 
+(Later change, not part of this original pass: the Discovery table is now
+session-scoped with a New Session button, and does record a real tradeoff, so
+it *is* an ADR: see `docs/adr/0010-discovery-table-is-session-scoped.md`.)
+
 - **Discovery auto-starts; a manual Pause/Resume control (not auto-yield) is
   what frees the radio for Capture/Enumerate.** See "Target Actions tab" above
   for the full reasoning. Real tradeoff, multiple options considered — but
@@ -543,8 +564,10 @@ gotten it yet, rather than choosing between real alternatives.
 - **`DiscoveryStopped` now exists** (added for an unrelated reason — see
   `docs/roadmap.md` Phase 1 item 0's latest "Revisited" note: Discovery dying
   unexpectedly used to publish nothing at all, unlike Capture's
-  `CaptureStopped(reason=ERROR)`). `app.py` consumes it for that purpose only
-  (status-bar error + flipping its own Pause/Resume button on `ERROR`). The
+  `CaptureStopped(reason=ERROR)`). `app.py` consumes it for two purposes
+  (status-bar error + flipping its own Pause/Resume button on `ERROR`, and,
+  per ADR-0010, finishing a Pause on `CANCELLED` so Resume/New Session only
+  become clickable once the adapter is actually free). The
   original ask here — `EnumeratePanel`'s `TargetSelector`/other panels
   observing "the radio is now actually free" to gray out Start buttons while
   Discovery is mid-stop — is **still not wired**; nothing outside `app.py`

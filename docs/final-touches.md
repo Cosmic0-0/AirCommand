@@ -81,6 +81,15 @@ not a suggestion). Concretely:
       "Add as Target" itself not yet separately re-confirmed after this fix —
       worth a quick real click-through, though nothing about this fix touched
       that path.**
+- [ ] Pause / New Session (ADR-0010, added 2026-10-07; only ever run against
+      `FakeProcRunner` and a real Tk window, never real hardware): click
+      Pause and confirm it reads "Pausing…" for about a second and then
+      "Resume Discovery"; confirm Resume keeps the table; click Pause then
+      New Session and confirm the table clears and refills with only what is
+      in range (and that it does NOT re-run `airmon-ng`/restart NetworkManager
+      mid-session: watch for your wifi dropping, which should not happen). Also
+      confirm clicking Resume while a Capture holds the radio shows a status-bar
+      error instead of doing nothing.
 - [ ] Target Actions tab: passive Capture against your own Target; confirm a
       real Handshake gets captured and shows up in the panel and the Crack
       tab's picker. Try deauth-assisted Capture too — confirm the

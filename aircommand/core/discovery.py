@@ -65,6 +65,10 @@ class Discovery:
         return JobHandle(job_id, JobKind.DISCOVERY, self._jobs)
 
     def list_networks(self) -> list[Network]:
+        """Every Network ever persisted, across all sessions. The GUI no longer
+        calls this: the Discovery table is session-scoped and the all-time
+        archive view was dropped (ADR-0010). Kept because `networks` is still
+        written, and an archive could return as a pure read path."""
         return self._repo.all()
 
     def _drive(
