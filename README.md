@@ -43,10 +43,12 @@ See [`docs/usage.md`](docs/usage.md) for the full walkthrough of each tab.
 The core engine and GUI are complete. They pass an automated test suite
 that runs against a fake process runner, not real hardware.
 
-Real-hardware testing is still partial. It has confirmed Discovery,
-Capture's handshake file path, and the Cancel button's real-subprocess
-termination. It still needs to cover the rest of the GUI, including
-Enumerate, Crack, and crash recovery.
+Real-hardware testing is still partial. Discovery is confirmed end to
+end. Two real bugs were found and fixed in Capture through targeted
+real-subprocess testing: a wrong handshake file path, and a hang in the
+Cancel button. Neither fix has been confirmed through the real GUI yet.
+Enumerate, Crack, and crash recovery haven't been tested on real
+hardware at all.
 
 AirCommand supports only the 2.4GHz band today. 5GHz support is designed
 but not built. See
