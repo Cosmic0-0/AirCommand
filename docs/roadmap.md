@@ -1096,13 +1096,23 @@ from the work above; ruled out, not assumed:
   external explanations too, though the machine's free memory was genuinely
   tight (1.6GB free of 14GB) at the time.
 
-**Root cause of tonight's specific death is still unknown** — real-hardware-
-only, can't be reproduced in a headless session, and nothing in the kernel
-log explains it. What got fixed instead, found while investigating: no job
-driver in this codebase (Discovery, Capture, Enumerate, Crack) had EVER
-surfaced a dead process's own `stderr` — `StopReason.ERROR` carried zero
-detail anywhere, despite `ProcHandle.stderr_tail()` already existing and
-already being used for `RadioCommandFailed` in `rf.py`. Added
+**Root cause of tonight's specific death, found once the fix below actually
+shipped**: not a bug, a one-character typo on the command line. The app was
+launched with `--adapter wlx24050f7d7ae1`; the real adapter (confirmed via
+`ip link show`/`iw dev`) is `wlx24050f7d7ae0` -- `wlx<mac>` names are derived
+directly from the MAC address (`24:05:0f:7d:7a:e0` here), so `...ae1` never
+matched any real device. The new `error_detail` field below is what actually
+cracked it: the status bar showed `ioctl(SIOCGIFINDEX) failed: No such
+device` -- airodump-ng's own real error, which `journalctl`/`dmesg` alone
+never would have surfaced (there's no kernel-level event for "the interface
+name the app was told to use doesn't match any adapter's real name"). Without
+this fix the dead end described above (ruled out as a regression, still no
+real lead) would have stayed a dead end. What got fixed, found while
+investigating before this root cause was known: no job driver in this
+codebase (Discovery, Capture, Enumerate, Crack) had EVER surfaced a dead
+process's own `stderr` — `StopReason.ERROR` carried zero detail anywhere,
+despite `ProcHandle.stderr_tail()` already existing and already being used
+for `RadioCommandFailed` in `rf.py`. Added
 `procutil.py`'s `summarize_stderr()` (last few non-blank stderr lines,
 truncated for a status-bar-length display) and a new `error_detail: Optional[str]`
 field on `DiscoveryStopped`/`CaptureStopped` (`events.py`), populated only on
@@ -1120,9 +1130,11 @@ equivalent would mean a `CrackResultRow`/schema change, a bigger decision
 not worth rushing under tonight's time pressure — revisit separately if it
 turns out to matter.
 
-Next time `DiscoveryStopped`/`CaptureStopped` fires with `reason=ERROR`, the
-GUI itself should show *why* (airodump-ng's own last stderr lines) — if it
-recurs, that's the next real lead, not another dmesg session.
+Relaunched with the corrected adapter name (`wlx24050f7d7ae0`); Discovery ran
+cleanly. Nothing further to fix here — this item is closed. For any FUTURE
+`DiscoveryStopped`/`CaptureStopped` with `reason=ERROR`, the GUI will keep
+showing *why* (the dead process's own last stderr lines) — that's the real
+lead to start from, not a fresh dmesg session.
 
 Full suite: 217 passing (up from 211 — 6 new tests for this fix). Verified
 stable across repeated full-suite runs.
