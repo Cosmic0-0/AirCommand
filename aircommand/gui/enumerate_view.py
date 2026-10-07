@@ -7,6 +7,9 @@ _drive docstring already notes cancellation isn't meaningfully checkable
 mid-scan (nmap's -oX - output is buffered to completion, not iterated line by
 line) -- unlike CapturePanel's Cancel button, this wasn't something the
 project owner needed to weigh in on.
+
+Column widths/alignment go through table.py's build_header()/add_row() --
+see that module's docstring (ThingsToChange item 1).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import customtkinter as ctk
 from aircommand.core import AdapterBusy, JobHandle, RadioCommandFailed, Target
 from aircommand.core.domain import EnumHost
 from aircommand.core.events import EnumerationFailed, NmapScanCompleted
+from aircommand.gui.table import Column, add_row, build_header
 
 
 class EnumeratePanel(ctk.CTkFrame):
@@ -25,7 +29,7 @@ class EnumeratePanel(ctk.CTkFrame):
         "Requires this adapter already associated to the Target's network via "
         "your OS's normal wifi settings — AirCommand doesn't join networks itself."
     )
-    _COLUMNS = ("IP", "Hostname", "Open Ports")
+    _COLUMNS = (Column("IP", 120), Column("Hostname", 160), Column("Open Ports", 220))
 
     def __init__(self, master, app) -> None:
         super().__init__(master)
@@ -44,10 +48,8 @@ class EnumeratePanel(ctk.CTkFrame):
         self._status_label = ctk.CTkLabel(self, text="")
         self._status_label.pack(side="top", anchor="w")
 
-        header = ctk.CTkFrame(self)
+        header = build_header(self, self._COLUMNS)
         header.pack(side="top", fill="x")
-        for col, text in enumerate(self._COLUMNS):
-            ctk.CTkLabel(header, text=text, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=5, sticky="w")
 
         self._results_body = ctk.CTkScrollableFrame(self)
         self._results_body.pack(side="top", fill="both", expand=True)
@@ -71,8 +73,7 @@ class EnumeratePanel(ctk.CTkFrame):
         for row_index, host in enumerate(hosts):
             hostname = host.hostname if host.hostname is not None else "—"
             ports = ", ".join(str(p) for p in host.open_ports) if host.open_ports else "—"
-            for col, value in enumerate((host.ip, hostname, ports)):
-                ctk.CTkLabel(self._results_body, text=value).grid(row=row_index, column=col, padx=5, pady=2, sticky="w")
+            add_row(self._results_body, row_index, self._COLUMNS, (host.ip, hostname, ports))
 
     def on_start_clicked(self) -> None:
         try:

@@ -5,7 +5,11 @@ No table widget exists in CustomTkinter, so each row is built by hand inside a
 ctk.CTkScrollableFrame -- one CTkLabel per column plus a trailing action
 button, laid out with .grid(row=..., column=...), tracked in a
 dict[BSSID, dict] keyed by bssid so _upsert/_remove can update or destroy a
-specific row's widgets in place.
+specific row's widgets in place. Column widths/alignment go through
+table.py's build_header()/add_row()/update_row() -- see that module's
+docstring for why a plain pack()+grid() header above a CTkScrollableFrame
+body can't just size its columns to fit its own content (ThingsToChange
+item 1).
 """
 
 from __future__ import annotations
@@ -14,10 +18,14 @@ import customtkinter as ctk
 
 from aircommand.core import BSSID, MacAddress, Network, Target
 from aircommand.core.events import TargetAdded, TargetRemoved
+from aircommand.gui.table import Column, add_row, build_header, update_row
 
 
 class NetworksView(ctk.CTkFrame):
-    _COLUMNS = ("SSID", "BSSID", "Channel", "Encryption", "Signal (dBm)", "Last Seen")
+    _COLUMNS = (
+        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70),
+        Column("Encryption", 90), Column("Signal (dBm)", 90), Column("Last Seen", 90),
+    )
 
     def __init__(self, master, app) -> None:
         super().__init__(master)
@@ -25,10 +33,8 @@ class NetworksView(ctk.CTkFrame):
         self._rows: dict[BSSID, dict] = {}   # bssid -> {"labels": [CTkLabel,...], "button": CTkButton}
         self._dialog: "_AddAsTargetDialog | None" = None
 
-        header = ctk.CTkFrame(self)
+        header = build_header(self, self._COLUMNS)
         header.pack(fill="x")
-        for col, text in enumerate(self._COLUMNS):
-            ctk.CTkLabel(header, text=text, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=5, sticky="w")
 
         self._body = ctk.CTkScrollableFrame(self)
         self._body.pack(fill="both", expand=True)
@@ -51,18 +57,13 @@ class NetworksView(ctk.CTkFrame):
         existing = self._rows.get(network.bssid)
         if existing is None:
             row_index = len(self._rows)
-            labels = []
-            for col, value in enumerate(values):
-                label = ctk.CTkLabel(self._body, text=value)
-                label.grid(row=row_index, column=col, padx=5, pady=2, sticky="w")
-                labels.append(label)
+            labels = add_row(self._body, row_index, self._COLUMNS, values)
             button = ctk.CTkButton(self._body, text="Add as Target",
                                     command=lambda n=network: self._open_add_target_dialog(n))
             button.grid(row=row_index, column=len(values), padx=5, pady=2)
             self._rows[network.bssid] = {"labels": labels, "button": button}
         else:
-            for label, value in zip(existing["labels"], values):
-                label.configure(text=value)
+            update_row(existing["labels"], self._COLUMNS, values)
 
     def _open_add_target_dialog(self, network: Network) -> None:
         self._dialog = _AddAsTargetDialog(self, self._app, network)
@@ -117,7 +118,10 @@ class _AddAsTargetDialog(ctk.CTkToplevel):
 
 
 class TargetPicker(ctk.CTkFrame):
-    _COLUMNS = ("SSID", "BSSID", "Channel", "Label", "Date Added")
+    _COLUMNS = (
+        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70),
+        Column("Label", 140), Column("Date Added", 130),
+    )
 
     def __init__(self, master, app) -> None:
         super().__init__(master)
@@ -125,10 +129,8 @@ class TargetPicker(ctk.CTkFrame):
         self._rows: dict[BSSID, dict] = {}
         self._dialog: "_AddManuallyDialog | None" = None
 
-        header = ctk.CTkFrame(self)
+        header = build_header(self, self._COLUMNS)
         header.pack(fill="x")
-        for col, text in enumerate(self._COLUMNS):
-            ctk.CTkLabel(header, text=text, font=ctk.CTkFont(weight="bold")).grid(row=0, column=col, padx=5, sticky="w")
 
         add_manually_button = ctk.CTkButton(header, text="Add manually", command=self._open_add_manually_dialog)
         add_manually_button.grid(row=0, column=len(self._COLUMNS), padx=5)
@@ -156,18 +158,13 @@ class TargetPicker(ctk.CTkFrame):
         existing = self._rows.get(target.bssid)
         if existing is None:
             row_index = len(self._rows)
-            labels = []
-            for col, value in enumerate(values):
-                label = ctk.CTkLabel(self._body, text=value)
-                label.grid(row=row_index, column=col, padx=5, pady=2, sticky="w")
-                labels.append(label)
+            labels = add_row(self._body, row_index, self._COLUMNS, values)
             button = ctk.CTkButton(self._body, text="Remove",
                                     command=lambda b=target.bssid: self._app.engine.targets.remove(b))
             button.grid(row=row_index, column=len(values), padx=5, pady=2)
             self._rows[target.bssid] = {"labels": labels, "button": button}
         else:
-            for label, value in zip(existing["labels"], values):
-                label.configure(text=value)
+            update_row(existing["labels"], self._COLUMNS, values)
 
     def _remove(self, bssid: BSSID) -> None:
         existing = self._rows.pop(bssid, None)
