@@ -1195,3 +1195,72 @@ once they were. Code comments still cite its item numbers, so for the record:
 network ever seen (this entry); 3 = a handshake Capture could not be cancelled;
 4 = closing the program was slow with no sign it was closing; 5 = two windows at
 launch (the sudo prompt, with the main window sitting on top of it).
+
+**Update, 2026-10-07, item 3 reopened and actually fixed this time**: this
+same day's earlier "Capture Cancel (item 3). Already fixed by ADR-0008,
+confirmed" entry (above) turned out to be wrong — found by the user hitting
+it for real: start a passive Capture, click Cancel, nothing happens, UI
+stuck on "Capturing…" forever, only way out is closing the app. That earlier
+"confirmed" claim only ever exercised `aireplay-ng`'s stdout-stall shape via
+a standalone harness, never a passive Capture (no `aireplay-ng` involved at
+all), never the real GUI Cancel button, never real hardware —
+`docs/final-touches.md` item 2 already said as much at the time, and this is
+exactly the gap it was warning about.
+
+Root cause, confirmed directly against the real installed `aircrack-ng`
+(1.7) via `strace`, not assumed: `Capture._drive`'s periodic one-shot
+`aircrack-ng -b <bssid> -w /dev/null <cap_path>` handshake check hangs
+**indefinitely** if `<cap_path>` doesn't exist yet or is smaller than a
+complete 24-byte pcap global header — a race `_drive`'s 4-second check
+interval does not reliably avoid on real hardware, since `airodump-ng` needs
+real time to enter monitor mode and flush its first bytes to disk. `strace`
+showed why: on that bad-input path, `aircrack-ng` spawns a reader thread
+that prints its error and then calls the raw `exit(0)` **syscall** instead
+of `pthread_exit()`/`exit_group()` — only that one thread dies; the main
+thread is left parked in a `futex` wait nothing ever wakes, so the process
+never actually exits despite printing "Quitting aircrack-ng…" first. Since
+`_drive`'s own `token.is_cancelled()` check only runs at the top of its
+`while` loop, and this one-shot check used to block that loop with a plain
+`"\n".join(check_handle.lines())`, a hung `aircrack-ng` meant the loop could
+never get back around to notice Cancel either — exactly the symptom, and
+exactly the ADR-0008 "a driver loop must not trust a spawned tool's
+behavior it doesn't control" failure shape, just not caught the first time
+around because it was never applied to this *second* subprocess handle, only
+the main `airodump-ng` one. Full writeup, including two more related bugs
+found but deliberately NOT fixed in this pass (both about whether handshake
+*detection* can ever succeed at all, separate from Cancel — `/dev/null`
+rejected outright as a `-w` dictionary by real `aircrack-ng`, and `-b` with
+an unambiguous match appears to skip the output table
+`parse_aircrack_handshake_check` greps for entirely):
+`docs/adr/0011-capture-cancel-hang-on-real-aircrack-ng.md`.
+
+Fixed: a guard (skip the check until the `.cap` file has a full header) plus
+a bounded, per-tick-cancellable wait around it (same `ProcHandle.poll()`
+idiom ADR-0008 already established for the main handle); Cancel's
+termination of the main `airodump-ng` handle also now escalates
+SIGTERM→SIGKILL after a grace period (matching `procutil.py`'s existing
+orphan-cleanup policy) instead of firing `terminate()` once and trusting it
+worked. Verified three ways, per the user's own standing verification
+requirement (a green `FakeProcRunner` suite is exactly what hid this bug the
+first time): new `FakeProcRunner` acceptance tests for the guard, for
+cancellation while the check is in flight, and for kill-escalation when the
+main handle ignores SIGTERM (`tests/test_capture_acceptance.py`); a new
+standalone test file, `tests/test_capture_real_subprocess.py`, that spawns
+the *actual* installed `aircrack-ng` against a real empty `.cap` file
+through the real `SubprocessRunner`/`_RealProcHandle` (no sudo or wifi
+hardware needed — `aircrack-ng` always runs unprivileged) and confirms both
+that the hang is real and that the fix detects and kills it within a bounded
+time; full suite run three times in a row (235/236 passing each time — the
+one failure was a different, pre-existing timing-sensitive test each run,
+`test_discovery_acceptance.py`/`test_crack_acceptance.py`, neither touched
+by this change, both passing reliably when run in isolation away from
+full-suite load — consistent with the already-documented "thread-timing
+tests flake under load" pattern, not a regression from this fix).
+
+**Still open, and still needs the user**: the real GUI Cancel button against
+real hardware (`wlx24050f7d7ae0`) — `docs/final-touches.md` item 2 updated
+to say exactly this. The two adjacent handshake-detection bugs noted above
+are also still open, out of scope for this Cancel-focused pass, and will
+need their own session (likely a real redesign of the detection mechanism,
+not a tweak — a decision, not routine implementation, per CLAUDE.md's model
+tiering).
