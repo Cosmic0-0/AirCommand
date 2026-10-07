@@ -1,6 +1,6 @@
 # Discovery's table shows the current Discovery session only; the all-time archive view is dropped
 
-**Status: implemented** on `feature/discovery-session-scope`, pending the operator's review and merge. Supersedes the archive half of ADR-0007. Verified against `FakeProcRunner` and a real Tk window, not yet on real hardware (see `docs/final-touches.md` item 2).
+**Status: implemented and merged to `main`** (2026-10-07). Supersedes the archive half of ADR-0007. Verified against `FakeProcRunner` and a real Tk window, not yet on real hardware (see `docs/final-touches.md` item 2).
 
 Discovery's network table used to show every Network the database had ever seen, because `NetworksView` seeded itself from `Discovery.list_networks()` (`NetworkRepository.all()`) at startup. ADR-0007 decided to fix that by adding a second, all-time "archive" view next to a session-scoped one. The operator then flagged the archive as a "maybe" (ThingsToChange item 2): the Target allowlist already keeps the networks worth remembering. We revisited and decided: the table shows the current **Discovery session** only, there is no archive view, and the operator controls where a session starts and ends with a new **New Session** button.
 

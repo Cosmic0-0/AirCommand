@@ -1142,8 +1142,8 @@ Full suite: 217 passing (up from 211 — 6 new tests for this fix). Verified
 stable across repeated full-suite runs.
 
 **Update, 2026-10-07, last item of the punch list: Discovery's table is now
-session-scoped** (`ThingsToChange.txt` item 2; on branch
-`feature/discovery-session-scope`, pending the user's review before merge).
+session-scoped** (`ThingsToChange.txt` item 2; built on a feature branch,
+reviewed by the user, and merged to `main` the same day).
 Scoped with the user first, not decided unilaterally; the full reasoning and the
 rejected alternatives are in `docs/adr/0010-discovery-table-is-session-scoped.md`,
 which supersedes the archive half of ADR-0007. What was decided: no all-time
@@ -1189,4 +1189,9 @@ joining a driver stuck in a font `__del__`, right after New Session destroyed ma
 widgets) is an inference, not something reproduced; the real main thread normally
 sits in `mainloop()` and services the call.
 
-All 5 items of `ThingsToChange.txt` are now done.
+All 5 items of the punch list are now done, and `ThingsToChange.txt` was deleted
+once they were. Code comments still cite its item numbers, so for the record:
+1 = Discovery table's columns and rows were misaligned; 2 = the table showed every
+network ever seen (this entry); 3 = a handshake Capture could not be cancelled;
+4 = closing the program was slow with no sign it was closing; 5 = two windows at
+launch (the sudo prompt, with the main window sitting on top of it).

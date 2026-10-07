@@ -20,3 +20,4 @@ Research into the current implementation (during scoping, not assumed) found Dis
 - 5GHz deauth-assisted Capture ships as supported but unverified — tracked the same way as `docs/final-touches.md`'s existing handshake-detection gap: researched, not confirmed against real hardware.
 - Capture, Enumerate, `RadioController`, and `airmon-ng` need no code changes for this — confirmed by reading the actual call sites, not assumed.
 - Multi-adapter/simultaneous-band operation and 6GHz remain open for a future, separately-scoped decision whenever they become a real need.
+- **Added later, from ADR-0010:** a Discovery session now spans Pause/Resume, and ADR-0007's reasoning that the session table needs no Band column ("every row shares the band chosen at session start") relied on a session being one scan. When this band control is built, either changing band must force a New Session (clearing the table), or the table needs a Band column. See ADR-0010's Consequences.
