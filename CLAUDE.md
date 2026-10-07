@@ -33,6 +33,32 @@ Claude does not run `git add`, `git commit`, `git push`, or anything else that w
 
 The user runs the command(s) themselves and reports back when done — treat the change as uncommitted until they do.
 
+## Dev workflow: updating the README
+
+`README.md` is the GitHub landing page. Keep it accurate, not just well-written.
+
+- Run `/unslop` on any edit to it. Run `/technical-writing` too whenever restructuring
+  prose, not just fixing a typo. It sorts each section into a Diátaxis mode and
+  holds it there: Features/Requirements/Status describe and don't instruct; Install
+  & run/Development are commands with the condition stated before the step;
+  Authorized use only/Architecture explain why, linking to the relevant ADR for
+  depth instead of restating it.
+- Verify every factual claim against the repo itself, not memory or the previous
+  README: run `--help` for the real flags, read `pyproject.toml` for deps and the
+  Python floor, read the actual `argv` construction in `crack.py`/`enumerate.py`/etc.
+  for which tool does what, and check `docs/final-touches.md` for what's verified on
+  real hardware versus still open.
+- Verify every link and anchor resolves to a real path or heading in this repo.
+  Don't assume a doc still has the section a prior README version pointed at.
+- Grep for em dashes and en dashes (`—`/`–`) before calling it done — `/unslop` bans
+  both.
+- Keep the README short and link out rather than duplicate: the full tab-by-tab
+  walkthrough lives in `docs/usage.md`, domain vocabulary in `CONTEXT.md`, design
+  rationale in `docs/adr/`. If an edit would copy more than a sentence from one of
+  those, link to it instead.
+- This falls under the commit/push rule above same as any other change: don't
+  commit or push it yourself.
+
 ## Repository hygiene
 
 - Preserve unrelated work in a dirty worktree.
