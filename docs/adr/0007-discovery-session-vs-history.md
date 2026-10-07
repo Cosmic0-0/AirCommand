@@ -1,5 +1,7 @@
 # Discovery's network table: separate the current scan session from all-time history
 
+**Status: partially superseded by ADR-0010.** This ADR decided on a session-scoped view plus an all-time archive view; neither had been built when ADR-0010 revisited it. ADR-0010 keeps the session-scoped view, drops the all-time archive view and its derived Band column (the operator concluded Targets already cover what is worth keeping), and answers the open `job_id`-vs-timestamp question: neither, because a session now spans several Discovery jobs. The reasoning below is left in place as history.
+
 `Discovery.list_networks()` reads every Network the database has ever seen (`NetworkRepository.all()`), not just the current Discovery job's sightings, and the GUI's `NetworksView` shows that unfiltered. There is currently no way to tell "what I'm seeing right now" from "what showed up at some point in the past." We decided to split this into two views: one showing only the current (or most recent) Discovery session's sightings, and a separate view showing the full historical record — including a derived "Band" column (from channel number, no new stored field), since historical rows can span multiple bands and sessions in a way a single live session's rows never do.
 
 ## Why

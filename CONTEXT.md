@@ -16,6 +16,10 @@ _Avoid_: authorized network, whitelisted network
 Passively observing beacon broadcasts to identify Networks (BSSID, SSID, channel, encryption type, signal strength). Open to any Network; requires no authorization.
 _Avoid_: scanning (use only for the underlying nmap/802.11 mechanism, not this domain concept)
 
+**Discovery session**:
+The span over which the operator's view of discovered Networks accumulates. It begins when AirCommand launches or when the operator starts a new one, and it continues across pausing and resuming Discovery.
+_Avoid_: scan session, history, program session (a session is shorter than the program's lifetime)
+
 **Action**:
 Any operation gated to Targets only: capturing traffic tied to a Network (passive or active), transmitting frames at a Network (e.g. deauth), or probing hosts on a Target's subnet (Enumerate). Requires the Network to be a Target.
 _Avoid_: attack (too narrow — Action also covers passive capture, which isn't an attack)
