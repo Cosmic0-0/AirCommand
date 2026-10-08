@@ -240,6 +240,53 @@ def test_deauth_assisted_capture_respects_max_bursts(tmp_path):
     assert all(entry.frame_count == 5 for entry in audit_entries)
 
 
+def test_deauth_burst_failure_is_distinguished_from_a_real_burst(tmp_path):
+    """docs/adr/0012: aireplay-ng's exit code/stderr used to be discarded
+    entirely, so a failed injection attempt looked identical -- in both the
+    audit log and DeauthFired -- to a real burst. Scripts a nonzero exit
+    code + stderr for "aireplay-ng" and asserts both the published event and
+    the durably-written AuditLogEntry honestly reflect the failure, rather
+    than reporting it as an unremarkable success."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": [],  # content unused -- see module docstring point 1
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "aireplay-ng": [],
+            },
+            returncodes={"aireplay-ng": 1},
+            stderr={"aireplay-ng": ["aireplay-ng: Unable to inject frames: Network is down"]},
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    deauths_fired = []
+    engine.subscribe(deauths_fired.append, DeauthFired)
+
+    handle = engine.capture.start_deauth_assisted(
+        target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=1)
+    )
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(deauths_fired) == 1
+    assert deauths_fired[0].succeeded is False
+    assert deauths_fired[0].error_detail == "aireplay-ng: Unable to inject frames: Network is down"
+
+    # Still logged -- ADR-0001's "every firing, no exceptions" covers the
+    # attempt, not only a confirmed-successful one -- just honestly flagged.
+    audit_entries = engine.capture.list_audit_log(target)
+    assert len(audit_entries) == 1
+    assert audit_entries[0].succeeded is False
+    assert audit_entries[0].error_detail == "aireplay-ng: Unable to inject frames: Network is down"
+
+
 def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path):
     engine = _make_engine(
         tmp_path,

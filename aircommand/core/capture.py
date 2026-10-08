@@ -43,9 +43,9 @@ from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, 
 from aircommand.core.procutil import ProcHandle, ProcRunner, summarize_stderr
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
-# How often _drive spawns a one-shot `aircrack-ng -b <bssid> -w /dev/null
-# <cap_path>` check while a capture is running (roadmap: "every 3-5s"; airodump's
-# own stdout redraw, which drives loop iteration, arrives far more often than
+# How often _drive spawns a one-shot `aircrack-ng -w /dev/null <cap_path>`
+# check while a capture is running (roadmap: "every 3-5s"; airodump's own
+# stdout redraw, which drives loop iteration, arrives far more often than
 # this). Overridable per-instance purely for test injectability, same reason
 # discovery.py's poll interval is -- see Discovery.__init__.
 DEFAULT_HANDSHAKE_CHECK_INTERVAL = timedelta(seconds=4)
@@ -244,16 +244,44 @@ class Capture:
                                      or (deauth is not None and burst_count < deauth.max_bursts))
                 if (deauth_pacer is not None and not handshake_seen and can_still_deauth
                         and deauth_pacer.due()):
-                    self._proc.spawn(
+                    # REAL BUG, found while re-checking this block per
+                    # docs/final-touches.md item 2 (ADR-0012): .wait()'s own
+                    # return value -- the exit code -- used to be discarded
+                    # outright, so a failed injection (driver/permission/
+                    # channel issue) looked IDENTICAL to a real burst, in both
+                    # the audit log and every GUI subscriber. Captured and
+                    # surfaced now, same summarize_stderr() pattern
+                    # CaptureStopped/DiscoveryStopped's own error_detail
+                    # already use. Still logged either way, same as before --
+                    # ADR-0001's "every firing, no exceptions" covers an
+                    # attempted firing, not only a confirmed-successful one --
+                    # just honestly distinguished via `succeeded` now.
+                    #
+                    # NOTE a successful exit code is NOT proof a client was
+                    # actually disconnected -- aireplay-ng exiting 0 only means
+                    # it believes it transmitted the frames without an OS/
+                    # driver-level error. If the target or its clients have
+                    # Protected Management Frames (802.11w/PMF) enabled,
+                    # unauthenticated deauth frames are cryptographically
+                    # ignored outright -- a protocol limitation no exit code
+                    # or stderr from aireplay-ng itself can reveal. See
+                    # docs/adr/0012's own Consequences for how this was ruled
+                    # out for one real target network, not in general.
+                    deauth_handle = self._proc.spawn(
                         ["aireplay-ng", "--deauth", str(deauth.burst_size), "-a", str(target.bssid), adapter],
-                        privileged=True).wait()
+                        privileged=True)
+                    exit_code = deauth_handle.wait()
                     burst_count += 1
+                    succeeded = exit_code == 0
+                    error_detail = None if succeeded else summarize_stderr(deauth_handle.stderr_tail())
                     audit_row = db_scope.audit_log.record(target_id=target.id, capture_job_id=job_id,
-                                                     client_mac=None, frame_count=deauth.burst_size)  # sync write
-                                                     # BEFORE the event — ADR-0001, no exceptions
+                                                     client_mac=None, frame_count=deauth.burst_size,
+                                                     succeeded=succeeded, error_detail=error_detail)  # sync
+                                                     # write BEFORE the event — ADR-0001, no exceptions
                     self._bus.publish(DeauthFired(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                         job_id=job_id, target_id=target.id, bssid=target.bssid, client_mac=None,
-                        fired_at=audit_row.fired_at, frame_count=deauth.burst_size))
+                        fired_at=audit_row.fired_at, frame_count=deauth.burst_size,
+                        succeeded=succeeded, error_detail=error_detail))
 
                 if not handshake_seen and handshake_pacer.due():
                     # Guard + bounded wait: see docs/adr/0011. Skipping the
@@ -270,8 +298,16 @@ class Capture:
                     except OSError:
                         cap_file_ready = False
                     if cap_file_ready:
+                        # No -b: see docs/adr/0012 and parse_aircrack_handshake_check's
+                        # own docstring -- -b suppresses the summary table this
+                        # relies on entirely, confirmed against a real captured
+                        # handshake, not just suspected. Safe to drop only because
+                        # airodump-ng's own --bssid filter above already guarantees
+                        # this .cap file holds exactly one network -- real aircrack-ng
+                        # auto-selects it ("Choosing first network as target.") rather
+                        # than blocking on an interactive prompt.
                         check_handle = self._proc.spawn(
-                            ["aircrack-ng", "-b", str(target.bssid), "-w", "/dev/null", str(cap_path)],
+                            ["aircrack-ng", "-w", "/dev/null", str(cap_path)],
                             privileged=False)
                         output = self._collect_bounded(check_handle, token)
                         if output is not None and parse_aircrack_handshake_check(output):

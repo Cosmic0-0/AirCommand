@@ -83,10 +83,20 @@ class AuditLogView(ctk.CTkFrame):
                 f"{target.ssid} ({target.bssid})" if target is not None
                 else f"target #{entry.target_id} (removed)"
             )
-            self._add_row(entry.fired_at, target_label, entry.frame_count)
+            self._add_row(entry.fired_at, target_label, entry.frame_count,
+                          entry.succeeded, entry.error_detail)
 
-    def _add_row(self, fired_at: datetime, target_label: str, frame_count: int) -> None:
+    def _add_row(
+        self, fired_at: datetime, target_label: str, frame_count: int,
+        succeeded: bool = True, error_detail: Optional[str] = None,
+    ) -> None:
+        # succeeded/error_detail: docs/adr/0012 -- a failed injection attempt
+        # is still logged (ADR-0001's "every firing, no exceptions" covers the
+        # attempt, not only a confirmed-successful one) but must read as
+        # distinct from a real burst, not identical to one.
         text = f"{fired_at.strftime('%Y-%m-%d %H:%M:%S')} — {target_label} — {frame_count} frame(s)"
+        if not succeeded:
+            text += f" — FAILED ({error_detail or 'no further detail'})"
         ctk.CTkLabel(self._body, text=text, anchor="w").pack(side="top", fill="x")
 
     def append(self, event: DeauthFired) -> None:
@@ -95,4 +105,5 @@ class AuditLogView(ctk.CTkFrame):
         targets_by_id = {t.id: t for t in self._app.engine.targets.list()}
         target = targets_by_id.get(event.target_id)
         target_label = f"{target.ssid} ({target.bssid})" if target is not None else str(event.bssid)
-        self._add_row(event.fired_at, target_label, event.frame_count)
+        self._add_row(event.fired_at, target_label, event.frame_count,
+                      event.succeeded, event.error_detail)

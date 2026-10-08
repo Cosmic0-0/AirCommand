@@ -29,6 +29,7 @@ class CapturePanel(ctk.CTkFrame):
         self.target: Optional[Target] = None
         self.active_handle: Optional[JobHandle] = None
         self._burst_count = 0
+        self._failed_burst_count = 0
 
         ctk.CTkLabel(self, text="Capture", font=ctk.CTkFont(weight="bold")).pack(side="top", anchor="w")
 
@@ -107,6 +108,7 @@ class CapturePanel(ctk.CTkFrame):
             return
         self.active_handle = handle
         self._burst_count = 0
+        self._failed_burst_count = 0
         self._status_label.configure(text="Capturing…")
         self._app.pump.on(CaptureStopped, self._on_stopped, only_job=handle.job_id)
         self._app.pump.on(DeauthFired, self._on_burst, only_job=handle.job_id)  # local live counter --
@@ -127,5 +129,16 @@ class CapturePanel(ctk.CTkFrame):
         self._update_button_states()
 
     def _on_burst(self, event) -> None:
-        self._burst_count += 1
-        self._status_label.configure(text=f"Capturing… {self._burst_count} deauth burst(s) fired")
+        # docs/adr/0012: DeauthFired now fires on every ATTEMPT, success or
+        # not -- distinguish them rather than reporting a failed injection as
+        # an indistinguishable "burst fired" the way this used to.
+        if event.succeeded:
+            self._burst_count += 1
+            text = f"Capturing… {self._burst_count} deauth burst(s) fired"
+            if self._failed_burst_count:
+                text += f" ({self._failed_burst_count} failed)"
+        else:
+            self._failed_burst_count += 1
+            text = (f"Capturing… deauth burst FAILED ({self._failed_burst_count} so far)"
+                    f" — {event.error_detail or 'no further detail'}")
+        self._status_label.configure(text=text)

@@ -105,7 +105,19 @@ class CaptureStarted(DurableEvent):
 
 @dataclass(frozen=True)
 class DeauthFired(DurableEvent):
-    """Every firing, no exceptions — this is the audit trail ADR-0001 requires."""
+    """Every ATTEMPTED firing, no exceptions — this is the audit trail ADR-0001
+    requires, published whether or not the burst actually succeeded.
+
+    succeeded/error_detail (added per docs/adr/0012 -- previously this event
+    fired unconditionally with no way to tell a real burst from aireplay-ng
+    failing outright): succeeded is aireplay-ng's own exit code == 0;
+    error_detail is a summarize_stderr() hint, populated only when succeeded
+    is False. Defaulted (True/None) so existing construction sites that
+    predate this field keep meaning exactly what they always meant: a
+    successful burst, nothing to explain. NOTE succeeded=True is NOT proof a
+    client was actually disconnected -- see capture.py's own deauth_pacer
+    comment for why (PMF/802.11w can silently defeat a frame that was still
+    transmitted without error)."""
 
     job_id: JobId
     target_id: int
@@ -113,6 +125,8 @@ class DeauthFired(DurableEvent):
     client_mac: Optional[BSSID]
     fired_at: datetime
     frame_count: int
+    succeeded: bool = True
+    error_detail: Optional[str] = None
 
 
 @dataclass(frozen=True)

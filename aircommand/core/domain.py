@@ -174,7 +174,13 @@ class StaleJob:
 
 @dataclass(frozen=True)
 class AuditLogEntry:
-    """Every deauth firing, append-only, independent of capture outcome."""
+    """Every ATTEMPTED deauth firing, append-only, independent of capture
+    outcome -- including a firing that failed to actually inject (see
+    `succeeded`). succeeded/error_detail added per docs/adr/0012; defaulted
+    (True/None) so a pre-ADR-0012 row (migrated in place, see
+    persistence/db.py's own migration) and any direct construction that
+    predates this field keep their original, unambiguous meaning: a
+    successful burst, nothing to explain."""
 
     id: int
     target_id: int
@@ -182,6 +188,8 @@ class AuditLogEntry:
     client_mac: Optional[MacAddress]
     fired_at: datetime
     frame_count: int
+    succeeded: bool = True
+    error_detail: Optional[str] = None
 
 
 class CrackOutcome:

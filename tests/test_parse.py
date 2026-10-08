@@ -1,7 +1,11 @@
 import pytest
 
 from aircommand.core.domain import EncryptionType, MacAddress
-from aircommand.core.parse import parse_airmon_monitor_interface, parse_airodump_csv_line
+from aircommand.core.parse import (
+    parse_aircrack_handshake_check,
+    parse_airmon_monitor_interface,
+    parse_airodump_csv_line,
+)
 
 AP_HEADER = (
     "BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, "
@@ -120,3 +124,80 @@ def test_no_rename_announcement_line_returns_fallback():
     output = "some other unrelated airmon-ng output, no rename happened"
 
     assert parse_airmon_monitor_interface(output, fallback="wlan0") == "wlan0"
+
+
+# --- parse_aircrack_handshake_check ---------------------------------------------
+#
+# Fixtures below are the REAL shape confirmed against the installed aircrack-ng
+# 1.7 binary and a genuinely captured handshake (docs/adr/0012) -- BSSID/ESSID
+# genericized to this codebase's existing AA:BB:CC:DD:EE:01 test convention
+# rather than the real home network they were captured against, but every
+# other line (the /dev/null errors, the exact table formatting, the trailing
+# "Please specify a dictionary" fallthrough) is verbatim real stdout, not a
+# guess -- including the real quirk that "0 handshake)" is NOT pluralized any
+# differently from "1 handshake)", which is exactly the false-positive this
+# function's old plain substring check missed.
+
+_REAL_AIRCRACK_NG_PREAMBLE = (
+    "ERROR: Processing dictionary file /dev/null (No such file or directory)\n"
+    "ERROR: Processing dictionary file /dev/null (No such file or directory)\n"
+    "Reading packets, please wait...\n"
+    "Opening capture-01.cap\n"
+    "Read 59079 packets.\n\n"
+)
+_REAL_AIRCRACK_NG_TRAILER = (
+    "\nChoosing first network as target.\n\n"
+    "Reading packets, please wait...\n"
+    "Opening capture-01.cap\n"
+    "Read 59079 packets.\n\n"
+    "1 potential targets\n\n"
+    "Please specify a dictionary (option -w).\n"
+)
+
+
+def _real_table_output(handshake_count: int) -> str:
+    row = f"   1  AA:BB:CC:DD:EE:01  Test-SSID                 WPA ({handshake_count} handshake)"
+    return _REAL_AIRCRACK_NG_PREAMBLE + "   #  BSSID              ESSID                     Encryption\n\n" \
+        + row + _REAL_AIRCRACK_NG_TRAILER
+
+
+def test_real_output_with_a_genuine_handshake_returns_true():
+    assert parse_aircrack_handshake_check(_real_table_output(1)) is True
+
+
+def test_real_output_with_zero_handshakes_returns_false():
+    # The exact false-positive the old `"handshake)" in output` substring
+    # check missed: "0 handshake)" contains "handshake)" too.
+    assert parse_aircrack_handshake_check(_real_table_output(0)) is False
+
+
+def test_real_no_networks_found_output_returns_false():
+    output = (
+        "Reading packets, please wait...\n"
+        "Opening header-only.cap\n"
+        "Read 0 packets.\n\n"
+        "No networks found, exiting.\n\n\n"
+        "Quitting aircrack-ng...\n"
+    )
+
+    assert parse_aircrack_handshake_check(output) is False
+
+
+def test_old_minus_b_suppressed_shape_with_no_table_at_all_returns_false():
+    # Confirmed real shape when -b matches exactly one BSSID (the invocation
+    # this function used to be paired with, before docs/adr/0012 dropped -b):
+    # no summary table at all, so there is nothing for this function to find
+    # regardless of whether a real handshake was actually in the file. Kept
+    # as a regression test for WHY -b had to go, not because this shape is
+    # still produced by the current capture.py invocation.
+    output = (
+        "ERROR: Processing dictionary file /dev/null (No such file or directory)\n"
+        "ERROR: Processing dictionary file /dev/null (No such file or directory)\n"
+        "Reading packets, please wait...\n"
+        "Opening capture-01.cap\n"
+        "Read 59079 packets.\n\n"
+        "1 potential targets\n\n"
+        "Please specify a dictionary (option -w).\n"
+    )
+
+    assert parse_aircrack_handshake_check(output) is False
