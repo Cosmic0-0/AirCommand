@@ -116,7 +116,7 @@ def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
         assert len(completed) == 1
         assert len(completed[0].hosts) == 2
 
-        # One CTkLabel per (host, column) -- see EnumeratePanel._populate_results.
+        # One read-only CTkEntry per (host, column) -- see EnumeratePanel._populate_results.
         assert len(panel._results_body.winfo_children()) == 2 * len(EnumeratePanel._COLUMNS)
         assert panel._status_label.cget("text") == "Found 2 host(s)"
         assert panel.active_handle is None

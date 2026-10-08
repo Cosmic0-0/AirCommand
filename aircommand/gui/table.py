@@ -15,18 +15,16 @@ column-group option, which sounds like it should solve exactly this — tested
 directly against this app's own widgets, and it does NOT synchronize widths
 across separate grid masters, only within one.
 
-The fix that DOES work, also confirmed empirically: give every header cell
-and every body cell in the same column the SAME fixed pixel width (CTkLabel's
-own `width=`), which makes Tk give that column the same size in both grids —
-*unless* a cell's actual text is wide enough to need more room than that at
-the current font, in which case Tk still expands the column to fit it
-anyway (width= is a minimum, not a clamp) and the drift comes right back.
-_truncate() below closes that gap by shortening any value that would
-overflow its column, with a trailing "…" — not pixel-perfect (this is a
-plain character-count estimate against a variable-width font, not a real
-text-measurement call), but enough margin that no realistic value in this
-app's own data (SSIDs, labels, hostnames, open-port lists) blows out a
-column's fixed width.
+Body cells are CTkEntry widgets in "readonly" state, not CTkLabel — this is
+why, see add_row()'s docstring. That choice turns out to also fix the drift
+bug outright: confirmed empirically (a real on-screen widget, a body value
+much longer than its column's pixel width, winfo_width() read back after
+update_idletasks()) that CTkEntry's own fixed pixel width does NOT
+geometry-propagate past a long value the way CTkLabel's does — the column
+stays exactly at Column.width and the overflow text just scrolls inside the
+entry's own xview instead of forcing the grid column wider. Header cells
+don't have this problem either way (header text is always a short fixed
+title like "BSSID"), so build_header() below still uses plain CTkLabel.
 
 Only three of this app's five list/table-shaped views actually have this
 header+body-as-two-grids shape at all: NetworksView and TargetPicker
@@ -43,14 +41,6 @@ from dataclasses import dataclass
 
 import customtkinter as ctk
 
-# Rough estimate for this app's default CTkLabel font at its default size —
-# not a real text-measurement (Tk can do that via font.measure(), but a
-# per-character estimate is enough margin here and avoids a font-handle
-# round-trip on every row update). See this module's own docstring for why
-# some slack is fine: the goal is "never wider than the fixed column", not
-# "truncate at the exact pixel".
-_PX_PER_CHAR = 7
-
 
 @dataclass(frozen=True)
 class Column:
@@ -60,7 +50,7 @@ class Column:
 
 def build_header(parent: ctk.CTkFrame, columns: tuple[Column, ...]) -> ctk.CTkFrame:
     """One bold label per column, each pinned to its Column.width. Pass the
-    SAME `columns` tuple to add_row()/update_row() below for the body grid —
+    SAME `columns` tuple to add_row()/update_row() below for the body grid --
     that pairing is what keeps the two separate grid masters aligned."""
     header = ctk.CTkFrame(parent)
     for col_index, column in enumerate(columns):
@@ -73,28 +63,45 @@ def build_header(parent: ctk.CTkFrame, columns: tuple[Column, ...]) -> ctk.CTkFr
 
 def add_row(
     body: ctk.CTkBaseClass, row_index: int, columns: tuple[Column, ...], values: tuple[str, ...]
-) -> list[ctk.CTkLabel]:
-    """Adds one data row of plain labels to `body` (typically a
-    CTkScrollableFrame) at row_index, one per column, width-matched (and
-    truncated if needed) against `columns` — see build_header()."""
-    labels = []
+) -> list[ctk.CTkEntry]:
+    """Adds one data row of read-only entry cells to `body` (typically a
+    CTkScrollableFrame) at row_index, one per column, width-matched against
+    `columns` -- see build_header().
+
+    Read-only CTkEntry instead of CTkLabel so a cell's value (a BSSID, an
+    SSID, ...) can be mouse-drag-selected and copied (Ctrl+C) like any other
+    text field -- a plain CTkLabel can't be selected at all. border_width=0,
+    corner_radius=0 and fg_color="transparent" make it render flush with the
+    row, same as the CTkLabel it replaces, instead of looking like an input
+    box. state="readonly" blocks typing/paste/cut while leaving selection and
+    copy untouched -- standard Tk Entry behaviour, confirmed empirically
+    below alongside the recipe for changing a readonly entry's text (see
+    _set_cell_text())."""
+    entries = []
     for col_index, (column, value) in enumerate(zip(columns, values)):
-        label = ctk.CTkLabel(body, text=_truncate(value, column.width), width=column.width, anchor="w")
-        label.grid(row=row_index, column=col_index, padx=5, pady=2, sticky="w")
-        labels.append(label)
-    return labels
+        entry = ctk.CTkEntry(
+            body, width=column.width, fg_color="transparent",
+            border_width=0, corner_radius=0, justify="left",
+        )
+        _set_cell_text(entry, value)
+        entry.grid(row=row_index, column=col_index, padx=5, pady=2, sticky="w")
+        entries.append(entry)
+    return entries
 
 
-def update_row(labels: list[ctk.CTkLabel], columns: tuple[Column, ...], values: tuple[str, ...]) -> None:
+def update_row(entries: list[ctk.CTkEntry], columns: tuple[Column, ...], values: tuple[str, ...]) -> None:
     """Updates an existing row's text in place (a re-sighted Network, a
-    relabelled Target, ...) — same truncation rule as add_row(), so an update
-    can't reintroduce drift that creating the row avoided."""
-    for label, column, value in zip(labels, columns, values):
-        label.configure(text=_truncate(value, column.width))
+    relabelled Target, ...) -- same cells as add_row()."""
+    for entry, value in zip(entries, values):
+        _set_cell_text(entry, value)
 
 
-def _truncate(text: str, width_px: int) -> str:
-    max_chars = max(width_px // _PX_PER_CHAR, 3)
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1] + "…"
+def _set_cell_text(entry: ctk.CTkEntry, value: str) -> None:
+    """Replaces a readonly entry's content. Confirmed empirically: a Tk Entry
+    in readonly state silently no-ops .insert()/.delete() instead of raising
+    -- state has to go back to "normal" around the edit, then back to
+    "readonly", or the new value never actually lands."""
+    entry.configure(state="normal")
+    entry.delete(0, "end")
+    entry.insert(0, value)
+    entry.configure(state="readonly")

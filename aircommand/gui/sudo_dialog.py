@@ -22,6 +22,7 @@ class SudoPasswordDialog(ctk.CTkToplevel):
 
         self._entry = ctk.CTkEntry(self, show="*")
         self._entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._entry.bind("<Return>", lambda event: self._on_ok())
 
         self._error_label = ctk.CTkLabel(self, text=error or "", text_color="red")
         self._error_label.pack(padx=20, pady=(0, 10))
