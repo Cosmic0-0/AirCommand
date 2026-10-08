@@ -29,7 +29,7 @@ from aircommand.gui.table import Column, add_row, build_header, update_row
 
 class NetworksView(ctk.CTkFrame):
     _COLUMNS = (
-        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70),
+        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70), Column("Band", 70),
         Column("Encryption", 90), Column("Signal (dBm)", 90), Column("Last Seen", 90),
     )
 
@@ -60,6 +60,7 @@ class NetworksView(ctk.CTkFrame):
             network.ssid or "(hidden)",
             str(network.bssid),
             str(network.channel),
+            network.band.value if network.band is not None else "?",
             network.encryption.value.upper(),
             f"{network.last_signal_dbm} dBm",
             network.last_seen.strftime("%H:%M:%S"),

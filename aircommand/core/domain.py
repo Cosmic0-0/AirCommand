@@ -68,6 +68,31 @@ class EncryptionType(Enum):
     WPA3 = "wpa3"
 
 
+class Band(Enum):
+    """A radio band Discovery can scan. See CONTEXT.md: 'Band' and ADR-0013.
+    Values are the display strings, same convention as EncryptionType. 6GHz is
+    deliberately absent (ADR-0006: out of scope for now)."""
+
+    GHZ_2_4 = "2.4 GHz"
+    GHZ_5 = "5 GHz"
+
+
+def band_of_channel(channel: int) -> Optional[Band]:
+    """Which Band a channel number belongs to, or None if it is in neither
+    (airodump-ng reports -1 for a channel it could not pin down; 4.9GHz
+    public-safety channels 183+ are likewise left unclassified).
+
+    Channel numbers alone separate 2.4GHz (1-14) from 5GHz (32-177) -- but only
+    while 6GHz is out of scope: 6GHz channel numbers (1-233) overlap both, so
+    this function must be revisited, not just extended, when 6GHz is added
+    (ADR-0013)."""
+    if 1 <= channel <= 14:
+        return Band.GHZ_2_4
+    if 32 <= channel <= 177:
+        return Band.GHZ_5
+    return None
+
+
 @dataclass(frozen=True)
 class Network:
     """A wifi AP observed during Discovery. See CONTEXT.md: 'Network'."""
@@ -79,6 +104,12 @@ class Network:
     last_signal_dbm: int
     first_seen: datetime
     last_seen: datetime
+
+    @property
+    def band(self) -> Optional[Band]:
+        """Derived from `channel`, never stored (ADR-0013): no schema change, and
+        it cannot disagree with the channel it came from."""
+        return band_of_channel(self.channel)
 
 
 @dataclass(frozen=True)
@@ -233,7 +264,18 @@ class EnumHost:
 
 @dataclass(frozen=True)
 class DiscoveryOptions:
-    channels: Optional[tuple[int, ...]] = None  # None = hop all supported channels
+    # None = hop all supported channels. Not wired to anything yet (discovery.py
+    # ignores it). If it ever is, define how it interacts with `bands` below:
+    # airodump-ng's --channel and --band are separate flags (ADR-0013).
+    channels: Optional[tuple[int, ...]] = None
+    # The bands to hop across. The default is 2.4GHz only: that is airodump-ng's
+    # own default and what Discovery did before band selection existed, so a
+    # caller that passes no options behaves exactly as it always did.
+    bands: frozenset[Band] = frozenset({Band.GHZ_2_4})
+
+    def __post_init__(self) -> None:
+        if not self.bands:
+            raise ValueError("DiscoveryOptions.bands must name at least one band")
 
 
 @dataclass(frozen=True)

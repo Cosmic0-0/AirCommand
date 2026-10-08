@@ -9,15 +9,19 @@ A wifi access point observed during discovery, identified by its BSSID, SSID, an
 _Avoid_: AP, access point (use only when referring to 802.11 hardware concepts, not this domain's tracked entity)
 
 **Target**:
-A Network that appears on the authorization allowlist and is therefore eligible to have gated actions performed against it.
+A Network that appears on the authorization allowlist and is therefore eligible to have gated actions performed against it. Authorization is per BSSID: a router that broadcasts on both Bands is two Networks, and each needs its own Target.
 _Avoid_: authorized network, whitelisted network
 
 **Discovery**:
 Passively observing beacon broadcasts to identify Networks (BSSID, SSID, channel, encryption type, signal strength). Open to any Network; requires no authorization.
 _Avoid_: scanning (use only for the underlying nmap/802.11 mechanism, not this domain concept)
 
+**Band**:
+One of the two radio frequency ranges Discovery can cover, 2.4 GHz or 5 GHz. A Network sits in one Band, which follows from its channel. Only Bands the adapter supports can be chosen.
+_Avoid_: frequency, spectrum (those name the physical quantity, not the choice)
+
 **Discovery session**:
-The span over which the operator's view of discovered Networks accumulates. It begins when AirCommand launches or when the operator starts a new one, and it continues across pausing and resuming Discovery.
+The span over which the operator's view of discovered Networks accumulates. It begins when the operator first starts Discovery after launch, or starts a new session, and it continues across pausing and resuming Discovery, including resuming on a different Band.
 _Avoid_: scan session, history, program session (a session is shorter than the program's lifetime)
 
 **Action**:

@@ -1,5 +1,7 @@
 # Dual-band (2.4GHz/5GHz) support: capability-aware band selection, per-BSSID authorization, no 6GHz
 
+**Status: interface decided in ADR-0013.** That ADR settles where the band control lives, how it reaches `airodump-ng`, the Band-column-versus-New-Session question in the last Consequences bullet below (a Band column, no forced New Session), and how the adapter's bands are read (`iw phy <phy> info`, not `iw list`). The decisions in this ADR are unchanged. The text below is left as written.
+
 The user is replacing their 2.4GHz-only adapter (Ralink RT3070) with a dual-band one, so AirCommand needs to actually support 5GHz rather than silently stay 2.4GHz-only. We decided: Discovery gains an explicit band-selection control, shown before a scan starts, that queries the connected adapter's real capabilities (`iw list`) and only offers bands it actually supports — not a static "2.4GHz / 5GHz" choice offered unconditionally. Capture and Enumerate need no scope change. Deauth-assisted Capture's authorization/audit-log gating (ADR-0001) applies identically regardless of band, but 5GHz packet injection is flagged as adapter/driver-dependent and unverified until tested against real hardware. Authorization stays strictly per-BSSID: a router's 2.4GHz and 5GHz BSSIDs are two separate Networks needing two separate Target entries, with no "same network, different band" linking. Simultaneous multi-adapter operation and 6GHz/WiFi 6E are explicitly out of scope for now.
 
 ## Why

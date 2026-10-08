@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from aircommand.core.domain import DiscoveryOptions, JobKind, Network, StopReason
+from aircommand.core.domain import Band, DiscoveryOptions, JobKind, Network, StopReason
 from aircommand.core.events import DiscoveryStopped, EventBus, NetworkDiscovered, NetworkSightingUpdated
 from aircommand.core.jobs import (
     DEFAULT_DRIVE_TICK_INTERVAL,
@@ -24,13 +24,27 @@ from aircommand.core.jobs import (
 from aircommand.core.parse import parse_airodump_csv_line
 from aircommand.core.persistence.db import ConnectionScope, NetworkRepository
 from aircommand.core.procutil import ProcRunner, summarize_stderr
-from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
+from aircommand.core.rf import AdapterMode, AdapterReservation, BandUnavailable, RadioController
 
 # airodump-ng doesn't stream CSV to stdout (see docs/roadmap.md Phase 1 item 0) --
 # _drive polls the on-disk file it writes instead, at this cadence ("every 2-3s"
 # per the roadmap's research). Overridable per-instance (see __init__) purely for
 # test injectability, same reason SudoSession.__init__ takes keepalive_interval_s.
 DEFAULT_DISCOVERY_POLL_INTERVAL = timedelta(seconds=2)
+
+
+def _airodump_band_flag(bands: frozenset[Band]) -> str:
+    """The value for airodump-ng's `--band <abg>` (confirmed against `airodump-ng
+    --help`, v1.7: "Band on which airodump-ng should hop"; "By default,
+    airodump-ng hops on 2.4GHz channels"). "a" is 5GHz, "b" and "g" are 2.4GHz.
+    Lives here, not in domain.py, because it is knowledge about this one tool's
+    command line."""
+    flag = ""
+    if Band.GHZ_5 in bands:
+        flag += "a"
+    if Band.GHZ_2_4 in bands:
+        flag += "bg"
+    return flag
 
 
 class Discovery:
@@ -56,7 +70,25 @@ class Discovery:
         self._poll_interval = poll_interval
         self._tick_interval_s = tick_interval.total_seconds()
 
+    def supported_bands(self) -> frozenset[Band]:
+        """The Bands the adapter can scan, for the GUI's band control. Raises
+        BandUnavailable if that can't be determined (ADR-0013)."""
+        return self._rf.supported_bands()
+
     def start(self, options: DiscoveryOptions = DiscoveryOptions()) -> JobHandle:
+        # Checked BEFORE reserving the radio, so a refusal leaves nothing to
+        # unwind. 2.4GHz is never checked: it is what Discovery always did
+        # (airodump-ng's own default), so a failed `iw` query can't stop a plain
+        # scan. Any other band must be positively confirmed -- asking airodump-ng
+        # to hop a band the adapter lacks risks a scan that silently hears
+        # nothing, the failure ADR-0006 was written to prevent. The GUI only
+        # offers supported bands; this is the same rule enforced in core, so a
+        # headless caller gets it too.
+        if options.bands - {Band.GHZ_2_4}:
+            unsupported = options.bands - self.supported_bands()
+            if unsupported:
+                names = ", ".join(sorted(b.value for b in unsupported))
+                raise BandUnavailable(f"this adapter doesn't support {names}")
         reservation = self._rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
         job_id, token = self._jobs.new_job(JobKind.DISCOVERY)
         threading.Thread(
@@ -106,8 +138,13 @@ class Discovery:
             # with csv included in its default --output-format set. Fixed, but
             # that alone wasn't enough -- see the loop below's own comment for
             # the deeper, structural bug this one was hiding behind.
+            # --band is always passed, even for the 2.4GHz default (where it matches
+            # airodump-ng's own default), so there is one code path. See
+            # _airodump_band_flag for the value.
             handle = self._proc.spawn(
-                ["airodump-ng", "--write", str(csv_prefix), adapter], privileged=True
+                ["airodump-ng", "--band", _airodump_band_flag(options.bands),
+                 "--write", str(csv_prefix), adapter],
+                privileged=True,
             )
             self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}",
                                        repo=db_scope.jobs)

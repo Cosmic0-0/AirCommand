@@ -10,7 +10,15 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from aircommand.core import AdapterBusy, Engine, InvalidSudoPasswordError, RadioCommandFailed
+from aircommand.core import (
+    AdapterBusy,
+    Band,
+    BandUnavailable,
+    DiscoveryOptions,
+    Engine,
+    InvalidSudoPasswordError,
+    RadioCommandFailed,
+)
 from aircommand.core.domain import StopReason
 from aircommand.core.events import (
     DeauthFired,
@@ -90,21 +98,11 @@ class App(ctk.CTk):
         # current stub — on_close() already exists but nothing calls it.
 
         self.deiconify()   # privilege is up and the UI is fully built -- show the main
-        self.update_idletasks()   # window now (and lay it out) so it's already visible while
-        # discovery.start() below blocks on its synchronous airmon-ng call.
+        self.update_idletasks()   # window now, laid out, rather than on the first mainloop pass.
 
-        self.pump.start()
-        try:
-            self._discovery_handle = self.engine.discovery.start()   # auto-starts;
-            # see "Target Actions tab" for how the user frees the radio (a later slice).
-        except RadioCommandFailed as e:
-            self.status_bar.show_error(f"Discovery couldn't start: {e}")
-            self._discovery_handle = None
-            # Nothing to pause/resume if Discovery never started -- the "else"
-            # branch below would otherwise call .cancel() on None.
-            self._pause_resume_button.configure(state="disabled")
-        else:
-            self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=self._discovery_handle.job_id)
+        self.pump.start()   # Discovery does NOT start here: the operator picks a Band and
+        # clicks "Start Discovery" (_start_discovery), so nothing scans -- and airmon-ng
+        # doesn't run -- until then.
 
     def _ask_sudo_password_dialog(self, error: Optional[str] = None) -> Optional[str]:
         dialog = SudoPasswordDialog(self, error=error)
@@ -113,21 +111,46 @@ class App(ctk.CTk):
 
     def _build_discovery_targets_tab(self) -> None:
         tab = self.tabview.add("Discovery & Targets")
-        # _discovery_paused is True only once the scan has ACTUALLY stopped;
-        # _discovery_stopping covers the Pause-click -> DiscoveryStopped gap
-        # (ADR-0010).
+        # _discovery_handle is None until the first scan starts: that is the Idle
+        # state (launch, or every start attempt so far failed). _discovery_paused is
+        # True only once a scan has ACTUALLY stopped; _discovery_stopping covers the
+        # Pause-click -> DiscoveryStopped gap (ADR-0010). Both stay False in Idle.
+        self._discovery_handle = None
         self._discovery_paused = False
         self._discovery_stopping = False
+        # Read once, here: an adapter's bands don't change, and the dropdown below
+        # only offers choices built from them (ADR-0013).
+        supported = self._read_supported_bands()
+        self._band_choices: dict[str, frozenset[Band]] = {}
+        for choice in (
+            frozenset({Band.GHZ_2_4}), frozenset({Band.GHZ_5}), frozenset({Band.GHZ_2_4, Band.GHZ_5}),
+        ):
+            if choice <= supported:
+                # Labels are built from Band.value: "2.4 GHz", "5 GHz", and, for both,
+                # "2.4 + 5 GHz" (the shared " GHz" unit is written once).
+                members = [b.value.removesuffix(" GHz") for b in Band if b in choice]
+                self._band_choices[" + ".join(members) + " GHz"] = choice
         button_row = ctk.CTkFrame(tab, fg_color="transparent")
         button_row.pack(side="top", anchor="w", padx=10, pady=(10, 0))
         self._pause_resume_button = ctk.CTkButton(
-            button_row, text="Pause Discovery", command=self._on_pause_resume_discovery_clicked
+            button_row, text="Start Discovery", command=self._on_pause_resume_discovery_clicked
         )
         self._pause_resume_button.pack(side="left")
         self._new_session_button = ctk.CTkButton(
             button_row, text="New Session", state="disabled", command=self._on_new_session_clicked
         )
         self._new_session_button.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(button_row, text="Band:").pack(side="left", padx=(10, 0))
+        self._band_menu = ctk.CTkOptionMenu(
+            button_row,
+            values=list(self._band_choices),
+            # With a single choice the dropdown is permanently disabled; otherwise it
+            # is enabled only while no scan is running (Idle or Paused) --
+            # _start_discovery and _on_discovery_stopped flip it.
+            state="normal" if len(self._band_choices) > 1 else "disabled",
+        )
+        self._band_menu.set(list(self._band_choices)[-1])   # default: every supported band
+        self._band_menu.pack(side="left", padx=(10, 0))
         self.networks_view = NetworksView(tab, self)
         self.networks_view.pack(side="top", fill="both", expand=True, padx=10, pady=(5, 5))
         self.target_picker = TargetPicker(tab, self)
@@ -137,10 +160,22 @@ class App(ctk.CTk):
         self.pump.on(TargetAdded, self.target_picker.upsert_row)
         self.pump.on(TargetRemoved, self.target_picker.remove_row)
 
+    def _read_supported_bands(self) -> frozenset[Band]:
+        try:
+            return self.engine.discovery.supported_bands()
+        except BandUnavailable as e:
+            # Fall back to 2.4 GHz rather than offering a band we can't confirm:
+            # core's own start() would refuse any other band anyway (ADR-0013).
+            self.status_bar.show_error(
+                f"Couldn't read this adapter's bands ({e}); offering 2.4 GHz only"
+            )
+            return frozenset({Band.GHZ_2_4})
+
     def _on_pause_resume_discovery_clicked(self) -> None:
         if self._discovery_stopping:
             return   # defensive: the button is already disabled while Pausing
-        elif self._discovery_paused:
+        elif self._discovery_handle is None or self._discovery_paused:
+            # Idle (first Start) or Paused (Resume): same start path, table kept.
             self._start_discovery(new_session=False)
         else:
             # Cancel is async (up to one driver tick, plus a privileged kill),
@@ -157,14 +192,22 @@ class App(ctk.CTk):
         self._start_discovery(new_session=True)
 
     def _start_discovery(self, *, new_session: bool) -> None:
-        """Shared by Resume (keeps the table) and New Session (clears it) --
-        ADR-0010."""
+        """Shared by the first Start (from Idle), Resume (keeps the table) and
+        New Session (clears it) -- ADR-0010. Scans whichever Band the dropdown
+        shows; the dropdown is only enabled while no scan is running, so each
+        start can pick a different one."""
+        options = DiscoveryOptions(bands=self._band_choices[self._band_menu.get()])
         try:
-            handle = self.engine.discovery.start()
-        except (RadioCommandFailed, AdapterBusy) as e:
-            what = "start a new session" if new_session else "resume"
+            handle = self.engine.discovery.start(options)
+        except (RadioCommandFailed, AdapterBusy, BandUnavailable) as e:
+            if new_session:
+                what = "start a new session"
+            elif self._discovery_handle is None:
+                what = "start"
+            else:
+                what = "resume"
             self.status_bar.show_error(f"Discovery couldn't {what}: {e}")
-            return  # stay paused; table and buttons untouched
+            return  # stay Idle/paused; table, buttons and band menu untouched
         self._discovery_handle = handle
         self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=handle.job_id)
         if new_session:
@@ -173,6 +216,7 @@ class App(ctk.CTk):
         self._discovery_paused = False
         self._pause_resume_button.configure(text="Pause Discovery", state="normal")
         self._new_session_button.configure(state="disabled")
+        self._band_menu.configure(state="disabled")   # no Band change mid-scan
 
     def _on_discovery_stopped(self, event: DiscoveryStopped) -> None:
         if event.reason == StopReason.ERROR:
@@ -190,6 +234,8 @@ class App(ctk.CTk):
         self._discovery_paused = True
         self._pause_resume_button.configure(text="Resume Discovery", state="normal")
         self._new_session_button.configure(state="normal")
+        if len(self._band_choices) > 1:   # a single-choice dropdown stays disabled
+            self._band_menu.configure(state="normal")
 
     def _build_target_actions_tab(self) -> None:
         tab = self.tabview.add("Target Actions")

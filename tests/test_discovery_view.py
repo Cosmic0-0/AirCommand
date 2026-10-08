@@ -176,8 +176,51 @@ def test_upsert_row_with_sighting_updated_updates_existing_row_in_place(tmp_path
         view.upsert_row(make_sighting_updated(make_network(signal=-70)))
 
         assert len(view._rows) == 1
-        signal_entry = view._rows[MacAddress.parse(BSSID_1)]["labels"][4]
+        signal_index = [c.title for c in NetworksView._COLUMNS].index("Signal (dBm)")
+        signal_entry = view._rows[MacAddress.parse(BSSID_1)]["labels"][signal_index]
         assert signal_entry.get() == "-70 dBm"
+    finally:
+        root.destroy()
+
+
+def test_band_cell_shows_2_4_ghz_5_ghz_or_question_mark_by_channel(tmp_path):
+    bssid_2_4 = "AA:BB:CC:DD:EE:01"
+    bssid_5 = "AA:BB:CC:DD:EE:02"
+    bssid_unknown = "AA:BB:CC:DD:EE:03"
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        band_index = [c.title for c in NetworksView._COLUMNS].index("Band")
+        view.upsert_row(make_network_discovered(make_network(bssid=bssid_2_4, channel=6)))
+        view.upsert_row(make_network_discovered(make_network(bssid=bssid_5, channel=36)))
+        view.upsert_row(make_network_discovered(make_network(bssid=bssid_unknown, channel=-1)))
+
+        assert view._rows[MacAddress.parse(bssid_2_4)]["labels"][band_index].get() == "2.4 GHz"
+        assert view._rows[MacAddress.parse(bssid_5)]["labels"][band_index].get() == "5 GHz"
+        assert view._rows[MacAddress.parse(bssid_unknown)]["labels"][band_index].get() == "?"
+    finally:
+        root.destroy()
+
+
+def test_band_column_sits_directly_after_channel_column(tmp_path):
+    titles = [c.title for c in NetworksView._COLUMNS]
+    assert titles.index("Band") == titles.index("Channel") + 1
+
+
+def test_band_cell_updates_in_place_when_channel_changes_on_sighting(tmp_path):
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        band_index = [c.title for c in NetworksView._COLUMNS].index("Band")
+        view.upsert_row(make_network_discovered(make_network(channel=6)))
+        assert view._rows[MacAddress.parse(BSSID_1)]["labels"][band_index].get() == "2.4 GHz"
+
+        view.upsert_row(make_sighting_updated(make_network(channel=36)))
+
+        assert len(view._rows) == 1
+        assert view._rows[MacAddress.parse(BSSID_1)]["labels"][band_index].get() == "5 GHz"
     finally:
         root.destroy()
 

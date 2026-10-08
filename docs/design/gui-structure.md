@@ -101,8 +101,11 @@ class App(ctk.CTk):
         # current stub — on_close() already exists but nothing calls it.
 
         self.pump.start()
-        self._discovery_handle = self.engine.discovery.start()   # auto-starts;
-        # see "Target Actions tab" below for how the user frees the radio.
+        # No discovery.start() here since ADR-0013: the Discovery tab opens in an
+        # Idle state, with a band dropdown and a "Start Discovery" button, and
+        # self._discovery_handle stays None until the operator clicks Start.
+        # (This sketch originally auto-started Discovery at launch.)
+        # See "Target Actions tab" below for how the user frees the radio.
 
     def _ask_sudo_password_dialog(self, error: Optional[str] = None) -> Optional[str]:
         raise NotImplementedError  # SudoPasswordDialog(self, error=error).result
@@ -153,8 +156,9 @@ self.pump.on(NetworkDiscovered, self.networks_view.upsert_row)
 self.pump.on(NetworkSightingUpdated, self.networks_view.upsert_row)
 ```
 
-One row per BSSID (columns: SSID, BSSID, channel, encryption, signal, last
-seen), keyed by `network.bssid` — both event types carry the full `Network`
+One row per BSSID (columns: SSID, BSSID, channel, band, encryption, signal,
+last seen; the band cell is `network.band`, derived from the channel, ADR-0013),
+keyed by `network.bssid` — both event types carry the full `Network`
 snapshot, so `upsert_row` is one method for both (per the core doc's own "event
 payload doubles as the cache update" pattern). Each row has an **"Add as
 Target"** button that opens a small inline form pre-filled with
@@ -184,8 +188,9 @@ dropdown seeded from `engine.targets.list()`, subscribing to the same
 both `CapturePanel` and `EnumeratePanel` below it.
 
 **Discovery vs. Capture/Enumerate — the radio-contention problem.** Discovery
-auto-starts at launch and runs until stopped (per the core doc's own Usage
-sketch, which this design doesn't change). Left running unconditionally,
+runs until stopped. (When this was written it also auto-started at launch, per
+the core doc's own Usage sketch; since ADR-0013 the operator starts it with a
+Start button, but the contention problem is the same once it is running.) Left running unconditionally,
 Discovery holds `MONITOR_HOPPING` forever, so `Capture.start_*`/
 `Enumerator.start_scan`'s own `rf.reserve()` call would raise `AdapterBusy`
 every single time — the moment this tab exists, it'd be permanently unusable
@@ -210,6 +215,20 @@ dies on its own). Resume and New Session share one start path: Resume keeps
 the table, New Session clears it, and either one reports `RadioCommandFailed`
 or `AdapterBusy` in the status bar and stays paused if `start()` fails, with
 the table untouched.
+
+**Amended by ADR-0013.** The first button now has a third label and the tab a
+fourth state. At launch the tab is *Idle*: the button reads "Start Discovery",
+New Session is disabled, nothing has touched the radio, and
+`self._discovery_handle` is `None`. Start, Resume and New Session share one
+start path that builds `DiscoveryOptions(bands=...)` from a **Band** dropdown
+in the same button row. The dropdown lists only the subsets of the adapter's
+supported bands ("2.4 GHz", "5 GHz", "2.4 + 5 GHz", read once at build time from
+`engine.discovery.supported_bands()`), defaults to the most inclusive, and is
+enabled only in Idle and Paused, since a running `airodump-ng` can't change
+band. If the capability query fails, the dropdown offers 2.4 GHz only and the
+status bar says why. A failed first start reports in the status bar and stays
+Idle, so Start can be clicked again; `BandUnavailable` is reported the same way
+as `RadioCommandFailed` and `AdapterBusy`.
 
 Considered and rejected: auto-yielding (App itself cancels Discovery and
 re-starts the requested Action once it's confirmed stopped) — Discovery has no
@@ -545,7 +564,8 @@ session-scoped with a New Session button, and does record a real tradeoff, so
 it *is* an ADR: see `docs/adr/0010-discovery-table-is-session-scoped.md`.)
 
 - **Discovery auto-starts; a manual Pause/Resume control (not auto-yield) is
-  what frees the radio for Capture/Enumerate.** See "Target Actions tab" above
+  what frees the radio for Capture/Enumerate.** (Auto-start was replaced by an
+  explicit Start button in ADR-0013; the manual control is unchanged.) See "Target Actions tab" above
   for the full reasoning. Real tradeoff, multiple options considered — but
   scoped entirely to this GUI's own internal control layout (which button does
   what), not a core-architecture decision the way ADR-0001–0004 are. Recorded

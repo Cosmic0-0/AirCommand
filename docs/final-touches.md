@@ -218,9 +218,40 @@ ADR if it was a real design tradeoff, matching this project's own convention
 ("a decision that only exists in one session's chat transcript doesn't exist
 for the next one").
 
+## 3. Verify dual-band Discovery on real hardware (ADR-0013)
+
+Built 2026-10-08 on branch `feat/dual-band-discovery` against `FakeProcRunner`
+and a real Tk window. Only the first box below has been run on real hardware.
+Same ground rule as item 2: your own network, and only listening
+(Discovery is passive).
+
+- [x] The adapter's bands are read correctly (2026-10-08, no sudo):
+      `RadioController("wlx5c628b9faa9d", ...).supported_bands()` returned
+      2.4 GHz and 5 GHz from the real `iw phy phy3 info`.
+- [ ] `python scripts/smoke_test_bands.py --adapter <your adapter>` (asks for
+      your sudo password, drops your other wifi connection while it runs):
+      for each of 2.4 GHz, 5 GHz and both, every network heard must be on a
+      channel inside the requested band(s), and the live `airodump-ng`
+      command line it prints must show `--band bg`, `a` and `abg`. A band with
+      nothing heard is reported INCONCLUSIVE, not PASS. Watch in particular for
+      `--band abg` failing on disabled or DFS channels (it would show as
+      Discovery dying with an error), and for `--band bg` finding the same
+      networks the old no-flag scan did.
+- [ ] GUI on the real adapter: launch and confirm nothing scans and your wifi
+      stays up until you click Start Discovery; confirm the dropdown offers all
+      three choices; Start on "2.4 + 5 GHz" and confirm 5 GHz rows appear with
+      the Band column filled in; Pause, switch to "5 GHz", Resume, and confirm
+      the old 2.4 GHz rows stay while new 5 GHz rows arrive; New Session on a
+      different band clears the table; the dropdown is greyed out while
+      scanning.
+- [ ] Failure path: with the adapter unplugged (or `iw` renamed), launch and
+      confirm the dropdown offers 2.4 GHz only and the status bar says why.
+- [ ] Still open from ADR-0006, unchanged: 5GHz deauth-assisted Capture. The
+      new adapter makes it testable, but nothing here tests it.
+
 ## Once the above is done
 
 That's it — there's no further roadmap phase written down. v1 is "done" when
-items 1 and 2 above have actually been carried out, for real, on your own
+items 1, 2 and 3 above have actually been carried out, for real, on your own
 hardware. Item 0 no longer blocks either — you can start whenever you're
 ready.
