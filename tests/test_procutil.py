@@ -127,6 +127,67 @@ def test_reading_stdout_to_completion_does_not_deadlock_on_a_full_stderr_pipe():
     assert handle.wait() == 0
 
 
+def test_reading_stdout_survives_a_non_utf8_byte_instead_of_crashing_the_drain_thread():
+    # ADR-0014: confirmed for real against hashcat (fed a raw pcap .cap file,
+    # it echoes the pcap magic number's own non-UTF-8 byte straight back into
+    # a "Separator unmatched" line on stdout) -- reproduced here with a plain
+    # python3 stand-in, same idiom as the deadlock test above, so this stays
+    # fast and portable (no hashcat install needed to catch a regression).
+    # Before the fix, _drain_stdout's `for line in self._popen.stdout:` raised
+    # UnicodeDecodeError on the bad byte, dying without ever sending
+    # _stdout_queue its None sentinel -- lines() below would then block on
+    # queue.get() forever instead of reaching EOF.
+    runner = SubprocessRunner(sudo_run_privileged=Mock())
+    handle = runner.spawn(
+        ["python3", "-c",
+         "import sys\n"
+         "sys.stdout.buffer.write(b'bad byte follows: \\xd4\\xc3\\xb2\\xa1\\n')\n"
+         "sys.stdout.buffer.write(b'still alive\\n')\n"
+         "sys.stdout.buffer.flush()\n"],
+        privileged=False,
+    )
+
+    result: dict[str, list[str]] = {}
+
+    def _read_all_lines() -> None:
+        result["lines"] = list(handle.lines())
+
+    reader = threading.Thread(target=_read_all_lines, daemon=True)
+    reader.start()
+    reader.join(timeout=WAIT_TIMEOUT_S)
+
+    assert not reader.is_alive(), "reading stdout hung -- non-UTF-8 byte killed the drain thread"
+    assert result["lines"][0].startswith("bad byte follows: "), result["lines"]
+    assert "�" in result["lines"][0]  # the bad byte, replaced -- not silently dropped, not a raise
+    assert result["lines"][1] == "still alive"  # draining continued past the bad line
+    assert handle.wait() == 0
+
+
+def test_stderr_tail_survives_a_non_utf8_byte_instead_of_crashing_the_drain_thread():
+    # Same fix, same reasoning, the OTHER stream: _drain_stderr has the
+    # identical text=True exposure, just never hit it yet by coincidence of
+    # which real tool's chatter landed on which stream. stderr_tail() must
+    # still return what it could read rather than hang/lose everything after
+    # the bad byte -- it's wait()'d on by every driver's own ERROR-path
+    # diagnostic (summarize_stderr), so a crashed drain thread here would
+    # silently truncate that hint, not fail loudly.
+    runner = SubprocessRunner(sudo_run_privileged=Mock())
+    handle = runner.spawn(
+        ["python3", "-c",
+         "import sys\n"
+         "sys.stderr.buffer.write(b'bad byte follows: \\xd4\\xc3\\xb2\\xa1\\n')\n"
+         "sys.stderr.buffer.write(b'still alive\\n')\n"
+         "sys.stderr.buffer.flush()\n"],
+        privileged=False,
+    )
+
+    assert handle.wait() == 0
+    tail = handle.stderr_tail()
+    assert tail[0].startswith("bad byte follows: "), tail
+    assert "�" in tail[0]
+    assert tail[1] == "still alive"
+
+
 def test_spawn_privileged_dispatches_through_injected_run_privileged():
     # Fake, not real sudo (see module docstring) -- proves SubprocessRunner
     # actually calls the injected callable for privileged=True rather than
