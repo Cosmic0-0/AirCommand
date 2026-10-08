@@ -92,10 +92,18 @@ NMAP_XML = """<?xml version="1.0"?>
 
 def _make_enumerator(script: dict, get_subnet) -> tuple[Enumerator, Allowlist, EventBus, JobRegistry]:
     """Builds Allowlist/JobRegistry/RadioController by hand and constructs
-    Enumerator directly, bypassing Engine -- see module docstring for why."""
+    Enumerator directly, bypassing Engine -- see module docstring for why.
+
+    "iw" defaults to empty: RadioController.reserve(MANAGED, ...) (what
+    start_scan calls) now runs a real-mode sync check once per call when
+    self._monitor_adapter reads None (ADR-0016) -- empty "iw" output has no
+    "type" line for it to find, so it's a harmless no-op, same as every
+    other RadioController test not specifically exercising that check
+    (tests/test_rf.py)."""
     db = Database(":memory:")
     bus = EventBus()
     jobs = JobRegistry(db.jobs)
+    script.setdefault("iw", [])
     proc = FakeProcRunner(script=script)
     rf = RadioController("wlan0", proc)
     allowlist = Allowlist(db.targets, bus)
@@ -134,6 +142,98 @@ def test_successful_scan_publishes_nmap_scan_completed_with_both_hosts():
     assert hosts_by_ip["192.168.1.5"].open_ports == (80,)
     assert hosts_by_ip["192.168.1.10"].hostname is None
     assert hosts_by_ip["192.168.1.10"].open_ports == (22,)
+
+
+# --- ADR-0016: bounded retry around get_subnet -------------------------------
+# A single immediate attempt can't tell "the interface is still reconnecting
+# after a real monitor->managed switch" (rf.py's own ADR-0016 fix) apart from
+# "the operator genuinely never joined this network" -- both raise the
+# identical OSError. _await_subnet retries for a bounded window instead.
+
+def test_subnet_retry_succeeds_once_a_transient_oserror_clears():
+    """Proves the retry itself, not just that the eventual success path still
+    works: get_subnet raises twice (simulating "still reconnecting"), then
+    succeeds on the third call -- the scan must still complete normally."""
+    call_count = {"n": 0}
+
+    def flaky_get_subnet(adapter: str) -> str:
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise OSError("network is unreachable")
+        return "192.168.1.0/24"
+
+    enumerator, allowlist, bus, _ = _make_enumerator({"nmap": [NMAP_XML]}, flaky_get_subnet)
+    enumerator._subnet_retry_interval_s = 0.01   # real but tiny -- keeps this test fast
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    completed = []
+    bus.subscribe(completed.append, NmapScanCompleted)
+
+    handle = enumerator.start_scan(target)
+    handle.wait_for_test(timeout=2.0)
+
+    assert call_count["n"] == 3
+    assert len(completed) == 1
+
+
+def test_subnet_retry_gives_up_after_its_own_bounded_timeout():
+    """The retry is genuinely bounded, not an accidental infinite loop: a
+    get_subnet that NEVER succeeds still ends (EnumerationFailed, not a hang)
+    once _subnet_wait_timeout_s elapses -- checked against a real wall-clock
+    duration, not just that it eventually returns."""
+
+    def always_raises(adapter: str) -> str:
+        raise OSError("network is unreachable")
+
+    enumerator, allowlist, bus, _ = _make_enumerator({}, always_raises)
+    enumerator._subnet_wait_timeout_s = 0.3
+    enumerator._subnet_retry_interval_s = 0.05
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+
+    original_hook = threading.excepthook   # same reason as the existing always-fails test below
+    threading.excepthook = lambda args: None
+    try:
+        started = time.monotonic()
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        elapsed = time.monotonic() - started
+    finally:
+        threading.excepthook = original_hook
+
+    assert 0.3 <= elapsed < 2.0, f"took {elapsed:.2f}s -- expected to give up at the ~0.3s bound"
+    assert len(failed) == 1
+
+
+def test_subnet_retry_is_cancellable():
+    """Cancelling while the retry is in-flight must end it promptly, not wait
+    out the full timeout -- this wait didn't exist before ADR-0016, so there
+    was nothing to cancel here previously; now that there is, it shouldn't
+    ignore a cancel that arrives while it's waiting."""
+
+    def always_raises(adapter: str) -> str:
+        raise OSError("network is unreachable")
+
+    enumerator, allowlist, bus, _ = _make_enumerator({}, always_raises)
+    enumerator._subnet_wait_timeout_s = 30.0   # long enough that only cancellation explains an early return
+    enumerator._subnet_retry_interval_s = 0.05
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        started = time.monotonic()
+        handle = enumerator.start_scan(target)
+        time.sleep(0.1)   # let a couple of real retry iterations happen first
+        handle.cancel()
+        handle.wait_for_test(timeout=2.0)
+        elapsed = time.monotonic() - started
+    finally:
+        threading.excepthook = original_hook
+
+    assert elapsed < 2.0, f"took {elapsed:.2f}s -- cancellation should have ended the retry almost immediately"
 
 
 def test_adapter_busy_propagates_synchronously_and_does_not_start_a_job(tmp_path):
@@ -188,6 +288,12 @@ def test_failed_scan_publishes_enumeration_failed_and_cleans_up():
         raise OSError("network is unreachable")
 
     enumerator, allowlist, bus, jobs = _make_enumerator({}, raising_get_subnet)
+    # ADR-0016's bounded retry would otherwise spend its full real timeout
+    # retrying a fake that always raises -- same reach-into-the-private-
+    # attribute precedent test_crack_acceptance.py's own ADR-0015 tests use
+    # for an identical reason (keeps this test fast without threading a new
+    # override through every construction path).
+    enumerator._subnet_wait_timeout_s = 0
     target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
 
     failed = []

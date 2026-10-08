@@ -23,8 +23,9 @@ import fcntl
 import socket
 import struct
 import threading
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from ipaddress import IPv4Network
 from typing import Callable
 
@@ -39,6 +40,19 @@ from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
 _SIOCGIFADDR = 0x8915
 _SIOCGIFNETMASK = 0x891B
+
+# ADR-0016's second finding: RadioController switching a stuck adapter back to
+# managed mode for real (rf.py's own ADR-0016 fix) only means `systemctl
+# restart NetworkManager` reported success -- NOT that the interface has
+# actually re-associated and gotten a fresh DHCP lease yet, which can take a
+# few more real seconds. Bounds how long _await_subnet (below) retries before
+# concluding "really not joined" rather than "still reconnecting" -- generous
+# enough for a real NetworkManager reconnect, nowhere near as long as this
+# project's other unattended-hang safety nets (e.g. Capture's 30s handshake-
+# check timeout, ADR-0011), since this is the FIRST thing Enumerate does, so a
+# slow failure here is directly, immediately user-visible.
+DEFAULT_SUBNET_WAIT_TIMEOUT = timedelta(seconds=8)
+DEFAULT_SUBNET_RETRY_INTERVAL = timedelta(seconds=0.5)
 
 
 def get_interface_subnet(interface: str) -> str:
@@ -67,6 +81,8 @@ class Enumerator:
         proc: ProcRunner,
         new_connection_scope: Callable[..., ConnectionScope],
         get_subnet: Callable[[str], str] = get_interface_subnet,
+        subnet_wait_timeout: timedelta = DEFAULT_SUBNET_WAIT_TIMEOUT,
+        subnet_retry_interval: timedelta = DEFAULT_SUBNET_RETRY_INTERVAL,
     ) -> None:
         self._allowlist = allowlist
         self._repo = repo  # main-connection repo -- no reader method exists yet (see class docstring)
@@ -78,6 +94,8 @@ class Enumerator:
         self._get_subnet = get_subnet  # constructor-injected seam for testability,
         # same reasoning as ProcRunner/SudoSession.run_privileged — tests supply a
         # canned subnet instead of needing a real joined interface.
+        self._subnet_wait_timeout_s = subnet_wait_timeout.total_seconds()
+        self._subnet_retry_interval_s = subnet_retry_interval.total_seconds()
 
     def start_scan(self, target: Target, options: EnumOptions = EnumOptions()) -> JobHandle:
         fresh = self._allowlist.require_target(target.bssid)   # the gate
@@ -86,6 +104,29 @@ class Enumerator:
         job_id, token = self._jobs.new_job(JobKind.NMAP_SCAN, target_id=fresh.id)
         threading.Thread(target=self._drive, args=(job_id, token, reservation, fresh, options), daemon=True).start()
         return JobHandle(job_id, JobKind.NMAP_SCAN, self._jobs)
+
+    def _await_subnet(self, adapter: str, token: CancellationToken) -> str:
+        """Bounded retry around self._get_subnet -- ADR-0016's second finding.
+        A single immediate attempt (the pre-ADR-0016 behavior) can't tell
+        "the interface hasn't finished reconnecting after a real monitor-
+        >managed switch" apart from "the operator genuinely never joined this
+        network at all" -- both raise the identical OSError. Retrying for a
+        bounded window gives the genuine race a real chance to resolve while
+        keeping "really never joined" failing in a reasonable, not instant
+        but not long, time. Also checks token.is_cancelled() between
+        attempts -- Enumerate still has no mid-SCAN cancellation (nmap's own
+        -oX - output is buffered to completion, see this module's own
+        docstring/_drive's closing comment), but there is no reason THIS
+        wait, which didn't exist before, should ignore a cancel that arrived
+        while it's sitting here."""
+        deadline = time.monotonic() + self._subnet_wait_timeout_s
+        while True:
+            try:
+                return self._get_subnet(adapter)
+            except OSError:
+                if token.is_cancelled() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(self._subnet_retry_interval_s)
 
     def _drive(
         self,
@@ -103,9 +144,10 @@ class Enumerator:
             # This thread's own connection -- never self._repo (the main connection)
             # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
             db_scope = self._new_connection_scope()
-            subnet = self._get_subnet(reservation.adapter)   # see module docstring — Option A;
-            # lets an OSError here (interface not yet joined to anything) propagate, same as any
-            # other unexpected mid-drive error elsewhere in this codebase
+            subnet = self._await_subnet(reservation.adapter, token)   # see module docstring — Option A;
+            # lets an OSError here (interface not yet joined to anything, or genuinely never
+            # finishes reconnecting within the bounded retry above) propagate, same as any other
+            # unexpected mid-drive error elsewhere in this codebase
             argv = ["nmap", "-oX", "-", *(["-p", options.ports] if options.ports else []),
                     *(["-sV"] if options.service_detection else []), subnet]
             handle = self._proc.spawn(argv, privileged=True)   # raw-socket scan types need sudo

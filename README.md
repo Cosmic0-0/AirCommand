@@ -63,7 +63,13 @@ processes. See
 [ADR-0014](docs/adr/0014-non-utf8-bytes-killing-a-drain-thread.md) and
 [ADR-0015](docs/adr/0015-hcxpcapngtool-conversion-step.md) for both.
 
-Enumerate hasn't been tested on real hardware at all.
+Enumerate found one more real bug this way: a stuck adapter, left in
+monitor mode by an earlier crashed session, made Enumerate fail with an
+unrelated-looking error every time. Confirmed and fixed against the real,
+still-affected adapter. The actual mode switch back to managed isn't
+confirmed yet; that needs a real launch with sudo, which this session
+didn't have. See
+[ADR-0016](docs/adr/0016-radio-mode-desync-after-a-crash.md).
 
 Dual-band Discovery is built and passes the automated suite. On real
 hardware, only the adapter capability check has run so far. The
