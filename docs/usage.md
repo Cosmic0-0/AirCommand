@@ -11,7 +11,8 @@ a hard boundary, not just a suggestion.
 ## Prerequisites
 
 - Linux (Mint or Kali — this project doesn't support Windows/macOS execution).
-- `aircrack-ng`, `hashcat`, and `nmap` installed and on `PATH`.
+- `aircrack-ng`, `hashcat`, `nmap`, and `hcxpcapngtool` (from the `hcxtools`
+  package) installed and on `PATH`.
 - A wifi adapter that supports monitor mode.
 - Normal sudo rights on your account — **not** a passwordless (`NOPASSWD`)
   sudoers entry. AirCommand asks for your password once at launch and keeps
