@@ -119,6 +119,34 @@ class _RealProcHandle:
         self._popen = popen
         self._privileged = privileged
         self._run_privileged = run_privileged
+        # NON-UTF-8 BYTE CRASH (ADR-0014): subprocess.Popen(..., text=True) decodes
+        # stdout/stderr as strict UTF-8 by default, so one bad byte anywhere in a
+        # spawned tool's output raises UnicodeDecodeError INSIDE the drain thread
+        # below, before it ever reaches its own sentinel/EOF handling -- silently
+        # killing that thread. For stdout, that means _stdout_queue never gets its
+        # None sentinel, so lines() (crack.py's `for line in handle.lines()`, this
+        # codebase's only stdout *consumer*) blocks on queue.get() forever -- not
+        # cancellable either, since token.is_cancelled() is only checked between
+        # queue items. Confirmed directly against a real hashcat run (not assumed):
+        # fed the wrong input shape, hashcat's own "Hashfile ... Separator
+        # unmatched" rejection message echoes the offending line's raw bytes
+        # VERBATIM back onto stdout, including non-UTF-8 bytes (a pcap global
+        # header's magic number, in that case -- see ADR-0014). The same class of
+        # byte-echo is plausible from any of these tools (a raw SSID is an
+        # arbitrary byte string, not guaranteed valid UTF-8; GPU/device name
+        # strings are vendor-supplied), not just this one input shape, so the fix
+        # applies to both streams here -- the one seam both the privileged and
+        # unprivileged spawn() branches already share -- rather than chasing it
+        # per call site. 'replace' (-> U+FFFD per bad byte) over a stricter
+        # recovery: every consumer of this content already only wants readable
+        # diagnostic text (JSON status lines, CSV rows, stderr tails for a hint in
+        # the GUI) and already tolerates a garbled/unparseable line by treating it
+        # as "nothing new this round" (e.g. parse_hashcat_status_line returning
+        # None) -- never byte-exact. Losing fidelity on a byte that was already
+        # unreadable is strictly better than crashing the only thread keeping this
+        # pipe drained. Must happen before either drain thread starts reading.
+        self._popen.stdout.reconfigure(errors="replace")
+        self._popen.stderr.reconfigure(errors="replace")
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=200)
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
