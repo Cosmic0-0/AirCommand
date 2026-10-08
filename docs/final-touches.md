@@ -199,6 +199,19 @@ not a suggestion). Concretely:
       hosts/ports come back. Also try it *without* joining first, to confirm
       `EnumerationFailed` actually surfaces a real, readable error instead of
       leaving the panel stuck on "Enumerating…".
+      **A real, reported failure here (`OSError: [Errno 99] Cannot assign
+      requested address`) turned out to be neither of the two things above —
+      see [ADR-0016](docs/adr/0016-radio-mode-desync-after-a-crash.md):
+      `RadioController`'s in-memory radio-mode tracking had desynced from
+      the real adapter (confirmed stuck in monitor mode from a prior
+      crashed/force-killed AirCommand process, on the reporting user's own
+      machine), so Enumerate skipped the real mode switch back to managed
+      entirely. Fixed and confirmed against the real detection logic on that
+      same real, still-affected adapter — the privileged mode-switch itself
+      (`airmon-ng stop` + `systemctl restart NetworkManager`) is NOT yet
+      confirmed end to end, since this session had no interactive sudo to
+      exercise it. The next real launch + Enumerate click is what closes
+      that out, and is now also this checklist item's actual next step.**
 - [ ] Crack tab: pick the real Handshake from above, pick a real wordlist,
       run a crack to completion (use a small wordlist that you know contains
       the real key, to get a `Found` result in reasonable time, not just an

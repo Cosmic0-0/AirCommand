@@ -195,6 +195,29 @@ def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
     return match.group(1) if match else fallback
 
 
+def parse_iw_dev_type(output: str) -> Optional[str]:
+    """`iw dev <interface> info`'s stdout -> that interface's current mode
+    string ("monitor", "managed", ...), or None if the "type" line isn't
+    present (e.g. a failed/empty run). Confirmed against two real samples on
+    real hardware, not assumed: a real monitor-mode interface
+
+        Interface wlx5c628b9faa9d
+        \tifindex 4
+        \twdev 0x200000001
+        \taddr 5c:62:8b:9f:aa:9d
+        \ttype monitor
+        \t...
+
+    and a real managed-mode one (different adapter, same command, same
+    "type <mode>" line position right after "addr") both print exactly one
+    tab-indented "type <word>" line. See ADR-0016 for why
+    RadioController needs this: its own self._monitor_adapter tracking is
+    purely in-memory and can desync from the real adapter mode if a prior
+    AirCommand process exited (crash, force-kill) without reverting it."""
+    match = re.search(r"^\s*type\s+(\S+)", output, re.M)
+    return match.group(1) if match else None
+
+
 # One `iw phy <phy> info` frequency entry: "\t\t\t* 2412.0 MHz [1] (20.0 dBm)".
 # See parse_iw_phy_bands's docstring for why the bracket is kept.
 _IW_FREQUENCY_LINE = re.compile(r"^\s*\*\s+(\d+(?:\.\d+)?)\s+MHz\s+\[\d+\](.*)$")

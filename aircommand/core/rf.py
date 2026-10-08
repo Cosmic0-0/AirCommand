@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from aircommand.core.domain import Band, JobKind
-from aircommand.core.parse import parse_airmon_monitor_interface, parse_iw_phy_bands
+from aircommand.core.parse import parse_airmon_monitor_interface, parse_iw_dev_type, parse_iw_phy_bands
 from aircommand.core.procutil import ProcRunner
 
 logger = logging.getLogger(__name__)
@@ -129,14 +129,27 @@ class RadioController:
         self._current: AdapterReservation | None = None
         self._monitor_adapter: str | None = None
         self._supported_bands: frozenset[Band] | None = None   # cached on success only
-        # TODO (init): set above — None means "adapter is currently in managed
-        # mode (or never touched)"; once set, holds the interface name to use for
-        # monitor-mode operations, which may differ from self._adapter (see
-        # _start_monitor_mode). Purely in-memory, same as self._current -- if the
-        # adapter's real mode was changed by something outside this process (a
-        # crashed prior AirCommand session, or the user's own airmon-ng command),
-        # this class won't detect that; accepted, same tier as self._current's own
-        # no-persistence limitation, not solved here.
+        # None means "adapter is currently in managed mode (or never touched)";
+        # once set, holds the interface name to use for monitor-mode operations,
+        # which may differ from self._adapter (see _start_monitor_mode). Purely
+        # in-memory, same as self._current -- if the adapter's real mode was
+        # changed by something outside THIS process (a crashed prior AirCommand
+        # session, or the user's own airmon-ng command), a bare `None` default is
+        # a WRONG assumption, not just an untested one, for exactly one
+        # combination: MANAGED is requested while this still reads None. ADR-0016
+        # confirmed this for real -- a prior AirCommand process that didn't exit
+        # through Engine.shutdown() (force-killed, same as this repo's own
+        # ADR-0014 hang) left a real adapter in monitor mode; the next process
+        # still defaulted to "assume managed", so reserve(MANAGED, ...)
+        # (Enumerate) skipped the real mode switch entirely and then failed
+        # reading an IP off an interface that was never going to have one --
+        # the exact OSError[Errno 99] a genuinely-not-yet-joined network would
+        # also produce, for a completely different reason. _ensure_mode's own
+        # third branch below closes this one combination; every other
+        # combination was already either correct or self-correcting (accepted,
+        # not solved further here -- see that branch's own comment for why the
+        # other two entry points, supported_bands()/release_to_managed(), keep
+        # their existing behavior unchanged).
 
     def reserve(self, mode: AdapterMode, holder: JobKind) -> AdapterReservation:
         if self._current is not None:
@@ -229,7 +242,38 @@ class RadioController:
             self._monitor_adapter = self._start_monitor_mode()
         elif not wants_monitor and self._monitor_adapter is not None:
             self._stop_monitor_mode()
+        elif not wants_monitor and self._real_adapter_is_in_monitor_mode():
+            # ADR-0016 -- the one combination __init__'s own comment names: MANAGED
+            # requested, self._monitor_adapter already (falsely) says "nothing to
+            # switch". Correct the in-memory value to what _stop_monitor_mode's own
+            # airmon-ng call needs (the real current interface name -- no rename is
+            # possible here since airmon-ng was never asked to start anything) and
+            # then perform the real switch, instead of silently trusting the
+            # assumption that just got disproven.
+            self._monitor_adapter = self._adapter
+            self._stop_monitor_mode()
         return self._monitor_adapter if wants_monitor else self._adapter
+
+    def _real_adapter_is_in_monitor_mode(self) -> bool:
+        """Checked ONLY from the one _ensure_mode branch above that can be wrong
+        (see __init__'s own comment) -- not cached, deliberately: this is a plain
+        unprivileged `iw dev` read (not the real cost center, airmon-ng/systemctl),
+        and re-checking on every call this branch is reached means a later,
+        separate desync (something external re-enters monitor mode mid-session)
+        self-heals too, not just the first one. Tolerant of its own failure --
+        can't run `iw`, or the interface doesn't exist under this name at all
+        (e.g. a prior crash ALSO renamed it, a harder case this doesn't attempt to
+        solve) -- either returns False, preserving the pre-ADR-0016 default
+        (assume managed) rather than raising; this check is purely corrective,
+        never a new required precondition for reserve() to succeed."""
+        try:
+            handle = self._proc.spawn(["iw", "dev", self._adapter, "info"], privileged=False)
+        except OSError:   # `iw` not installed / not on PATH
+            return False
+        output = "\n".join(handle.lines())
+        if handle.wait() != 0:   # e.g. "no such device" -- nothing to correct, let the normal flow surface it
+            return False
+        return parse_iw_dev_type(output) == "monitor"
 
     def _start_monitor_mode(self) -> str:
         # HARDWARE-CONFIRMED (docs/roadmap.md Phase 2 item 5) against a real

@@ -94,7 +94,14 @@ def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
     # test_enumerate_acceptance.py's own get_interface_subnet test and module
     # docstring for why this is the right way to get a deterministic real
     # subnet through Engine without needing wifi hardware.
-    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter="lo", proc=FakeProcRunner(script={"nmap": [NMAP_XML]}))
+    # "iw": [] -- RadioController.reserve(MANAGED, ...) now runs a real-mode
+    # sync check once (ADR-0016); empty output has no "type" line to find, so
+    # it's a harmless no-op here, same as every other RadioController call
+    # site not specifically exercising that check.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="lo",
+        proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": []}),
+    )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     completed = []
@@ -167,10 +174,18 @@ def test_enumeration_failed_on_a_nonexistent_adapter_updates_status_and_reenable
     # equivalent test, and for the same reason: the exception propagates out of
     # the driver thread uncaught, which pytest would otherwise only surface
     # as a warning collected AFTER this test function has already returned.
+    # "iw": [] -- see test_successful_scan_populates_results_and_reenables_
+    # start_button's own comment (ADR-0016's sync check needs a script entry
+    # too, even though this test's whole point is a DIFFERENT real OSError).
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan-does-not-exist-99",
-        proc=FakeProcRunner(script={}),
+        proc=FakeProcRunner(script={"iw": []}),
     )
+    # ADR-0016's bounded retry would otherwise spend its full real timeout
+    # retrying a genuinely nonexistent interface -- same reach-into-the-
+    # private-attribute precedent test_crack_acceptance.py's own ADR-0015
+    # tests use, since Engine has no constructor passthrough for this.
+    engine.enumerate._subnet_wait_timeout_s = 0
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     fake_app = _FakeApp(engine)

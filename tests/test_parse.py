@@ -6,6 +6,7 @@ from aircommand.core.parse import (
     parse_aircrack_handshake_check,
     parse_airmon_monitor_interface,
     parse_airodump_csv_line,
+    parse_iw_dev_type,
     parse_iw_phy_bands,
 )
 
@@ -203,6 +204,43 @@ def test_old_minus_b_suppressed_shape_with_no_table_at_all_returns_false():
     )
 
     assert parse_aircrack_handshake_check(output) is False
+
+
+# --- parse_iw_dev_type -----------------------------------------------------------
+# Both samples are real `iw dev <interface> info` output, hardware-confirmed
+# (ADR-0016): a real USB adapter genuinely stuck in monitor mode (left there by
+# a prior AirCommand process that never reached Engine.shutdown()), and a real
+# managed-mode interface (a different adapter, same command).
+
+IW_DEV_INFO_MONITOR_REAL = (
+    "Interface wlx5c628b9faa9d\n"
+    "\tifindex 4\n"
+    "\twdev 0x200000001\n"
+    "\taddr 5c:62:8b:9f:aa:9d\n"
+    "\ttype monitor\n"
+    "\tchannel 108 (5540 MHz), width: 20 MHz (no HT), center1: 5540 MHz\n"
+)
+IW_DEV_INFO_MANAGED_REAL = (
+    "Interface wlo1\n"
+    "\tifindex 3\n"
+    "\twdev 0x1\n"
+    "\taddr e0:0a:f6:b0:7d:7b\n"
+    "\ttype managed\n"
+    "\twiphy 0\n"
+)
+
+
+def test_real_monitor_mode_output_parses_as_monitor():
+    assert parse_iw_dev_type(IW_DEV_INFO_MONITOR_REAL) == "monitor"
+
+
+def test_real_managed_mode_output_parses_as_managed():
+    assert parse_iw_dev_type(IW_DEV_INFO_MANAGED_REAL) == "managed"
+
+
+@pytest.mark.parametrize("output", ["", "\n", "Interface wlan0\n\tifindex 4\n", "command failed: No such device (-19)"])
+def test_missing_or_unrecognizable_input_returns_none(output):
+    assert parse_iw_dev_type(output) is None
 
 
 # --- parse_iw_phy_bands ---------------------------------------------------------

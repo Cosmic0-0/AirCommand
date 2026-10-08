@@ -11,6 +11,28 @@ from aircommand.core.rf import AdapterBusy, AdapterMode, BandUnavailable, RadioC
 # instead of KeyError-ing on an empty script (see note below).
 AIRMON_START_OUTPUT_RENAMES = ["(mac80211 monitor mode vif enabled for [phy0]wlan0 on [phy0]wlan0mon)"]
 
+# Real `iw dev <adapter> info` output, hardware-confirmed (ADR-0016): captured
+# directly from a real USB adapter genuinely left in monitor mode by a prior
+# AirCommand process that never reached Engine.shutdown() (a force-kill --
+# see ADR-0014's own hang this exact adapter was stuck from). The managed-mode
+# shape was confirmed the same way, from a real managed-mode interface.
+IW_DEV_INFO_MONITOR = [
+    "Interface wlan0",
+    "\tifindex 4",
+    "\twdev 0x200000001",
+    "\taddr 5c:62:8b:9f:aa:9d",
+    "\ttype monitor",
+    "\tchannel 108 (5540 MHz), width: 20 MHz (no HT), center1: 5540 MHz",
+]
+IW_DEV_INFO_MANAGED = [
+    "Interface wlan0",
+    "\tifindex 3",
+    "\twdev 0x1",
+    "\taddr e0:0a:f6:b0:7d:7b",
+    "\ttype managed",
+    "\tchannel 6 (2437 MHz), width: 20 MHz, center1: 2437 MHz",
+]
+
 
 def make_controller(adapter: str = "wlan0", script: dict[str, list[str]] | None = None) -> RadioController:
     # Before RadioController's airmon-ng calls were implemented, reserve() never
@@ -450,3 +472,108 @@ def test_a_failed_query_is_not_cached(phy3):
 
     script["iw"] = IW_DUAL_BAND   # e.g. the operator replugged the adapter
     assert rf.supported_bands() == frozenset({Band.GHZ_2_4, Band.GHZ_5})
+
+
+# --- ADR-0016: syncing with the REAL adapter mode -------------------------------
+# The actual bug this fixes: self._monitor_adapter is purely in-memory, so a
+# fresh RadioController (e.g. a new AirCommand process after a prior one was
+# force-killed while the real adapter was in monitor mode) defaults to "assume
+# managed" with nothing ever checking that against reality. Confirmed directly
+# on real hardware, not just reasoned about: `iw dev` genuinely showed the
+# adapter still in monitor mode with no AirCommand process running at all.
+# Enumerate (reserve(MANAGED, ...)) would then skip the real mode switch
+# entirely and fail reading an IP off an interface that was never going to
+# have one -- the exact OSError[Errno 99] a genuinely-not-yet-joined network
+# would also produce, for a completely different reason. The check is scoped
+# to this ONE combination (MANAGED requested, self._monitor_adapter already
+# reads None) -- every other reserve()/supported_bands()/release_to_managed()
+# call is completely unaffected, confirmed by every test above this section
+# passing unmodified.
+
+def test_reserve_managed_detects_and_corrects_a_real_adapter_stuck_in_monitor_mode():
+    """The core fix: self._monitor_adapter starts as None (the old, blind
+    "assume managed" default) but the REAL adapter is actually in monitor
+    mode -- reserve(MANAGED, ...) must perform the real stop+restart
+    sequence, not silently skip it the way it did before ADR-0016."""
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={"iw": IW_DEV_INFO_MONITOR, "airmon-ng": ["some stop-mode output, content unused"],
+                "systemctl": ["Synchronizing state..."]},
+        on_spawn=spawned_argvs.append,
+    )
+    rf = RadioController("wlan0", proc)
+
+    managed_reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)
+
+    assert spawned_argvs == [
+        ["iw", "dev", "wlan0", "info"],       # the new check finds "type monitor"
+        ["airmon-ng", "stop", "wlan0"],       # ...and for real switches it back
+        ["systemctl", "restart", "NetworkManager"],
+    ]
+    assert managed_reservation.adapter == "wlan0"
+
+
+def test_reserve_managed_on_a_genuinely_managed_adapter_is_unaffected():
+    """Baseline: when the real adapter actually IS in managed mode (the common
+    case), the check finds nothing to correct and reserve(MANAGED) behaves
+    exactly as it always did beyond the one extra read -- no airmon-ng/
+    systemctl call, since there was never anything to switch."""
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"iw": IW_DEV_INFO_MANAGED}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+
+    reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)
+
+    assert spawned_argvs == [["iw", "dev", "wlan0", "info"]]
+    assert reservation.adapter == "wlan0"
+
+
+def test_reserve_managed_rechecks_reality_every_time_self_monitor_adapter_reads_none():
+    """Deliberately NOT cached/run-once (see rf.py's own comment on
+    _real_adapter_is_in_monitor_mode): two separate reserve(MANAGED, ...)
+    calls that both see self._monitor_adapter as None each re-check reality --
+    self-healing even if something external changes the adapter's mode again
+    between them, not just on the very first call."""
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"iw": IW_DEV_INFO_MANAGED}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+
+    first = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)
+    rf.release(first)
+    second = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)
+
+    assert spawned_argvs == [["iw", "dev", "wlan0", "info"], ["iw", "dev", "wlan0", "info"]]
+    assert second.adapter == "wlan0"
+
+
+def test_reserve_managed_tolerates_iw_not_installed():
+    """Detection failing must never introduce a NEW way for reserve() to
+    raise -- it's purely corrective; "can't tell" just preserves the
+    pre-ADR-0016 default (assume managed) rather than blocking anything."""
+
+    class _RaisingRunner:
+        def spawn(self, argv, *, privileged):
+            if argv[0] == "iw":
+                raise FileNotFoundError("iw")
+            return FakeProcRunner(script={}).spawn(argv, privileged=privileged)
+
+    rf = RadioController("wlan0", _RaisingRunner())
+
+    reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)   # must not raise
+
+    assert reservation.adapter == "wlan0"   # unchanged pre-ADR-0016 default
+
+
+def test_reserve_managed_tolerates_a_failed_iw_dev_call():
+    """Same tolerance, the other failure shape: `iw dev` runs but exits
+    non-zero (e.g. "no such device", a renamed/missing interface this check
+    doesn't attempt to solve -- see rf.py's own comment) -- still just
+    preserves the pre-ADR-0016 default rather than raising."""
+    proc = FakeProcRunner(
+        script={"iw": []}, returncodes={"iw": 237}, stderr={"iw": ["command failed: No such device (-19)"]}
+    )
+    rf = RadioController("wlan0", proc)
+
+    reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)   # must not raise
+
+    assert reservation.adapter == "wlan0"
