@@ -145,6 +145,17 @@ or a test that spawns the real tool and asserts its own fingerprint matches
 its own cmdline) so this class of bug can't reappear silently per call site
 the way it did here, four times, independently.
 
+**Fixed in a follow-up pass, same session**: Discovery's and Capture's own
+long-running `airodump-ng` fingerprints now use the bare, job_id-derived
+prefix path (`csv_prefix`/`cap_prefix`) each already builds — a real,
+standalone argv token, same reasoning as Crack's own fix above. Enumerate's
+now uses the bare `subnet` (its `target.bssid` form could never have matched
+in the first place — `bssid` never appears in nmap's own argv at all).
+`tests/test_fingerprint_matches_real_cmdline.py` adds the automated check
+this paragraph asked for: one real-process-backed test per driver, each
+proving its new fingerprint is a genuine `/proc/pid/cmdline` substring and
+its old one wasn't.
+
 ## Considered options
 
 - **Run the conversion inside `Capture._drive`, store the converted path on
@@ -198,11 +209,12 @@ the way it did here, four times, independently.
   instead, verified by hand against the reporting user's own capture.
 - `README.md`'s Requirements list gains `hcxtools` alongside `aircrack-ng`,
   `hashcat`, and `nmap`.
-- Full suite: 333 passed (up from 321 at ADR-0014, reflecting the new tests
-  above).
+- Full suite: 336 passed (321 at ADR-0014, 333 after this ADR's own changes,
+  336 after the Discovery/Capture/Enumerate fingerprint follow-up below).
 - Cross-reference: this resolves the gap ADR-0014's own Consequences section
   flagged as confirmed-but-not-fixed ("Crack cannot currently find the
   correct key for any real captured handshake, regardless of this fix").
   That gap is closed as of this ADR.
-- **Still needed, not done here**: the Discovery/Capture/Enumerate
-  fingerprint bug above, its own follow-up pass.
+- **Follow-up, same session**: the Discovery/Capture/Enumerate fingerprint
+  bug flagged above as its own pass was done — see the "Fixed in a
+  follow-up pass" note earlier in this document.

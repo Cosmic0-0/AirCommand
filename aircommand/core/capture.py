@@ -210,8 +210,21 @@ class Capture:
             handle = self._proc.spawn(
                 ["airodump-ng", "-c", str(target.channel), "--bssid", str(target.bssid),
                  "-w", str(cap_prefix), adapter], privileged=True)
+            # Fingerprint is the bare cap_prefix, deliberately -- it's the one
+            # argv token guaranteed to appear verbatim in this process's real
+            # /proc/pid/cmdline (see is_process_group_alive). The old
+            # f"airodump-ng {target.bssid} {adapter}" form never matched:
+            # real argv is ["airodump-ng", "-c", <channel>, "--bssid",
+            # <bssid>, "-w", <cap_prefix>, <adapter>] -- bssid and adapter
+            # aren't adjacent to "airodump-ng" OR to each other ("-w
+            # <cap_prefix>" sits between them) -- confirmed against a real
+            # spawned process, same mismatch shape ADR-0015 found and fixed
+            # for crack.py's own fingerprints. cap_prefix is also
+            # job_id-derived, so it doubles as protection against a stale
+            # pgid reused by an unrelated process, not just proof "this is
+            # some airodump-ng".
             self._jobs.record_process(job_id, handle.pid, handle.pgid,
-                f"airodump-ng {target.bssid} {adapter}", repo=db_scope.jobs)  # ADR-0004 — the long-running
+                str(cap_prefix), repo=db_scope.jobs)  # ADR-0004 — the long-running
             # airodump-ng process is what orphan cleanup needs to find; the short-lived
             # aireplay-ng/aircrack-ng one-shots below are .wait()/.lines()-exhausted
             # immediately and never outlive this loop, so they don't need their own

@@ -109,7 +109,14 @@ class Enumerator:
             argv = ["nmap", "-oX", "-", *(["-p", options.ports] if options.ports else []),
                     *(["-sV"] if options.service_detection else []), subnet]
             handle = self._proc.spawn(argv, privileged=True)   # raw-socket scan types need sudo
-            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"nmap {target.bssid}",
+            # Fingerprint is the bare subnet, deliberately -- it's the real,
+            # standalone final argv token (see is_process_group_alive). The
+            # old f"nmap {target.bssid}" form could never match by
+            # construction, not just adjacency: target.bssid never appears
+            # anywhere in nmap's own argv at all (only subnet does) --
+            # confirmed against a real spawned process, same mismatch shape
+            # ADR-0015 found and fixed for crack.py's own fingerprints.
+            self._jobs.record_process(job_id, handle.pid, handle.pgid, subnet,
                                        repo=db_scope.jobs)  # ADR-0004
             xml = b"".join(l.encode() for l in handle.lines())   # nmap XML isn't line-streamable the
             # same way airodump CSV is; buffer to completion, or switch to a streaming XML parser later

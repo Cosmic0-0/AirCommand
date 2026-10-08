@@ -146,7 +146,18 @@ class Discovery:
                  "--write", str(csv_prefix), adapter],
                 privileged=True,
             )
-            self._jobs.record_process(job_id, handle.pid, handle.pgid, f"airodump-ng {adapter}",
+            # Fingerprint is the bare csv_prefix, deliberately -- it's the one
+            # argv token guaranteed to appear verbatim in this process's real
+            # /proc/pid/cmdline (see is_process_group_alive). The old
+            # f"airodump-ng {adapter}" form never matched: real argv is
+            # ["airodump-ng", "--band", <band>, "--write", <csv_prefix>,
+            # <adapter>], so "--band <band> --write" sits between the tool
+            # name and anything else -- confirmed against a real spawned
+            # process, same mismatch shape ADR-0015 found and fixed for
+            # crack.py's own fingerprints. csv_prefix is also job_id-derived,
+            # so it doubles as protection against a stale pgid reused by an
+            # unrelated process, not just proof "this is some airodump-ng".
+            self._jobs.record_process(job_id, handle.pid, handle.pgid, str(csv_prefix),
                                        repo=db_scope.jobs)
             # SECOND BUG FOUND ON REAL HARDWARE, independent of the flag typo
             # above: this loop used to be `for _line in handle.lines(): ...`,
