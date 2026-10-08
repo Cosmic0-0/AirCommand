@@ -237,6 +237,37 @@ def parse_iw_phy_bands(output: str) -> frozenset[Band]:
     return frozenset(bands)
 
 
+def filter_hc22000_lines_by_bssid(content: str, bssid: MacAddress) -> list[str]:
+    """hcxpcapngtool's -o output (the hashcat -m 22000 hash format) -> only the
+    lines whose AP MAC field matches `bssid`. ADR-0015: defense in depth, not
+    the only thing standing between Crack and an unauthorized network --
+    capture.py's own airodump-ng invocation already filters with --bssid, and
+    confirmed directly (real capture, real hcxpcapngtool run) that a
+    single-network capture converts to a single-network hash file -- but
+    cracking's authorization is "inherited from the Handshake's own Target"
+    (CONTEXT.md), so Crack itself should never blindly trust *whatever*
+    hashes a conversion step happened to produce; it should only ever attempt
+    the one this Handshake is actually for.
+
+    Line shape, confirmed against real hcxpcapngtool 6.2.7 output (not
+    assumed from docs): `WPA*<type>*<pmkid_or_mic>*<ap_mac>*<sta_mac>*
+    <essid_hex>*...*<message_pair>`, one hash per line, '*'-delimited, AP MAC
+    as field index 3, lowercase hex with no separators (e.g. "623761a16f51"
+    for 62:37:61:A1:6F:51). Blank lines (a trailing newline, most commonly)
+    and any line not shaped like a WPA hash line are silently skipped rather
+    than raising -- this is read-then-filter, not the only validation of
+    hcxpcapngtool's output; a file with nothing left after filtering is
+    `crack.py`'s own signal to treat the conversion as having found nothing
+    crackable, not this function's problem to raise over."""
+    target = bssid.value.replace(":", "").lower()
+    matches = []
+    for line in content.splitlines():
+        fields = line.split("*")
+        if len(fields) > 3 and fields[0] == "WPA" and fields[3].lower() == target:
+            matches.append(line)
+    return matches
+
+
 def parse_nmap_xml(xml_bytes: bytes) -> tuple[EnumHost, ...]:
     """nmap -oX output -> the hosts/ports it found. nmap's XML schema (host/
     address/hostnames/hostname/ports/port/state) is stable and well-documented;

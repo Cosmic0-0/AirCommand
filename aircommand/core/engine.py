@@ -81,7 +81,10 @@ class Engine:
             self.targets, self._db.enum_results, self._bus, self._jobs, self._rf, self._proc,
             self._db.new_connection_scope,
         )
-        self.crack = Crack(self._db.crack_results, self._bus, self._jobs, self._proc, self._db.new_connection_scope)
+        self.crack = Crack(
+            self._db.crack_results, self._bus, self._jobs, self._proc, self._db.new_connection_scope,
+            tick_interval=drive_tick_interval,
+        )
 
         self._sighting_batcher = SightingBatcher(self._bus, self._db.new_connection_scope)
         self._sighting_batcher.start()

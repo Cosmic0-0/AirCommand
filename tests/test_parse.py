@@ -2,6 +2,7 @@ import pytest
 
 from aircommand.core.domain import Band, EncryptionType, MacAddress
 from aircommand.core.parse import (
+    filter_hc22000_lines_by_bssid,
     parse_aircrack_handshake_check,
     parse_airmon_monitor_interface,
     parse_airodump_csv_line,
@@ -354,3 +355,51 @@ def test_5ghz_lower_bound_is_inclusive_and_upper_bound_exclusive():
     """5150.0 MHz counts as 5GHz; 5925.0 MHz (the 6GHz start) does not."""
     assert parse_iw_phy_bands("\t\t\t* 5150.0 MHz [30] (20.0 dBm)\n") == frozenset({Band.GHZ_5})
     assert parse_iw_phy_bands("\t\t\t* 5925.0 MHz [1] (20.0 dBm)\n") == frozenset()
+
+
+# --- filter_hc22000_lines_by_bssid (ADR-0015) --------------------------------
+# Line shape confirmed against real hcxpcapngtool 6.2.7 output (see ADR-0015):
+# this exact line is the real hash hcxpcapngtool produced from a real captured
+# handshake for BSSID 62:37:61:A1:6F:51, used verbatim here rather than a
+# hand-shortened stand-in.
+REAL_HC22000_LINE = (
+    "WPA*02*75fcb743e69bf8240862f2c1ab7653c1*623761a16f51*2e2314b5e60c*536f6d656f6e65*"
+    "4f67610a38bbf73cf6d039df322e86cf92b734c9f2cac32711f33dc307dc03fb*"
+    "0103007502010a000000000000000000012e5829b35c131a0aa886b640bc5898439865077e9786d9"
+    "126861773923a7fe890000000000000000000000000000000000000000000000000000000000000"
+    "00000000000000000000000000000001630140100000fac040100000fac040100000fac020000*02"
+)
+REAL_LINE_BSSID = MacAddress.parse("62:37:61:A1:6F:51")
+
+
+def test_matching_bssid_line_is_kept():
+    assert filter_hc22000_lines_by_bssid(REAL_HC22000_LINE, REAL_LINE_BSSID) == [REAL_HC22000_LINE]
+
+
+def test_mismatched_bssid_line_is_dropped():
+    assert filter_hc22000_lines_by_bssid(REAL_HC22000_LINE, MacAddress.parse("AA:BB:CC:DD:EE:01")) == []
+
+
+def test_bssid_match_is_case_insensitive():
+    # MacAddress's canonical form is uppercase (domain.py); hcxpcapngtool's
+    # own field is lowercase -- the comparison must not care about case.
+    assert filter_hc22000_lines_by_bssid(REAL_HC22000_LINE, MacAddress(value="62:37:61:a1:6f:51")) == [
+        REAL_HC22000_LINE
+    ]
+
+
+def test_only_matching_lines_survive_a_mixed_file():
+    other_bssid_line = REAL_HC22000_LINE.replace("623761a16f51", "aabbccddee01")
+    content = "\n".join([other_bssid_line, REAL_HC22000_LINE, ""])  # trailing blank line, same as a real file's
+
+    assert filter_hc22000_lines_by_bssid(content, REAL_LINE_BSSID) == [REAL_HC22000_LINE]
+
+
+def test_non_wpa_and_blank_lines_are_skipped_not_raised():
+    content = "\n".join(["", "   ", "not a hash line at all", REAL_HC22000_LINE])
+
+    assert filter_hc22000_lines_by_bssid(content, REAL_LINE_BSSID) == [REAL_HC22000_LINE]
+
+
+def test_empty_content_returns_empty_list():
+    assert filter_hc22000_lines_by_bssid("", REAL_LINE_BSSID) == []

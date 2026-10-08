@@ -203,6 +203,17 @@ not a suggestion). Concretely:
       run a crack to completion (use a small wordlist that you know contains
       the real key, to get a `Found` result in reasonable time, not just an
       `Exhausted` one).
+      **The underlying engine path is now confirmed this way, just not yet
+      through the actual GUI tab**: a real Engine + real `Crack`, driven
+      directly (not through `App`/the Crack panel), against a real captured
+      handshake and a real wordlist, through the real installed
+      `hcxpcapngtool` and `hashcat` — found the real password. Two real bugs
+      were found and fixed doing this: a silent hang on one non-UTF-8 byte in
+      hashcat's own stdout (ADR-0014), and hashcat's -m 22000 needing a real
+      `hcxpcapngtool` conversion step it was never given (ADR-0015) — before
+      ADR-0015, Crack could not find a real password at all, regardless of
+      ADR-0014's own fix. Still open: clicking through the actual Crack tab
+      for this same confirmation.
 - [ ] Status bar: confirm the privilege indicator looks right; if you can
       arrange it, let sudo's cache lapse (or kill the keepalive) and confirm
       the "LOST" warning actually shows up.
