@@ -59,13 +59,40 @@ def parse_airodump_csv_line(line: str) -> Network | None:
 
 
 def parse_aircrack_handshake_check(output: str) -> bool:
-    """True if a one-shot `aircrack-ng -b <bssid> -w /dev/null <cap_path>` run's
-    full stdout reports a captured handshake for that BSSID. Replaces the
-    original (confirmed wrong -- no such flag exists in airodump-ng's CSV output)
-    premise of checking a per-line handshake flag; see docs/roadmap.md Phase 1
-    item 1. -b restricts aircrack-ng's output to one BSSID, so a plain substring
-    check is enough -- no table parsing needed."""
-    return "handshake)" in output
+    """True if a one-shot `aircrack-ng -w /dev/null <cap_path>` run's full
+    stdout reports at least one captured handshake, via the per-network
+    summary table's "<Encryption> (N handshake)" column. See docs/adr/0012
+    for how this invocation shape was pinned down against REAL captured
+    handshakes (not assumed, and not the synthetic .cap crafting ADR-0011
+    already found didn't work): two confirmed, now-fixed problems,
+
+    1. `-b <bssid>` -- previously part of this invocation, now dropped --
+       suppresses the ENTIRE summary table (not just the interactive
+       network-selection prompt it was added for) whenever it matches
+       exactly one BSSID, which is every real call capture.py makes. The
+       table, and this text, never appeared at all with -b given, regardless
+       of whether a real handshake was present. Dropping -b is safe here
+       specifically because airodump-ng's own --bssid filter (capture.py's
+       airodump-ng invocation) already guarantees the .cap file this reads
+       contains exactly one network -- confirmed against 6 real capture
+       files from actual tool runs, every one auto-selected ("Choosing
+       first network as target.") with no interactive prompt.
+    2. This function's own check used to be a plain `"handshake)" in output`
+       substring test -- which matches "(0 handshake)" just as much as
+       "(1 handshake)", a real false-positive bug independent of (1) above,
+       caught only once real output (which legitimately prints "(0
+       handshake)" for a network with none yet) made the table reachable at
+       all. Now requires the parsed count to be > 0.
+
+    -w /dev/null itself still errors ("Processing dictionary file /dev/null")
+    -- confirmed harmless for this purpose: the error happens before the
+    table is printed and doesn't suppress it, and doesn't risk attempting a
+    real crack (the dictionary never validates), so there was no need to
+    supply or clean up a real dummy wordlist file."""
+    import re
+
+    match = re.search(r"\((\d+)\s+handshakes?\)", output)
+    return match is not None and int(match.group(1)) > 0
 
 
 @dataclass(frozen=True)

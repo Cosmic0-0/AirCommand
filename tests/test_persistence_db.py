@@ -48,6 +48,66 @@ def test_database_creates_all_seven_tables():
     assert EXPECTED_TABLES <= names
 
 
+def test_pre_adr_0012_audit_log_table_is_migrated_in_place(tmp_path):
+    """docs/adr/0012 added succeeded/error_detail to audit_log (SCHEMA_VERSION
+    1 -> 2). CREATE TABLE IF NOT EXISTS is a no-op against a table that
+    already exists, so a real on-disk database created by code that predates
+    this change -- exactly what every existing AirCommand install already
+    has sitting on disk -- needs Database.__init__'s own migration step to
+    actually pick up the new columns, not just a fresh SCHEMA string.
+    Builds that pre-ADR-0012 shape by hand (SCHEMA_VERSION 1's real audit_log
+    DDL, a real row inserted under it, user_version left at 1) rather than
+    assuming -- then opens it through the real Database and confirms both
+    the schema and the pre-existing row survive with sensible defaults."""
+    db_path = tmp_path / "pre-migration.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bssid TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, channel INTEGER NOT NULL,
+            label TEXT NOT NULL, date_added TEXT NOT NULL
+        );
+        CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_id INTEGER REFERENCES targets(id),
+            pid INTEGER, pgid INTEGER, process_fingerprint TEXT
+        );
+        CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_id INTEGER NOT NULL REFERENCES targets(id),
+            capture_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            client_mac TEXT, fired_at TEXT NOT NULL, frame_count INTEGER NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO targets (id, bssid, ssid, channel, label, date_added) VALUES "
+        "(1, 'AA:BB:CC:DD:EE:01', 'Test-SSID', 6, 'My house', '2024-01-01T00:00:00')"
+    )
+    job_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO jobs (job_id, kind, target_id) VALUES (?, 'capture_deauth', 1)", (job_id,)
+    )
+    conn.execute(
+        "INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count) "
+        "VALUES (1, ?, NULL, '2024-01-01T00:00:00', 5)", (job_id,)
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    db = Database(str(db_path))
+
+    columns = {row[1] for row in db._conn.execute("PRAGMA table_info(audit_log)")}
+    assert {"succeeded", "error_detail"} <= columns
+
+    entries = db.audit_log.for_target(1)
+    assert len(entries) == 1
+    assert entries[0].frame_count == 5  # pre-existing data survives the migration
+    assert entries[0].succeeded is True  # DEFAULT 1 -- a pre-ADR-0012 row has no reason to be flagged failed
+    assert entries[0].error_detail is None
+
+
 def test_network_upsert_returns_true_for_new_bssid():
     db = Database(":memory:")
 

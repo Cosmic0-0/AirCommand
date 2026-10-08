@@ -36,7 +36,7 @@ from aircommand.core.domain import (
     Target,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS networks (
@@ -83,13 +83,19 @@ CREATE TABLE IF NOT EXISTS handshakes (
     captured_at TEXT NOT NULL
 );
 
+-- succeeded/error_detail: added in SCHEMA_VERSION 2 (docs/adr/0012). A table
+-- that already existed under version 1 won't get these from CREATE TABLE IF
+-- NOT EXISTS (a no-op against an existing table) -- see
+-- _migrate_audit_log_success_columns below, called right after this script.
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_id INTEGER NOT NULL REFERENCES targets(id),
     capture_job_id TEXT NOT NULL REFERENCES jobs(job_id),
     client_mac TEXT,
     fired_at TEXT NOT NULL,
-    frame_count INTEGER NOT NULL
+    frame_count INTEGER NOT NULL,
+    succeeded INTEGER NOT NULL DEFAULT 1,
+    error_detail TEXT
 );
 
 -- outcome/outcome_key encode the sealed CrackOutcome union (domain.py):
@@ -118,6 +124,24 @@ CREATE TABLE IF NOT EXISTS enum_results (
     open_ports TEXT NOT NULL
 );
 """
+
+
+def _migrate_audit_log_success_columns(conn: sqlite3.Connection) -> None:
+    """One-shot, idempotent ALTER TABLE for a pre-SCHEMA_VERSION-2 audit_log
+    table that predates the succeeded/error_detail columns (docs/adr/0012) --
+    SCHEMA's own CREATE TABLE IF NOT EXISTS above is a no-op against a table
+    that already exists, so a column added to that CREATE TABLE statement
+    never reaches a database file created before this change. Checked via
+    PRAGMA table_info rather than try/except around ALTER TABLE -- SQLite
+    raises the same generic OperationalError for "duplicate column" as for a
+    dozen unrelated failures, so catching it would silently swallow real ones
+    too. A fresh database (SCHEMA already created both columns above) always
+    finds both already present here and does nothing."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    if "succeeded" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN succeeded INTEGER NOT NULL DEFAULT 1")
+    if "error_detail" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN error_detail TEXT")
 
 
 class _RetryingConnection(sqlite3.Connection):
@@ -178,6 +202,7 @@ class Database:
         self._conn = self._connect(check_same_thread=True)
         if self._conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
             self._conn.executescript(SCHEMA)
+            _migrate_audit_log_success_columns(self._conn)  # SCHEMA_VERSION 2, docs/adr/0012
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._conn.commit()
         self.networks = NetworkRepository(self._conn)
@@ -461,6 +486,7 @@ def _row_to_audit_log_entry(row: sqlite3.Row) -> AuditLogEntry:
         capture_job_id=JobId(uuid.UUID(row["capture_job_id"])),
         client_mac=MacAddress(value=row["client_mac"]) if row["client_mac"] is not None else None,
         fired_at=datetime.fromisoformat(row["fired_at"]), frame_count=row["frame_count"],
+        succeeded=bool(row["succeeded"]), error_detail=row["error_detail"],
     )
 
 
@@ -478,16 +504,23 @@ class AuditLogRepository:
         capture_job_id: JobId,
         client_mac: Optional[MacAddress],
         frame_count: int,
+        succeeded: bool = True,
+        error_detail: Optional[str] = None,
     ) -> AuditLogEntry:
         # ADR-0001: this write must complete before capture.py publishes
         # DeauthFired. Enforcing that order is capture.py's job (call this, then
         # bus.publish(...), never the reverse) -- this method can't enforce its
         # own caller's ordering.
+        #
+        # succeeded/error_detail (docs/adr/0012): defaulted so every call site
+        # that predates this change keeps recording exactly what it always
+        # recorded -- a successful, unremarkable firing.
         cursor = self._conn.execute(
-            """INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count,
+                                       succeeded, error_detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (target_id, str(capture_job_id), str(client_mac) if client_mac is not None else None,
-             datetime.now().isoformat(), frame_count))
+             datetime.now().isoformat(), frame_count, int(succeeded), error_detail))
         self._conn.commit()
         row = self._conn.execute("SELECT * FROM audit_log WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return _row_to_audit_log_entry(row)

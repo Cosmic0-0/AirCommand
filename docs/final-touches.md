@@ -83,11 +83,27 @@ up across a couple of real access points (not just one).
   `/dev/null` was always meant as a "we don't actually want to crack, just
   detect" placeholder — it doesn't work that way against the real binary.
 
-Needs its own session with a REAL captured handshake on real hardware (not
-more synthetic `.cap` crafting — that hit a wall, see ADR-0011) to confirm
-whether finding one holds, then very likely a real redesign of the
-detection mechanism (not a tweak) — a design decision, not routine
-implementation, per CLAUDE.md's model tiering.
+**Resolved 2026-10-08, against a REAL captured handshake (own network, own
+device join/leave/rejoin) — see `docs/adr/0012` for the full writeup.** Both
+suspicions above held, plus a second, independent bug found only once the
+first was fixed enough to expose it:
+
+- `-b <bssid>` (not `/dev/null`) is what suppresses the summary table —
+  confirmed on the real handshake file both ways. Dropped from `capture.py`'s
+  invocation; confirmed safe because `airodump-ng`'s own `--bssid` filter
+  already guarantees exactly one network per `.cap` file.
+- `parse_aircrack_handshake_check`'s old `"handshake)" in output` substring
+  check would have false-positived on a real `"(0 handshake)"` table row
+  (confirmed on real `.cap` files with zero handshakes) the moment the table
+  became reachable. Fixed to require the parsed count to be > 0.
+- The heavier redesign (EAPOL frame parsing, bypassing `aircrack-ng`'s CLI)
+  this item previously expected turned out NOT to be needed — the real fix
+  was two small, surgical changes. See ADR-0012's Decision/Considered
+  options for why.
+
+Still needs the real GUI re-run on real hardware to confirm a found
+handshake now actually shows up in the Capture panel — see item 2's own
+checklist entry below.
 
 ## 2. Drive the real GUI end-to-end, for real
 
@@ -121,19 +137,23 @@ not a suggestion). Concretely:
       mid-session: watch for your wifi dropping, which should not happen). Also
       confirm clicking Resume while a Capture holds the radio shows a status-bar
       error instead of doing nothing.
-- [ ] Target Actions tab: passive Capture against your own Target; confirm a
+- [x] Target Actions tab: passive Capture against your own Target; confirm a
       real Handshake gets captured and shows up in the panel and the Crack
       tab's picker. Try deauth-assisted Capture too — confirm the
       confirmation dialog actually appears, and that every burst shows up
-      live in the Audit Log tab, not just at the end. **A real blocker here
-      was found and fixed 2026-10-07, before this item was ever attempted for
-      real: `capture.py` was reading its own `.cap` file at the wrong path
-      (confirmed against the real `airodump-ng` binary's format string, not
-      assumed) — every real handshake capture would have raised
-      `FileNotFoundError` mid-loop and silently reported as a plain
-      `COMPLETED` with no Handshake ever recorded. See `docs/roadmap.md`'s
-      2026-10-07 entry. Still genuinely unverified: this checklist item
-      itself, on real hardware, now that the blocker is gone.**
+      live in the Audit Log tab, not just at the end. **Done — confirmed by
+      the user on real hardware 2026-10-08: both passive and deauth-assisted
+      Capture worked.** Three real blockers had to be found and fixed first:
+      `capture.py` reading its own `.cap` file at the wrong path (fixed
+      2026-10-07, see `docs/roadmap.md`'s entry that day — every real
+      handshake capture would have raised `FileNotFoundError` mid-loop and
+      silently reported plain `COMPLETED` with no Handshake recorded);
+      handshake detection never actually working against real
+      `aircrack-ng` output (item 1 above); and a failed deauth burst being
+      indistinguishable from a real one in both the audit log and the GUI.
+      The last two are `docs/adr/0012` — `DeauthFired`/`AuditLogEntry` now
+      carry `succeeded`/`error_detail`, surfaced in both `CapturePanel` and
+      `AuditLogView`.
 - [ ] Cancel button: start a deauth-assisted Capture, click Cancel mid-run,
       confirm the UI actually returns to its idle state (this was unit-tested
       against `FakeProcRunner`, but never against a real, slower-to-terminate
