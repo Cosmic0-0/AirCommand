@@ -2,7 +2,8 @@
 docs/design/gui-structure.md 'Discovery & Targets tab'.
 
 No table widget exists in CustomTkinter, so each row is built by hand inside a
-ctk.CTkScrollableFrame -- one CTkLabel per column plus a trailing action
+ctk.CTkScrollableFrame -- one read-only CTkEntry per column (selectable/
+copyable, unlike CTkLabel -- see table.py's docstring) plus a trailing action
 button, laid out with .grid(row=..., column=...), tracked in a
 dict[BSSID, dict] keyed by bssid so _upsert/_remove can update or destroy a
 specific row's widgets in place. Column widths/alignment go through
@@ -35,7 +36,7 @@ class NetworksView(ctk.CTkFrame):
     def __init__(self, master, app) -> None:
         super().__init__(master)
         self._app = app
-        self._rows: dict[BSSID, dict] = {}   # bssid -> {"labels": [CTkLabel,...], "button": CTkButton}
+        self._rows: dict[BSSID, dict] = {}   # bssid -> {"labels": [CTkEntry,...], "button": CTkButton}
         self._dialog: "_AddAsTargetDialog | None" = None
 
         header = build_header(self, self._COLUMNS)
@@ -98,6 +99,7 @@ class _AddAsTargetDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Label:").pack(padx=20, pady=(0, 0), anchor="w")
         self._label_entry = ctk.CTkEntry(self)
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._label_entry.bind("<Return>", lambda event: self._on_add())
 
         self._error_label = ctk.CTkLabel(self, text="", text_color="red")
         self._error_label.pack(padx=20, pady=(0, 10))
@@ -208,18 +210,22 @@ class _AddManuallyDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
         self._bssid_entry = ctk.CTkEntry(self)
         self._bssid_entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._bssid_entry.bind("<Return>", lambda event: self._on_add())
 
         ctk.CTkLabel(self, text="SSID:").pack(padx=20, pady=(0, 0), anchor="w")
         self._ssid_entry = ctk.CTkEntry(self)
         self._ssid_entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._ssid_entry.bind("<Return>", lambda event: self._on_add())
 
         ctk.CTkLabel(self, text="Channel:").pack(padx=20, pady=(0, 0), anchor="w")
         self._channel_entry = ctk.CTkEntry(self)
         self._channel_entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._channel_entry.bind("<Return>", lambda event: self._on_add())
 
         ctk.CTkLabel(self, text="Label:").pack(padx=20, pady=(0, 0), anchor="w")
         self._label_entry = ctk.CTkEntry(self)
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
+        self._label_entry.bind("<Return>", lambda event: self._on_add())
 
         self._error_label = ctk.CTkLabel(self, text="", text_color="red")
         self._error_label.pack(padx=20, pady=(0, 10))

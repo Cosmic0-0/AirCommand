@@ -176,8 +176,8 @@ def test_upsert_row_with_sighting_updated_updates_existing_row_in_place(tmp_path
         view.upsert_row(make_sighting_updated(make_network(signal=-70)))
 
         assert len(view._rows) == 1
-        signal_label = view._rows[MacAddress.parse(BSSID_1)]["labels"][4]
-        assert signal_label.cget("text") == "-70 dBm"
+        signal_entry = view._rows[MacAddress.parse(BSSID_1)]["labels"][4]
+        assert signal_entry.get() == "-70 dBm"
     finally:
         root.destroy()
 
@@ -271,7 +271,7 @@ def test_target_picker_remove_row_removes_row_and_regrids_the_remaining_one(tmp_
         assert target_1.bssid not in picker._rows
         assert target_2.bssid in picker._rows
         remaining = picker._rows[target_2.bssid]
-        assert remaining["labels"][0].cget("text") == "Net2"
+        assert remaining["labels"][0].get() == "Net2"
         # Re-gridded at row 0 -- no permanent gap left where the removed row was.
         assert remaining["labels"][0].grid_info()["row"] == 0
         assert remaining["button"].grid_info()["row"] == 0
