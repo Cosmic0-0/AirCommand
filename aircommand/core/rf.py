@@ -10,6 +10,7 @@ reservation that didn't happen).
 
 from __future__ import annotations
 
+import glob
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -53,6 +54,36 @@ class RadioCommandFailed(Exception):
         self.argv = argv
         self.returncode = returncode
         self.stderr_tail = stderr_tail
+
+
+class RadioBlocked(RadioCommandFailed):
+    """The adapter's rfkill switch is hard-blocked (a physical switch, firmware
+    setting, or -- in a VM -- a USB passthrough that isn't working). airmon-ng
+    would otherwise stop at an interactive y/n prompt about it that nothing here
+    can answer. Subclasses RadioCommandFailed so existing callers that catch that
+    (gui/app.py's Discovery start) already surface it as an error message."""
+
+    def __init__(self, adapter: str) -> None:
+        Exception.__init__(
+            self,
+            f"{adapter} is hard-blocked by rfkill (physical switch, BIOS/firmware, or a VM "
+            "USB passthrough problem) -- check `rfkill list` and `dmesg`",
+        )
+        self.argv = []
+        self.returncode = 1
+        self.stderr_tail = []
+
+
+def _is_hard_blocked(adapter: str) -> bool:
+    """True only if sysfs positively says so; unknown/missing paths read as not blocked."""
+    for path in glob.glob(f"/sys/class/net/{adapter}/phy80211/rfkill*/hard"):
+        try:
+            with open(path) as f:
+                if f.read().strip() == "1":
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 @dataclass(frozen=True)
@@ -176,6 +207,11 @@ class RadioController:
         # code IS checked (see RadioCommandFailed's docstring for why this one's
         # trustworthy enough to raise on and airmon-ng start's isn't); its output
         # has nothing this class needs to parse either way.
+        # Checked before check-kill so a blocked adapter doesn't also cost the
+        # operator their NetworkManager connection for nothing.
+        if _is_hard_blocked(self._adapter):
+            raise RadioBlocked(self._adapter)
+
         check_kill_handle = self._proc.spawn(["airmon-ng", "check", "kill"], privileged=True)
         "\n".join(check_kill_handle.lines())  # drain; ignored, see comment above
         check_kill_returncode = check_kill_handle.wait()

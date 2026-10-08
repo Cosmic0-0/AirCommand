@@ -130,6 +130,7 @@ def test_run_privileged_invokes_sudo_dash_n_with_matching_popen_shape(mock_popen
 
     mock_popen.assert_called_once_with(
         ["sudo", "-n", "airodump-ng", "--band", "abg", "wlan0mon"],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

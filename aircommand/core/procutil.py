@@ -274,8 +274,8 @@ class SubprocessRunner:
         if privileged:
             popen = self._sudo_run_privileged(argv)
         else:
-            popen = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      text=True, process_group=0)
+            popen = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True, process_group=0)
         return _RealProcHandle(popen, privileged=privileged, run_privileged=self._sudo_run_privileged)
         # Both branches must produce a Popen with the SAME shape (stdout=PIPE,
         # stderr=PIPE, text=True, process_group=0) — privilege.py's run_privileged
