@@ -6,7 +6,9 @@ from aircommand.core.engine import Engine
 from aircommand.core.domain import (
     AuditLogEntry,
     BSSID,
+    Band,
     CrackResultRow,
+    DiscoveryOptions,
     EncryptionType,
     Handshake,
     JobId,
@@ -18,14 +20,16 @@ from aircommand.core.domain import (
 )
 from aircommand.core.jobs import JobHandle
 from aircommand.core.allowlist import NotATargetError
-from aircommand.core.rf import AdapterBusy, AdapterMode, RadioCommandFailed
+from aircommand.core.rf import AdapterBusy, AdapterMode, BandUnavailable, RadioCommandFailed
 from aircommand.core.privilege import InvalidSudoPasswordError, PrivilegeStatus
 
 __all__ = [
     "Engine",
     "AuditLogEntry",
     "BSSID",
+    "Band",
     "CrackResultRow",
+    "DiscoveryOptions",
     "EncryptionType",
     "Handshake",
     "JobId",
@@ -38,6 +42,7 @@ __all__ = [
     "NotATargetError",
     "AdapterBusy",
     "AdapterMode",
+    "BandUnavailable",
     "RadioCommandFailed",
     "InvalidSudoPasswordError",
     "PrivilegeStatus",

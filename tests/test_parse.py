@@ -1,10 +1,11 @@
 import pytest
 
-from aircommand.core.domain import EncryptionType, MacAddress
+from aircommand.core.domain import Band, EncryptionType, MacAddress
 from aircommand.core.parse import (
     parse_aircrack_handshake_check,
     parse_airmon_monitor_interface,
     parse_airodump_csv_line,
+    parse_iw_phy_bands,
 )
 
 AP_HEADER = (
@@ -201,3 +202,155 @@ def test_old_minus_b_suppressed_shape_with_no_table_at_all_returns_false():
     )
 
     assert parse_aircrack_handshake_check(output) is False
+
+
+# --- parse_iw_phy_bands ---------------------------------------------------------
+#
+# Fixtures are trimmed excerpts of REAL `iw phy phy3 info` output from a dual-band
+# USB adapter (2026-10-08): every line below is verbatim, with its real tab
+# indentation (Band header 1 tab, "Frequencies:" 2 tabs, entries 3 tabs), and the
+# two MHz decoys sit where they really do -- "short GI (80 MHz)" inside Band 2's
+# VHT capabilities, "* short GI for 40 MHz" in the HT Capability overrides after
+# both bands. Tests that need other flag combinations build them from these pieces
+# plus single synthetic frequency lines in the same real format.
+
+_IW_PHY_HEADER = "Wiphy phy3\n\twiphy index: 3\n"
+
+_IW_BAND_1_2_4GHZ = (
+    "\tBand 1:\n"
+    "\t\tCapabilities: 0x196f\n"
+    "\t\tFrequencies:\n"
+    "\t\t\t* 2412.0 MHz [1] (20.0 dBm)\n"
+    "\t\t\t* 2462.0 MHz [11] (20.0 dBm)\n"
+    "\t\t\t* 2472.0 MHz [13] (20.0 dBm)\n"
+    "\t\t\t* 2484.0 MHz [14] (disabled)\n"
+)
+
+# Everything in Band 2 up to (not including) its frequency entries, including the
+# first decoy, "short GI (80 MHz)".
+_IW_BAND_2_PREAMBLE = (
+    "\tBand 2:\n"
+    "\t\tCapabilities: 0x196f\n"
+    "\t\tVHT Capabilities (0x03d071b2):\n"
+    "\t\t\tSupported Channel Width: neither 160 nor 80+80\n"
+    "\t\t\tRX LDPC\n"
+    "\t\t\tshort GI (80 MHz)\n"
+    "\t\t\tTX STBC\n"
+    "\t\tFrequencies:\n"
+)
+
+_IW_BAND_2_5GHZ_ENTRIES = (
+    "\t\t\t* 5180.0 MHz [36] (24.0 dBm)\n"
+    "\t\t\t* 5260.0 MHz [52] (24.0 dBm) (radar detection)\n"
+    "\t\t\t* 5700.0 MHz [140] (24.0 dBm) (radar detection)\n"
+    "\t\t\t* 5825.0 MHz [165] (30.0 dBm)\n"
+)
+
+# Everything after the last band, including the second decoy, "* short GI for 40 MHz".
+_IW_TRAILER = (
+    "\tSupported commands:\n"
+    "\t\t * new_interface\n"
+    "\tHT Capability overrides:\n"
+    "\t\t * MCS: ff ff ff ff ff ff ff ff ff ff\n"
+    "\t\t * supported channel width\n"
+    "\t\t * short GI for 40 MHz\n"
+    "\t\t * max A-MPDU length exponent\n"
+)
+
+_IW_BAND_2_5GHZ = _IW_BAND_2_PREAMBLE + _IW_BAND_2_5GHZ_ENTRIES
+
+_REAL_DUAL_BAND_IW_OUTPUT = _IW_PHY_HEADER + _IW_BAND_1_2_4GHZ + _IW_BAND_2_5GHZ + _IW_TRAILER
+
+
+def test_real_dual_band_output_reports_both_bands():
+    """The real dual-band excerpt, decoys and all, yields exactly 2.4GHz and 5GHz."""
+    assert parse_iw_phy_bands(_REAL_DUAL_BAND_IW_OUTPUT) == frozenset({Band.GHZ_2_4, Band.GHZ_5})
+
+
+def test_2_4ghz_only_phy_reports_only_2_4ghz():
+    """With Band 2 removed, the trailing "short GI for 40 MHz" decoy does not invent a band."""
+    output = _IW_PHY_HEADER + _IW_BAND_1_2_4GHZ + _IW_TRAILER
+
+    assert parse_iw_phy_bands(output) == frozenset({Band.GHZ_2_4})
+
+
+def test_5ghz_only_phy_reports_only_5ghz():
+    """A phy with only the 5GHz band section reports only 5GHz."""
+    output = _IW_PHY_HEADER + _IW_BAND_2_5GHZ + _IW_TRAILER
+
+    assert parse_iw_phy_bands(output) == frozenset({Band.GHZ_5})
+
+
+def test_band_whose_only_entries_are_disabled_is_not_offered():
+    """A Band 2 section present but with every 5GHz entry (disabled) does not add 5GHz."""
+    all_disabled = (
+        _IW_BAND_2_PREAMBLE
+        + "\t\t\t* 5180.0 MHz [36] (disabled)\n"
+        + "\t\t\t* 5200.0 MHz [40] (disabled)\n"
+        + "\t\t\t* 5825.0 MHz [165] (disabled)\n"
+    )
+    output = _IW_PHY_HEADER + _IW_BAND_1_2_4GHZ + all_disabled + _IW_TRAILER
+
+    assert parse_iw_phy_bands(output) == frozenset({Band.GHZ_2_4})
+
+
+def test_band_with_one_enabled_entry_among_disabled_ones_is_offered():
+    """One enabled 5GHz entry is enough, however many of its siblings are (disabled)."""
+    mostly_disabled = (
+        _IW_BAND_2_PREAMBLE
+        + "\t\t\t* 5180.0 MHz [36] (disabled)\n"
+        + "\t\t\t* 5200.0 MHz [40] (disabled)\n"
+        + "\t\t\t* 5825.0 MHz [165] (30.0 dBm)\n"
+    )
+    output = _IW_PHY_HEADER + _IW_BAND_1_2_4GHZ + mostly_disabled + _IW_TRAILER
+
+    assert parse_iw_phy_bands(output) == frozenset({Band.GHZ_2_4, Band.GHZ_5})
+
+
+def test_5ghz_band_of_only_radar_detection_channels_is_offered():
+    """DFS (radar detection) channels can be listened on, so they count as 5GHz."""
+    dfs_only = (
+        _IW_BAND_2_PREAMBLE
+        + "\t\t\t* 5260.0 MHz [52] (24.0 dBm) (radar detection)\n"
+        + "\t\t\t* 5500.0 MHz [100] (24.0 dBm) (radar detection)\n"
+    )
+
+    assert parse_iw_phy_bands(_IW_PHY_HEADER + dfs_only + _IW_TRAILER) == frozenset({Band.GHZ_5})
+
+
+def test_6ghz_only_entries_never_produce_a_band():
+    """6GHz is out of scope (ADR-0006): 5955 and 6115 MHz entries yield no Band at all."""
+    output = (
+        "\tBand 4:\n"
+        "\t\tFrequencies:\n"
+        "\t\t\t* 5955.0 MHz [1] (20.0 dBm)\n"
+        "\t\t\t* 6115.0 MHz [33] (20.0 dBm)\n"
+    )
+
+    assert parse_iw_phy_bands(output) == frozenset()
+
+
+def test_mhz_decoy_lines_without_a_real_frequency_entry_yield_nothing():
+    """"short GI (80 MHz)" and "* short GI for 40 MHz" alone are not frequency entries."""
+    output = "\t\t\tshort GI (80 MHz)\n\t\t * short GI for 40 MHz\n"
+
+    assert parse_iw_phy_bands(output) == frozenset()
+
+
+@pytest.mark.parametrize("output", ["", "\n", "   \n\t\n", "not iw output at all", "* MHz [] 2412.0\n\x00\xff garbage"])
+def test_empty_or_unrecognizable_input_returns_an_empty_set(output):
+    """Empty and garbage input return frozenset() instead of raising."""
+    assert parse_iw_phy_bands(output) == frozenset()
+
+
+def test_integer_mhz_form_is_also_accepted():
+    """`* 2412 MHz [1]` (no decimal part) is a harmless superset of the real float form."""
+    output = "\t\t\t* 2412 MHz [1] (20.0 dBm)\n"
+
+    assert parse_iw_phy_bands(output) == frozenset({Band.GHZ_2_4})
+
+
+def test_5ghz_lower_bound_is_inclusive_and_upper_bound_exclusive():
+    """5150.0 MHz counts as 5GHz; 5925.0 MHz (the 6GHz start) does not."""
+    assert parse_iw_phy_bands("\t\t\t* 5150.0 MHz [30] (20.0 dBm)\n") == frozenset({Band.GHZ_5})
+    assert parse_iw_phy_bands("\t\t\t* 5925.0 MHz [1] (20.0 dBm)\n") == frozenset()

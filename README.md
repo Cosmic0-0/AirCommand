@@ -23,8 +23,9 @@ just deprioritized.
 ## Features
 
 - **Discovery & Targets.** Lists nearby networks from passively observed
-  beacons, such as SSID, BSSID, channel, encryption, and signal. Mark any
-  network you own as a Target to allow Actions against it.
+  beacons, such as SSID, BSSID, channel, band, encryption, and signal. You
+  choose 2.4 GHz, 5 GHz, or both, limited to what your adapter supports.
+  Mark any network you own as a Target to allow Actions against it.
 - **Capture.** Records a WPA handshake from a Target, passively or with
   deauth-assisted capture. Deauth-assisted capture asks for confirmation
   each time and logs every burst to the Audit Log.
@@ -50,9 +51,11 @@ Cancel button. Neither fix has been confirmed through the real GUI yet.
 Enumerate, Crack, and crash recovery haven't been tested on real
 hardware at all.
 
-AirCommand supports only the 2.4GHz band today. 5GHz support is designed
-but not built. See
-[ADR-0006](docs/adr/0006-dual-band-support.md) for the plan.
+Dual-band Discovery is built and passes the automated suite. On real
+hardware, only the adapter capability check has run so far. The
+`airodump-ng --band` flags, the band control in the GUI, and 5GHz
+deauth-assisted Capture are unverified there. See
+[ADR-0013](docs/adr/0013-discovery-band-selection.md) for the design.
 
 [`docs/final-touches.md`](docs/final-touches.md) lists exactly what's
 verified and what's still open.
@@ -63,6 +66,8 @@ verified and what's still open.
 - Python 3.12 or newer.
 - `aircrack-ng`, `hashcat`, and `nmap` on your `PATH`.
 - A wifi adapter that supports monitor mode.
+- `iw`, which `airmon-ng` also calls. AirCommand uses it to read which bands
+  your adapter supports. Without it, the band control offers 2.4 GHz only.
 - Normal sudo rights on your account, not a passwordless `NOPASSWD`
   sudoers entry. AirCommand prompts once at launch and keeps the
   credential cache warm itself.
@@ -89,9 +94,9 @@ exist. Run `aircommand --help` for the full option list.
 
 Before your first launch, read
 [Prerequisites in `docs/usage.md`](docs/usage.md#prerequisites).
-AirCommand runs `airmon-ng check kill` the moment Discovery starts. This
-command stops NetworkManager system-wide, not just on the audited adapter,
-until the adapter returns to managed mode.
+AirCommand runs `airmon-ng check kill` the first time you click Start
+Discovery. This command stops NetworkManager system-wide, not just on the
+audited adapter, until the adapter returns to managed mode.
 
 ## Architecture
 

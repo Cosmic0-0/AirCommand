@@ -15,8 +15,8 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from aircommand.core.domain import JobKind
-from aircommand.core.parse import parse_airmon_monitor_interface
+from aircommand.core.domain import Band, JobKind
+from aircommand.core.parse import parse_airmon_monitor_interface, parse_iw_phy_bands
 from aircommand.core.procutil import ProcRunner
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,28 @@ class RadioBlocked(RadioCommandFailed):
         self.stderr_tail = []
 
 
+class BandUnavailable(Exception):
+    """Discovery can't be offered, or can't be started on, a band: either the
+    adapter's supported bands couldn't be determined (no phy found, `iw` missing
+    or failing, nothing parseable), or a requested band isn't one the adapter
+    supports. Deliberately not a RadioCommandFailed: no privileged command
+    failed, and callers (gui/app.py) handle it differently -- see ADR-0013."""
+
+
+def _phy_name(adapter: str) -> str | None:
+    """The kernel's name for the phy behind `adapter` ("phy3"), or None if it
+    can't be read. Read from sysfs, same place and same reason as
+    _is_hard_blocked below, and a module-level function for the same reason: it
+    is the seam tests patch, so no test depends on the machine's real adapters.
+    Needed because `iw list` prints every phy on the machine, and the laptop's
+    own card must not be mistaken for the adapter (ADR-0013)."""
+    try:
+        with open(f"/sys/class/net/{adapter}/phy80211/name") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def _is_hard_blocked(adapter: str) -> bool:
     """True only if sysfs positively says so; unknown/missing paths read as not blocked."""
     for path in glob.glob(f"/sys/class/net/{adapter}/phy80211/rfkill*/hard"):
@@ -106,6 +128,7 @@ class RadioController:
         self._proc = proc
         self._current: AdapterReservation | None = None
         self._monitor_adapter: str | None = None
+        self._supported_bands: frozenset[Band] | None = None   # cached on success only
         # TODO (init): set above — None means "adapter is currently in managed
         # mode (or never touched)"; once set, holds the interface name to use for
         # monitor-mode operations, which may differ from self._adapter (see
@@ -134,6 +157,39 @@ class RadioController:
         # both want monitor mode, so there's nothing to switch. Engine.shutdown()
         # is what guarantees the adapter isn't left in monitor mode once AirCommand
         # isn't running -- see release_to_managed() below and engine.py's TODO.
+
+    def supported_bands(self) -> frozenset[Band]:
+        """The Bands this adapter can listen on, from `iw phy <phy> info` -- the
+        one phy behind the adapter, not `iw list` (see _phy_name). Needs no
+        privilege and no reservation, so it is safe to call at any time, including
+        before the first reserve(). Cached on success (an adapter's bands don't
+        change); a failure is never cached, so replugging or fixing `iw` heals
+        without a restart.
+
+        The interface name queried is the monitor one if airmon-ng renamed the
+        adapter (the original name no longer exists then), else the original.
+        Raises BandUnavailable on any failure to find out -- never guesses."""
+        if self._supported_bands is not None:
+            return self._supported_bands
+        interface = self._monitor_adapter or self._adapter
+        phy = _phy_name(interface)
+        if phy is None:
+            raise BandUnavailable(f"couldn't find the wifi phy behind {interface}")
+        argv = ["iw", "phy", phy, "info"]
+        try:
+            handle = self._proc.spawn(argv, privileged=False)
+        except OSError as e:   # `iw` not installed / not on PATH
+            raise BandUnavailable(f"couldn't run `{' '.join(argv)}`: {e}") from e
+        output = "\n".join(handle.lines())   # drain before wait(), same as the airmon-ng calls
+        returncode = handle.wait()
+        if returncode != 0:
+            detail = " ".join(handle.stderr_tail()[-3:]) or "(no stderr captured)"
+            raise BandUnavailable(f"`{' '.join(argv)}` failed (exit {returncode}): {detail}")
+        bands = parse_iw_phy_bands(output)
+        if not bands:
+            raise BandUnavailable(f"`{' '.join(argv)}` listed no usable 2.4 GHz or 5 GHz channels")
+        self._supported_bands = bands
+        return bands
 
     def release_to_managed(self) -> None:
         """Called by Engine.shutdown(), NOT by release() above -- see release()'s

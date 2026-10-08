@@ -5,11 +5,12 @@ docs/design/core-gui-boundary.md 'Testability'.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from aircommand.core.domain import EncryptionType, EnumHost, MacAddress, Network
+from aircommand.core.domain import Band, EncryptionType, EnumHost, MacAddress, Network
 
 
 def parse_airodump_csv_line(line: str) -> Network | None:
@@ -192,6 +193,48 @@ def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
     # for the exact string this broke on.
     match = re.search(r"monitor mode vif enabled (?:for \S+ )?on (?:\[\w+\])?(\w+)", output)
     return match.group(1) if match else fallback
+
+
+# One `iw phy <phy> info` frequency entry: "\t\t\t* 2412.0 MHz [1] (20.0 dBm)".
+# See parse_iw_phy_bands's docstring for why the bracket is kept.
+_IW_FREQUENCY_LINE = re.compile(r"^\s*\*\s+(\d+(?:\.\d+)?)\s+MHz\s+\[\d+\](.*)$")
+
+
+def parse_iw_phy_bands(output: str) -> frozenset[Band]:
+    """`iw phy <phy> info`'s stdout -> the Bands that phy can use. Parses the
+    single-phy form, not `iw list`: `iw list` prints every phy on the machine
+    (on the dev machine phy3 is the USB adapter and phy0 is the laptop's
+    internal card, which also has a 5GHz band), so parsing it would report
+    bands the adapter does not have.
+
+    HARDWARE-CONFIRMED against a real dual-band adapter's output on
+    2026-10-08: frequencies print as floats (`2412.0 MHz [1]`, not `2412`);
+    the flags seen after the channel are `(disabled)` (2.4GHz channel 14) and
+    `(radar detection)` (DFS channels); and two lines elsewhere in the output
+    mention MHz without being frequency entries (`short GI (80 MHz)` and
+    `* short GI for 40 MHz`). Those two are rejected because the pattern
+    wants `* <number> MHz` (checked: they fail with or without the bracket
+    requirement). The bracketed channel number is kept as a second guard
+    against any other `* <number> MHz` line that is not a frequency entry.
+
+    Each line is classified independently by its frequency alone; the
+    "Band 1:" / "Band 2:" headers are not used. A band counts as supported if
+    at least one of its frequencies is not `(disabled)`. `(radar detection)`
+    and `(no IR)` channels still count -- they can be listened on. 2400-2499
+    MHz is 2.4GHz and 5150-5924 MHz is 5GHz; anything else (4.9GHz, 6GHz,
+    garbage) is ignored, so 6GHz never produces a Band (ADR-0006). Empty or
+    unrecognizable input returns an empty set rather than raising."""
+    bands: set[Band] = set()
+    for line in output.splitlines():
+        match = _IW_FREQUENCY_LINE.match(line)
+        if match is None or "(disabled)" in match.group(2):
+            continue
+        mhz = float(match.group(1))
+        if 2400 <= mhz < 2500:
+            bands.add(Band.GHZ_2_4)
+        elif 5150 <= mhz < 5925:
+            bands.add(Band.GHZ_5)
+    return frozenset(bands)
 
 
 def parse_nmap_xml(xml_bytes: bytes) -> tuple[EnumHost, ...]:

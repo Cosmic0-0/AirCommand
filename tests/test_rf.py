@@ -1,8 +1,8 @@
 import pytest
 
-from aircommand.core.domain import JobKind
+from aircommand.core.domain import Band, JobKind
 from aircommand.core.procutil import FakeProcRunner
-from aircommand.core.rf import AdapterBusy, AdapterMode, RadioCommandFailed, RadioController
+from aircommand.core.rf import AdapterBusy, AdapterMode, BandUnavailable, RadioCommandFailed, RadioController
 
 # Realistic (researched, not hardware-captured) airmon-ng rename-announcement
 # line -- see parse.py's parse_airmon_monitor_interface, already tested against
@@ -321,3 +321,132 @@ def test_hard_blocked_adapter_raises_before_any_spawn(monkeypatch):
     with pytest.raises(RadioCommandFailed, match="hard-blocked"):
         rc.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
     assert spawned_argvs == []
+
+
+# --- supported_bands() (ADR-0013) -----------------------------------------------------
+
+# Trimmed from a real `iw phy phy3 info` run on 2026-10-08 (a dual-band USB adapter);
+# parse_iw_phy_bands has its own, fuller tests in test_parse.py.
+IW_DUAL_BAND = [
+    "Wiphy phy3",
+    "\tBand 1:",
+    "\t\tFrequencies:",
+    "\t\t\t* 2412.0 MHz [1] (20.0 dBm)",
+    "\t\t\t* 2484.0 MHz [14] (disabled)",
+    "\tBand 2:",
+    "\t\tFrequencies:",
+    "\t\t\t* 5180.0 MHz [36] (24.0 dBm)",
+    "\t\t\t* 5260.0 MHz [52] (24.0 dBm) (radar detection)",
+]
+IW_2_4_ONLY = IW_DUAL_BAND[:5]
+
+
+class _RecordingRunner:
+    """Delegates to a FakeProcRunner but records (argv, privileged) for every
+    spawn -- FakeProcRunner's own on_spawn hook doesn't see `privileged`, and
+    supported_bands() must be unprivileged. Optionally raises on spawn, to
+    simulate a binary that isn't installed."""
+
+    def __init__(self, script, raises=None):
+        self.calls = []
+        self._raises = raises
+        self._inner = FakeProcRunner(script=script)
+
+    def spawn(self, argv, *, privileged):
+        self.calls.append((list(argv), privileged))
+        if self._raises is not None and argv[0] == "iw":
+            raise self._raises
+        return self._inner.spawn(argv, privileged=privileged)
+
+
+@pytest.fixture
+def phy3(monkeypatch):
+    """Records which interface name _phy_name was asked about, and resolves any to phy3."""
+    asked = []
+    monkeypatch.setattr("aircommand.core.rf._phy_name", lambda adapter: asked.append(adapter) or "phy3")
+    return asked
+
+
+def test_supported_bands_runs_iw_phy_info_unprivileged_and_parses_both_bands(phy3):
+    runner = _RecordingRunner({"iw": IW_DUAL_BAND})
+    rf = RadioController("wlan0", runner)
+
+    assert rf.supported_bands() == frozenset({Band.GHZ_2_4, Band.GHZ_5})
+
+    # `iw phy <name> info`, NOT `iw list`: that prints every phy on the machine, including
+    # the laptop's own card, and would offer bands the adapter doesn't have.
+    assert runner.calls == [(["iw", "phy", "phy3", "info"], False)]
+
+
+def test_supported_bands_reports_a_2_4ghz_only_adapter_honestly(phy3):
+    rf = RadioController("wlan0", _RecordingRunner({"iw": IW_2_4_ONLY}))
+    assert rf.supported_bands() == frozenset({Band.GHZ_2_4})
+
+
+def test_supported_bands_needs_no_reservation_and_touches_no_radio_mode(phy3):
+    runner = _RecordingRunner({"iw": IW_DUAL_BAND})
+    rf = RadioController("wlan0", runner)
+    rf.supported_bands()
+    assert [argv[0] for argv, _ in runner.calls] == ["iw"]   # no airmon-ng, no systemctl
+    assert phy3 == ["wlan0"]   # asked about the original (managed-mode) name
+
+
+def test_supported_bands_asks_about_the_monitor_interface_once_airmon_renamed_it(phy3):
+    """Once airmon-ng has renamed the adapter, the original name no longer exists
+    (sysfs has nothing under it), so the phy must be looked up by the new one."""
+    runner = _RecordingRunner({"airmon-ng": AIRMON_START_OUTPUT_RENAMES, "iw": IW_DUAL_BAND})
+    rf = RadioController("wlan0", runner)
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    rf.supported_bands()
+
+    assert phy3 == ["wlan0mon"]
+
+
+def test_supported_bands_is_cached_after_a_success(phy3):
+    runner = _RecordingRunner({"iw": IW_DUAL_BAND})
+    rf = RadioController("wlan0", runner)
+    rf.supported_bands()
+    rf.supported_bands()
+    assert len(runner.calls) == 1
+
+
+def test_supported_bands_raises_when_the_phy_cant_be_found_and_spawns_nothing(monkeypatch):
+    monkeypatch.setattr("aircommand.core.rf._phy_name", lambda adapter: None)
+    runner = _RecordingRunner({"iw": IW_DUAL_BAND})
+    rf = RadioController("wlan0", runner)
+    with pytest.raises(BandUnavailable, match="wlan0"):
+        rf.supported_bands()
+    assert runner.calls == []
+
+
+def test_supported_bands_raises_when_iw_is_not_installed(phy3):
+    rf = RadioController("wlan0", _RecordingRunner({}, raises=FileNotFoundError("iw")))
+    with pytest.raises(BandUnavailable, match="iw"):
+        rf.supported_bands()
+
+
+def test_supported_bands_raises_with_stderr_when_iw_fails(phy3):
+    runner = FakeProcRunner(
+        script={"iw": []}, returncodes={"iw": 237}, stderr={"iw": ["command failed: No such device (-19)"]}
+    )
+    rf = RadioController("wlan0", runner)
+    with pytest.raises(BandUnavailable, match="No such device"):
+        rf.supported_bands()
+
+
+def test_supported_bands_raises_rather_than_guessing_when_nothing_parses(phy3):
+    rf = RadioController("wlan0", FakeProcRunner(script={"iw": ["some unrelated output"]}))
+    with pytest.raises(BandUnavailable, match="no usable"):
+        rf.supported_bands()
+
+
+def test_a_failed_query_is_not_cached(phy3):
+    script = {"iw": []}
+    runner = FakeProcRunner(script=script)
+    rf = RadioController("wlan0", runner)
+    with pytest.raises(BandUnavailable):
+        rf.supported_bands()
+
+    script["iw"] = IW_DUAL_BAND   # e.g. the operator replugged the adapter
+    assert rf.supported_bands() == frozenset({Band.GHZ_2_4, Band.GHZ_5})

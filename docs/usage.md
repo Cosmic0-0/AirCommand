@@ -24,8 +24,8 @@ a hard boundary, not just a suggestion.
   Look for something like `wlan0` or `wlp3s0`. Pass this as-is — AirCommand
   switches it in and out of monitor mode itself via `airmon-ng` as needed; you
   don't need to (and shouldn't) put it in monitor mode yourself first.
-- AirCommand runs `airmon-ng check kill` automatically the moment Discovery
-  starts (i.e., effectively at launch), which stops NetworkManager (and
+- AirCommand runs `airmon-ng check kill` automatically the first time you
+  click Start Discovery (not at launch), which stops NetworkManager (and
   wpa_supplicant) system-wide — not just on the audited adapter, so any other
   NetworkManager-managed connection (e.g. ethernet) drops too. NetworkManager
   restarts automatically whenever the adapter returns to managed mode
@@ -59,21 +59,30 @@ exist. Pass `--help` to see all options.
    anything, including passive Discovery — there's no reduced-privilege mode.
    A wrong password re-prompts with an error; cancelling either prompt exits
    the app.
-2. Discovery starts automatically the moment the window opens. Give it a few
-   seconds — it polls a CSV file `airodump-ng` writes on a short interval, so
-   networks don't all appear instantly.
+2. Discovery does not start by itself. Pick a band in the **Band** dropdown,
+   then click **Start Discovery**. Give it a few seconds. It polls a CSV file
+   `airodump-ng` writes on a short interval, so networks don't all appear
+   instantly.
 
 ## The four tabs
 
 ### Discovery & Targets
 
 Passive listening — this needs no authorization and runs against any nearby
-network. The table fills in as beacons are seen: SSID, BSSID, channel,
+network. The table fills in as beacons are seen: SSID, BSSID, channel, band,
 encryption, signal, last seen. It shows the current Discovery session only:
 it starts empty every time you launch AirCommand, and it is not a history of
 every network ever seen. Networks you want to keep are the ones you add as
 Targets.
 
+- **Band** and **Start Discovery**: the dropdown lists only the bands your
+  adapter supports, read from `iw`: "2.4 GHz", "5 GHz", and "2.4 + 5 GHz" when
+  it has both. An adapter with one band shows one entry. The dropdown is
+  editable before the first Start and while Discovery is paused, and greyed out
+  while a scan runs. A change applies the next time you click Resume or New
+  Session. If AirCommand can't read the adapter's bands, the dropdown offers
+  2.4 GHz only and the status bar says why. Scanning both bands means each
+  channel is visited less often, so networks can take longer to show up.
 - **Add as Target**: click it on a row to authorize that specific network for
   gated Actions (Capture, Enumerate). You'll be asked for a label (e.g.
   "My house") — the BSSID/SSID/channel are pre-filled from the row.
@@ -88,7 +97,10 @@ Targets.
   takes about a second to finish (the button reads "Pausing…" and both
   buttons are greyed out until the scan has really stopped). While paused the
   table stays as it was, so you can still "Add as Target" from it. Resume
-  continues the same table.
+  continues the same table, even if you changed the band first: rows from the
+  old band stay (check Last Seen to tell they are stale) and new rows from the
+  new band join them. A dual-band router shows up as two rows, one per band, and
+  each needs its own Target.
 - **New Session**: greyed out while Discovery is scanning; click Pause first,
   then New Session to clear the table and start a fresh scan, without closing
   and reopening AirCommand. Anything still in range reappears within a few
