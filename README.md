@@ -48,8 +48,22 @@ Real-hardware testing is still partial. Discovery is confirmed end to
 end. Two real bugs were found and fixed in Capture through targeted
 real-subprocess testing: a wrong handshake file path, and a hang in the
 Cancel button. Neither fix has been confirmed through the real GUI yet.
-Enumerate, Crack, and crash recovery haven't been tested on real
-hardware at all.
+
+Crack found and fixed two more real bugs the same way. One was a silent
+hang on one non-UTF-8 byte in hashcat's own output. The other was a
+missing conversion step that meant hashcat could never read a real
+capture at all. Both are fixed: a real crack now finds the real
+password against a real capture and wordlist, through the real engine.
+That hasn't been confirmed through the Crack tab itself yet.
+
+The same testing found that startup crash recovery had never actually
+been able to recognize an orphaned process, for any of the four tools
+AirCommand spawns. That's fixed too, confirmed against real spawned
+processes. See
+[ADR-0014](docs/adr/0014-non-utf8-bytes-killing-a-drain-thread.md) and
+[ADR-0015](docs/adr/0015-hcxpcapngtool-conversion-step.md) for both.
+
+Enumerate hasn't been tested on real hardware at all.
 
 Dual-band Discovery is built and passes the automated suite. On real
 hardware, only the adapter capability check has run so far. The
