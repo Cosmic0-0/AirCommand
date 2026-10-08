@@ -312,3 +312,12 @@ def test_airmon_stop_nonzero_does_not_raise():
         ["airmon-ng", "stop", "wlan0mon"],
         ["systemctl", "restart", "NetworkManager"],
     ]
+
+
+def test_hard_blocked_adapter_raises_before_any_spawn(monkeypatch):
+    spawned_argvs = []
+    monkeypatch.setattr("aircommand.core.rf._is_hard_blocked", lambda adapter: True)
+    rc = RadioController("wlan0", FakeProcRunner(script={}, on_spawn=spawned_argvs.append))
+    with pytest.raises(RadioCommandFailed, match="hard-blocked"):
+        rc.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+    assert spawned_argvs == []

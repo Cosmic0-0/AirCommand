@@ -96,6 +96,7 @@ class SudoSession:
         # at startup instead of a live handle.
         return subprocess.Popen(
             ["sudo", "-n", *argv],  # -n so a lapsed cache fails fast (non-zero exit
+            stdin=subprocess.DEVNULL,  # tools like airmon-ng can prompt on stdin; EOF beats hanging
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,  # immediately) instead of hanging
             text=True, process_group=0,  # own pgid, SAME session as the primed credential
         )
