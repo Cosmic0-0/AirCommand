@@ -51,6 +51,12 @@ from aircommand.core.parse import _format_hashrate
 from aircommand.core.procutil import FakeProcRunner
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
+BSSID_1_HEX = "aabbccddee01"  # BSSID_1.value, lowercase, no colons -- the AP-MAC
+# field shape filter_hc22000_lines_by_bssid (parse.py) actually matches against,
+# confirmed against real hcxpcapngtool output (see ADR-0015).
+WRONG_BSSID_HEX = "112233445566"  # any value != BSSID_1_HEX -- simulates
+# hcxpcapngtool extracting a hash for a DIFFERENT network than this Handshake's
+# own Target, which filter_hc22000_lines_by_bssid must reject (ADR-0015).
 
 # Gets Capture's own driver to find a handshake on its very first check (same
 # recipe, same reasoning, as test_capture_acceptance.py's
@@ -98,16 +104,31 @@ def _slow_hashcat_lines(count: int, delay_s: float):
         yield _status_json((i, count), 1_000_000)
 
 
-def _make_on_spawn(hashcat_key: Optional[str]) -> Callable[[list[str]], None]:
-    """Combines two FakeProcRunner on_spawn side effects needed here:
+def _hc22000_line(bssid_hex: str = BSSID_1_HEX) -> str:
+    """A syntactically-valid-shaped hc22000 line (ADR-0015) for FakeProcRunner's
+    hcxpcapngtool on_spawn to write -- only the first four '*'-delimited fields
+    matter to anything in this codebase (filter_hc22000_lines_by_bssid checks
+    fields[0] == "WPA" and fields[3], parse.py), so the rest are placeholder
+    hex, not a real captured handshake's bytes."""
+    return f"WPA*02*{'0' * 32}*{bssid_hex}*{'1' * 12}*{'746573742d73736964'}*{'0' * 64}*02"
+
+
+def _make_on_spawn(hashcat_key: Optional[str], *, conversion_bssid_hex: str = BSSID_1_HEX) -> Callable[[list[str]], None]:
+    """Combines the FakeProcRunner on_spawn side effects needed here:
     airodump-ng's -w <cap_path> (so Capture's _drive has a real file to
     sha256 -- same guarded check as test_capture_acceptance.py's
     _write_cap_file_on_spawn, and needed for the same reason: this file's
     aircrack-ng invocation also carries '-w', for its unrelated /dev/null
-    wordlist argument), and hashcat's --outfile <path> (so Crack's _drive has
-    a real file to read the cracked plaintext from). hashcat_key=None means
-    "don't write the outfile at all" -- the wordlist-exhausted/cancelled
-    scenarios, where a real hashcat run would leave no outfile behind either."""
+    wordlist argument), hcxpcapngtool's -o <path> (so Crack's new conversion
+    step, ADR-0015, has a real file to read a hash line from -- the shape
+    filter_hc22000_lines_by_bssid actually checks, not a real tool run), and
+    hashcat's --outfile <path> (so Crack's _drive has a real file to read the
+    cracked plaintext from). hashcat_key=None means "don't write the outfile
+    at all" -- the wordlist-exhausted/cancelled scenarios, where a real
+    hashcat run would leave no outfile behind either. conversion_bssid_hex
+    lets a test simulate hcxpcapngtool extracting a hash for the WRONG
+    network (WRONG_BSSID_HEX) -- the filter is what's actually under test
+    there, not the conversion step itself."""
 
     def on_spawn(argv: list[str]) -> None:
         if argv[0] == "airodump-ng" and "-w" in argv:
@@ -117,6 +138,9 @@ def _make_on_spawn(hashcat_key: Optional[str]) -> Callable[[list[str]], None]:
             cap_prefix = argv[argv.index("-w") + 1]
             cap_path = Path(f"{cap_prefix}-01.cap")
             cap_path.write_bytes(CAP_FILE_BYTES)
+        elif argv[0] == "hcxpcapngtool":
+            hash_file_path = Path(argv[argv.index("-o") + 1])
+            hash_file_path.write_text(_hc22000_line(conversion_bssid_hex) + "\n")
         elif argv[0] == "hashcat" and hashcat_key is not None:
             outfile_path = Path(argv[argv.index("--outfile") + 1])
             outfile_path.write_text(hashcat_key + "\n")
@@ -127,14 +151,17 @@ def _make_on_spawn(hashcat_key: Optional[str]) -> Callable[[list[str]], None]:
 def _make_engine(
     tmp_path, script: dict, hashcat_key: Optional[str] = None,
     returncodes: Optional[dict[str, int]] = None,
+    conversion_bssid_hex: str = BSSID_1_HEX,
+    running_polls: Optional[dict[str, int]] = None,
 ) -> Engine:
     return Engine(
         db_path=":memory:",
         work_dir=tmp_path,
         adapter="wlan0",
         proc=FakeProcRunner(
-            script=script, on_spawn=_make_on_spawn(hashcat_key),
-            running_polls={"airodump-ng": 1},
+            script=script,
+            on_spawn=_make_on_spawn(hashcat_key, conversion_bssid_hex=conversion_bssid_hex),
+            running_polls={"airodump-ng": 1, **(running_polls or {})},
             returncodes=returncodes or {},
         ),
         # Zero interval: Pacer.due() fires on every check -- same trick
@@ -189,6 +216,7 @@ def _base_script(hashcat_lines) -> dict:
         "airmon-ng": ["monitor mode already enabled on wlan0"],
         "airodump-ng": [],  # content unused -- see AIRCRACK_HANDSHAKE_FOUND's comment
         "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
+        "hcxpcapngtool": [],  # content unused -- on_spawn writes the hc22000 file directly (ADR-0015)
         "hashcat": hashcat_lines,
     }
 
@@ -317,6 +345,134 @@ def test_crack_cancelled_before_finishing(tmp_path):
     assert engine.crack.list_results(handshake) == [result_row]
 
 
+# --- ADR-0015: the hcxpcapngtool conversion step's own failure modes --------
+# hashcat never even gets spawned in any of these -- the conversion step is
+# what's under test, so each scenario's assertion that results in exactly one
+# CrackResult with no plaintext and no COMPLETED stop_reason is also implicit
+# proof hashcat wasn't reached (a COMPLETED/Found result could only come from
+# a real hashcat run writing outfile_path).
+
+def test_crack_reports_error_when_conversion_finds_no_matching_bssid(tmp_path):
+    """hcxpcapngtool "succeeds" (real exit 0) but the only hash it extracted is
+    for a DIFFERENT network than this Handshake's own Target -- simulates a
+    capture that, for whatever reason, didn't stay single-network the way
+    capture.py's own --bssid filter is relied on to guarantee. filter_hc22000_
+    lines_by_bssid (parse.py) must reject it; crack.py must then skip hashcat
+    entirely rather than attempt an unauthorized network's hash (ADR-0015 --
+    cracking's authorization is inherited from the Handshake's own Target,
+    CONTEXT.md)."""
+    engine = _make_engine(tmp_path, _base_script([]), hashcat_key=None, conversion_bssid_hex=WRONG_BSSID_HEX)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    handle = engine.crack.start(handshake, wordlist_path)
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(results) == 1
+    result_row = results[0].result
+    assert isinstance(result_row.outcome, Exhausted)
+    assert result_row.stop_reason == StopReason.ERROR
+
+    assert engine.crack.list_results(handshake) == [result_row]
+
+
+def test_crack_reports_error_when_conversion_process_fails(tmp_path):
+    """hcxpcapngtool itself exits non-zero (a real crash, an unreadable .cap --
+    same "don't trust an external tool's exit to mean success" posture ADR-
+    0009 already established for hashcat, applied to this new call site too).
+    Same ERROR classification as every other "never got a real crack attempt
+    in" case -- no new CrackOutcome variant (domain.py's sealed set is
+    unchanged)."""
+    engine = _make_engine(tmp_path, _base_script([]), hashcat_key=None, returncodes={"hcxpcapngtool": 1})
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    handle = engine.crack.start(handshake, wordlist_path)
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(results) == 1
+    result_row = results[0].result
+    assert isinstance(result_row.outcome, Exhausted)
+    assert result_row.stop_reason == StopReason.ERROR
+
+    assert engine.crack.list_results(handshake) == [result_row]
+
+
+def test_crack_reports_error_when_conversion_times_out(tmp_path):
+    """hcxpcapngtool never exits at all -- _await_conversion's bounded wait
+    (ADR-0015, the same ProcHandle.poll()-based idiom ADR-0008/0011 already
+    established) must still kill it and give up, not hang the job the way an
+    unbounded handle.wait() would have. engine.crack._conversion_timeout_s is
+    monkeypatched directly to keep this test fast -- same established
+    precedent as test_crack_cleans_up_even_if_new_connection_scope_raises
+    below, reaching into a private attribute of a constructed Crack via
+    Engine, rather than threading a conversion_timeout override through
+    Engine's own constructor for a tunable nothing else needs."""
+    engine = _make_engine(
+        tmp_path, _base_script([]), hashcat_key=None,
+        running_polls={"hcxpcapngtool": 10_000},  # never exits on its own within this test
+    )
+    engine.crack._conversion_timeout_s = 0.05
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    started = time.monotonic()
+    handle = engine.crack.start(handshake, wordlist_path)
+    handle.wait_for_test(timeout=2.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"took {elapsed:.2f}s -- expected to give up at the ~0.05s conversion timeout"
+    assert len(results) == 1
+    result_row = results[0].result
+    assert isinstance(result_row.outcome, Exhausted)
+    assert result_row.stop_reason == StopReason.ERROR
+
+    assert engine.crack.list_results(handshake) == [result_row]
+
+
+def test_crack_cancelled_during_conversion(tmp_path):
+    """Cancelling while hcxpcapngtool is still running must end the job via
+    the CANCELLED path, not ERROR -- same precedence rule crack.py's finally
+    block already applies once hashcat is running (token.is_cancelled() wins
+    over any other signal); this proves it holds for the new conversion step
+    too, on a real thread (not scripted-instant), same reasoning as this
+    file's own module docstring point 1."""
+    engine = _make_engine(
+        tmp_path, _base_script([]), hashcat_key=None,
+        running_polls={"hcxpcapngtool": 10_000},
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    results = []
+    engine.subscribe(results.append, CrackResult)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    handle = engine.crack.start(handshake, wordlist_path)
+    time.sleep(PRE_CANCEL_SETTLE_S)  # let the conversion wait loop actually start -- see module docstring point 1
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(results) == 1
+    result_row = results[0].result
+    assert isinstance(result_row.outcome, Aborted)
+    assert result_row.stop_reason == StopReason.CANCELLED
+
+    assert engine.crack.list_results(handshake) == [result_row]
+
+
 def test_crack_cleans_up_even_if_new_connection_scope_raises(tmp_path):
     """ADR-0009 regression: _drive used to call self._new_connection_scope()
     BEFORE its own try:, so a raise there skipped `finally` entirely -- no
@@ -378,11 +534,11 @@ def test_crack_cleans_up_even_if_new_connection_scope_raises(tmp_path):
 
 
 def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str]], None]:
-    """Same two side effects as _make_on_spawn above, except the hashcat found
-    key is looked up per-job from its own wordlist_path (argv[4] -- see
-    crack.py's _drive argv) instead of one shared constant -- each concurrent
-    job in the stress test below needs its OWN distinct outfile content to
-    prove results don't cross-contaminate between threads."""
+    """Same side effects as _make_on_spawn above, except the hashcat found key
+    is looked up per-job from its own wordlist_path (argv[4] -- see crack.py's
+    _drive argv) instead of one shared constant -- each concurrent job in the
+    stress test below needs its OWN distinct outfile content to prove results
+    don't cross-contaminate between threads."""
 
     def on_spawn(argv: list[str]) -> None:
         if argv[0] == "airodump-ng" and "-w" in argv:
@@ -392,6 +548,9 @@ def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str
             cap_prefix = argv[argv.index("-w") + 1]
             cap_path = Path(f"{cap_prefix}-01.cap")
             cap_path.write_bytes(CAP_FILE_BYTES)
+        elif argv[0] == "hcxpcapngtool":
+            hash_file_path = Path(argv[argv.index("-o") + 1])
+            hash_file_path.write_text(_hc22000_line() + "\n")
         elif argv[0] == "hashcat":
             key = wordlist_to_key.get(argv[4])
             if key is not None:
@@ -426,6 +585,7 @@ def test_concurrent_crack_jobs_all_complete_with_distinct_results_and_no_sqlite_
                 "airmon-ng": ["monitor mode already enabled on wlan0"],
                 "airodump-ng": [],  # content unused -- see AIRCRACK_HANDSHAKE_FOUND's comment
                 "aircrack-ng": [AIRCRACK_HANDSHAKE_FOUND],
+                "hcxpcapngtool": [],  # content unused -- on_spawn writes the hc22000 file directly (ADR-0015)
                 "hashcat": [],  # outcome decided by outfile content only, not scripted stdout
             },
             on_spawn=_make_stress_on_spawn(wordlist_to_key),

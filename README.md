@@ -64,7 +64,8 @@ verified and what's still open.
 
 - Linux: Mint or Kali. AirCommand does not run on Windows or macOS.
 - Python 3.12 or newer.
-- `aircrack-ng`, `hashcat`, and `nmap` on your `PATH`.
+- `aircrack-ng`, `hashcat`, `nmap`, and `hcxpcapngtool` (from the `hcxtools`
+  package) on your `PATH`.
 - A wifi adapter that supports monitor mode.
 - `iw`, which `airmon-ng` also calls. AirCommand uses it to read which bands
   your adapter supports. Without it, the band control offers 2.4 GHz only.
