@@ -1,5 +1,17 @@
 # GUI internal structure
 
+**Superseded for shell/layout by `docs/design/gui-redesign-gridwatch.md`
+(2026-10-09).** The Gridwatch × Wireframe A redesign replaced the
+`ctk.CTkTabview` + four-tab shell described below with a collapsible sidebar
+nav and five pages (Management, Discovery & Targets, Capture & Attack,
+Cracking, Logs) — see that doc, `docs/adr/0017-manual-radio-control-for-management-page.md`,
+and `docs/adr/0018-discovery-band-gating-revised.md`. This doc remains
+authoritative for everything the redesign didn't touch: each view's `Engine`
+method calls, `GuiEventPump` subscriptions, seed data, and gating/state-
+machine logic (per the redesign doc's own §1: "this redesign changes the
+visual style and page layout only"). Read the "Layout" section below as
+history of the original shell, not a description of the shipped one.
+
 Scoped per `docs/roadmap.md` Phase 3: what views exist, how they're laid out, how
 each subscribes to `GuiEventPump`, and what each seeds itself from at startup.
 `docs/design/core-gui-boundary.md` (the core/GUI boundary) is **not** redesigned

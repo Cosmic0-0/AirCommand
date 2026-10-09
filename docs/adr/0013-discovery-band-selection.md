@@ -1,5 +1,15 @@
 # Discovery band selection: capability query scoped to the adapter, explicit Start, derived Band column
 
+**Amended by ADR-0018 (2026-10-09).** The band dropdown no longer defaults to
+the most inclusive supported choice, pre-selected, with Start simply enabled
+once Idle (point 5 of the Decisions below). It now opens unchosen, on a
+"Choose a band…" placeholder, and Start/Resume/New Session stay disabled
+until the operator explicitly picks a real band — including when there's
+only one real choice. The capability query, `DiscoveryOptions.bands`, the
+derived Band column, no-auto-start, and the dropdown's choices being filtered
+to what the adapter supports are all unchanged. The text below is left as
+written.
+
 **Status: implemented on branch `feat/dual-band-discovery` (2026-10-08), awaiting the operator's real-hardware verification.** Settles the interface questions ADR-0006 left open. Amends ADR-0010 in two places: Discovery no longer starts on launch, and the table gets a Band column after all.
 
 Discovery used to scan 2.4GHz only, because its `airodump-ng` command line had no `--band` flag and the tool defaults to 2.4GHz. Now the operator picks a band before starting a scan, from a dropdown that lists only the bands the adapter supports. Starting Discovery is an explicit click, there is no auto-start at launch, and the table shows a Band column derived from each row's channel.

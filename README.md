@@ -22,6 +22,10 @@ just deprioritized.
 
 ## Features
 
+- **Management.** Pick which wifi adapter AirCommand uses, and step its
+  monitor-mode cycle by hand: check for a conflicting process, kill it, start
+  or stop monitor mode. The adapter can be switched at runtime, not just
+  chosen at launch.
 - **Discovery & Targets.** Lists nearby networks from passively observed
   beacons, such as SSID, BSSID, channel, band, encryption, and signal. You
   choose 2.4 GHz, 5 GHz, or both, limited to what your adapter supports.
@@ -37,7 +41,7 @@ just deprioritized.
 - **Audit Log.** Records every deauth burst fired, across every Target, and
   keeps the record permanently.
 
-See [`docs/usage.md`](docs/usage.md) for the full walkthrough of each tab.
+See [`docs/usage.md`](docs/usage.md) for the full walkthrough of each page.
 
 ## Status
 
@@ -54,7 +58,7 @@ hang on one non-UTF-8 byte in hashcat's own output. The other was a
 missing conversion step that meant hashcat could never read a real
 capture at all. Both are fixed: a real crack now finds the real
 password against a real capture and wordlist, through the real engine.
-That hasn't been confirmed through the Crack tab itself yet.
+That hasn't been confirmed through the Cracking page itself yet.
 
 The same testing found that startup crash recovery had never actually
 been able to recognize an orphaned process, for any of the four tools
@@ -103,15 +107,18 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Run it with your wifi interface name (check `ip link` if you don't know it):
+Run it, optionally pre-selecting your wifi interface name (check `ip link`
+if you don't know it):
 
 ```bash
 aircommand --adapter wlan0
 ```
 
-`--db-path` and `--work-dir` default to `~/.aircommand/aircommand.db` and
-`~/.aircommand/work`. AirCommand creates both on first run if they don't
-exist. Run `aircommand --help` for the full option list.
+`--adapter` is optional. If you omit it, pick or switch the adapter later on
+the Management page. `--db-path` and `--work-dir` default to
+`~/.aircommand/aircommand.db` and `~/.aircommand/work`. AirCommand creates
+both on first run if they don't exist. Run `aircommand --help` for the full
+option list.
 
 Before your first launch, read
 [Prerequisites in `docs/usage.md`](docs/usage.md#prerequisites).

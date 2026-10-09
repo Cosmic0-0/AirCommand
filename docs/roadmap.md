@@ -1264,3 +1264,50 @@ are also still open, out of scope for this Cancel-focused pass, and will
 need their own session (likely a real redesign of the detection mechanism,
 not a tweak — a decision, not routine implementation, per CLAUDE.md's model
 tiering).
+
+**Update, 2026-10-09: Gridwatch GUI redesign, on branch
+`feat/gridwatch-gui-redesign`.** A visual and structural restyle of the
+already-working Phase 3 GUI — not a rewrite of its `Engine`-wiring logic, per
+the approved handoff `docs/design/gui-redesign-gridwatch.md`. Replaced the
+`ctk.CTkTabview` four-tab shell with a collapsible sidebar nav and five pages
+(Management, Discovery & Targets, Capture & Attack, Cracking, Logs), applied
+the Grid Watch visual token set across every view, and separated Capture/
+Deauth/Enumerate into three independent stacked sections instead of a shared
+two-column row. `docs/design/gui-structure.md` was given a pointer to the new
+doc rather than rewritten — it's still authoritative for event-wiring/seeding/
+state-machine details the redesign didn't touch.
+
+Cross-checking the approved design against the already-settled core
+architecture surfaced two real conflicts, each resolved by writing a new ADR
+rather than silently reinterpreting the mockup or the old decision:
+
+- **`docs/adr/0017-manual-radio-control-for-management-page.md`** — the new
+  Management page needed a public adapter-selection/monitor-mode API that
+  didn't exist. `RadioController`'s `adapter` param is now `Optional[str]`,
+  reassignable at runtime via the new `select_adapter()` (stops monitor mode
+  on the old adapter first if it was running); new `list_adapters()`,
+  `is_in_monitor_mode`, `check_conflicting_processes()`,
+  `kill_conflicting_processes()`, `start_monitor_mode()`,
+  `stop_monitor_mode()`, and a new `NoAdapterSelected` exception. `--adapter`
+  at the CLI is now an optional pre-selection, not a hard launch requirement.
+  Supersedes ADR-0005's "automatic, not operator-driven" framing for exactly
+  this one new manual flow — ADR-0005's own automatic check-kill-around-every-
+  transition behavior for Discovery/Capture/Enumerate is unchanged.
+- **`docs/adr/0018-discovery-band-gating-revised.md`** — the approved design
+  wants the Band dropdown to open unchosen and Start Discovery to stay
+  disabled until a real band is explicitly picked, which contradicts
+  ADR-0013's "defaults to the most inclusive choice, pre-selected, Start just
+  enabled once Idle." Amends ADR-0013 in place; everything else ADR-0013
+  decided (the capability query, `DiscoveryOptions.bands`, the derived Band
+  column, no-auto-start) is unchanged.
+
+**Not yet verified on real hardware** — both new ADRs flag this explicitly in
+their own Consequences sections: `list_adapters()`'s real sysfs walk, a real
+`select_adapter()` switch between two physical adapters, the plain
+`airmon-ng check` invocation, the `NoAdapterSelected`/`AdapterBusy` gating
+paths, and (for ADR-0018) confirming the placeholder really can't be picked,
+Start truly can't be clicked before a real pick, and the dual-band adapter
+still reports both bands correctly under the new gate. See
+`docs/final-touches.md`'s own new checklist item for this redesign — same
+"actionable, not categorically blocked, needs the user's own terminal" tier
+as every other real-hardware item in this doc.

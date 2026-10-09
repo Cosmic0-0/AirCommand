@@ -2,6 +2,8 @@
 
 Synthesized from two independently-designed candidates (`architect` Phase B, adapted — see [Synthesis decision](#synthesis-decision)). Decision recorded at `docs/adr/0003-core-architecture-event-driven.md`.
 
+This doc's own sketches below (e.g. `Engine(..., adapter="wlan0")`) predate `docs/adr/0017-manual-radio-control-for-management-page.md`, which made `adapter` an `Optional[str]` reassignable at runtime via `RadioController.select_adapter()` rather than a fixed required constructor argument. Left as written, as fixed historical input — not updated in place, per this doc's own role as already-settled architecture.
+
 ## Problem
 
 AirCommand's core (discovery, capture, cracking, allowlist enforcement) must be GUI-agnostic and fully testable without root or a running GUI, while a CustomTkinter GUI needs live, streaming progress and the ability to cancel long-running subprocess-backed operations — all without blocking Tk's single-threaded mainloop. Four constraints make the shape non-obvious rather than a straightforward "wrap subprocess, return a result":
