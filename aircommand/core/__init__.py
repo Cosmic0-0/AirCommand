@@ -20,7 +20,14 @@ from aircommand.core.domain import (
 )
 from aircommand.core.jobs import JobHandle
 from aircommand.core.allowlist import NotATargetError
-from aircommand.core.rf import AdapterBusy, AdapterMode, BandUnavailable, RadioCommandFailed
+from aircommand.core.rf import (
+    AdapterBusy,
+    AdapterInfo,
+    AdapterMode,
+    BandUnavailable,
+    NoAdapterSelected,
+    RadioCommandFailed,
+)
 from aircommand.core.privilege import InvalidSudoPasswordError, PrivilegeStatus
 
 __all__ = [
@@ -41,8 +48,10 @@ __all__ = [
     "JobHandle",
     "NotATargetError",
     "AdapterBusy",
+    "AdapterInfo",
     "AdapterMode",
     "BandUnavailable",
+    "NoAdapterSelected",
     "RadioCommandFailed",
     "InvalidSudoPasswordError",
     "PrivilegeStatus",

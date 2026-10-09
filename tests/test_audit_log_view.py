@@ -29,7 +29,9 @@ from aircommand.core.engine import Engine
 from aircommand.core.events import DeauthFired
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.audit_log_view import AuditLogView
+from aircommand.gui.cell import Tag
 from aircommand.gui.event_pump import GuiEventPump
+from aircommand.gui.theme import PALETTE
 
 from tests.test_capture_acceptance import AIRMON_NO_RENAME_OUTPUT, NO_HANDSHAKE_OUTPUT
 
@@ -243,6 +245,60 @@ def test_append_respects_active_filter(tmp_path):
         view.append(new_event)
 
         assert len(view._body.winfo_children()) == row_count_before
+    finally:
+        root.destroy()
+
+
+# --- FAILED row rendering -------------------------------------------------------
+
+
+def test_failed_firing_renders_as_a_warn_tag(tmp_path):
+    """ADR-0012: a failed deauth firing attempt is still logged, but must read
+    as visually distinct from a real burst -- a separate Tag(warn=True)
+    beside the row's label, not text appended onto the label itself (design
+    spec: "`.tag-warn` (amber) flags rows like 'Interrupted by crash'")."""
+    engine = _make_engine(tmp_path)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        view = AuditLogView(root, fake_app, [])
+
+        failed_event = DeauthFired(
+            event_id=uuid.uuid4(),
+            occurred_at=datetime.now(),
+            job_id=uuid.uuid4(),
+            target_id=target.id,
+            bssid=target.bssid,
+            client_mac=None,
+            fired_at=datetime.now(),
+            frame_count=5,
+            succeeded=False,
+            error_detail="aireplay-ng exited 1",
+        )
+        view.append(failed_event)
+
+        rows = view._body.winfo_children()
+        assert len(rows) == 1
+        row = rows[0]
+
+        tags = [child for child in row.winfo_children() if isinstance(child, Tag)]
+        assert len(tags) == 1
+        tag = tags[0]
+        assert "FAILED" in tag.cget("text")
+        assert "aireplay-ng exited 1" in tag.cget("text")
+        assert tag.cget("text_color") == PALETTE["warn"]
+
+        # The FAILED marker must live only in the Tag, not duplicated as
+        # appended text on the row's own label.
+        labels = [
+            child for child in row.winfo_children()
+            if isinstance(child, ctk.CTkLabel) and not isinstance(child, Tag)
+        ]
+        assert len(labels) == 1
+        assert "FAILED" not in labels[0].cget("text")
+        assert "Test-SSID" in labels[0].cget("text")
     finally:
         root.destroy()
 

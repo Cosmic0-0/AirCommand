@@ -2,7 +2,15 @@ import pytest
 
 from aircommand.core.domain import Band, JobKind
 from aircommand.core.procutil import FakeProcRunner
-from aircommand.core.rf import AdapterBusy, AdapterMode, BandUnavailable, RadioCommandFailed, RadioController
+from aircommand.core.rf import (
+    AdapterBusy,
+    AdapterInfo,
+    AdapterMode,
+    BandUnavailable,
+    NoAdapterSelected,
+    RadioCommandFailed,
+    RadioController,
+)
 
 # Realistic (researched, not hardware-captured) airmon-ng rename-announcement
 # line -- see parse.py's parse_airmon_monitor_interface, already tested against
@@ -577,3 +585,366 @@ def test_reserve_managed_tolerates_a_failed_iw_dev_call():
     reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)   # must not raise
 
     assert reservation.adapter == "wlan0"
+
+
+# --- ADR-0017: runtime adapter selection (select_adapter/NoAdapterSelected) ----
+
+def test_reserve_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+
+def test_supported_bands_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.supported_bands()
+
+
+def test_selected_adapter_reads_none_until_something_is_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    assert rf.selected_adapter is None
+
+    rf.select_adapter("wlan0")
+
+    assert rf.selected_adapter == "wlan0"
+
+
+def test_select_adapter_to_the_same_name_is_a_noop():
+    # Switching to the SAME name currently bound spawns nothing at all -- not
+    # even re-running check-kill/start, which a careless "always re-apply"
+    # implementation could do.
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"airmon-ng": AIRMON_START_OUTPUT_RENAMES}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+    reservation = rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+    rf.release(reservation)
+    spawned_before = list(spawned_argvs)
+
+    rf.select_adapter("wlan0")
+
+    assert spawned_argvs == spawned_before   # no new airmon-ng/systemctl spawn at all
+    assert rf.selected_adapter == "wlan0"
+
+
+def test_select_adapter_raises_adapter_busy_when_a_reservation_is_held():
+    rf = make_controller()
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    with pytest.raises(AdapterBusy) as excinfo:
+        rf.select_adapter("wlan1")
+
+    # requested/holder are both self._current's own mode/holder -- there's no
+    # "manual" AdapterMode member, see rf.py's select_adapter docstring.
+    assert excinfo.value.requested == AdapterMode.MONITOR_HOPPING
+    assert excinfo.value.holder == JobKind.DISCOVERY
+
+
+def test_select_adapter_switching_while_monitor_mode_active_stops_the_old_adapter_and_clears_the_band_cache(phy3):
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={
+            "airmon-ng": AIRMON_START_OUTPUT_RENAMES + ["some stop-mode output, content unused"],
+            "systemctl": ["Synchronizing state..."],
+            "iw": IW_DUAL_BAND,
+        },
+        on_spawn=spawned_argvs.append,
+    )
+    rf = RadioController("wlan0", proc)
+    reservation = rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+    rf.release(reservation)
+    rf.supported_bands()   # populate the cache against the OLD (monitor) adapter
+    spawned_before_switch = list(spawned_argvs)   # includes the "iw phy ..." call above
+
+    rf.select_adapter("wlan1")
+
+    assert spawned_argvs[len(spawned_before_switch):] == [
+        ["airmon-ng", "stop", "wlan0mon"],   # select_adapter stopped monitor mode on the OLD adapter
+        ["systemctl", "restart", "NetworkManager"],
+    ]
+    assert rf.selected_adapter == "wlan1"
+
+    rf.supported_bands()   # a stale (un-cleared) cache would skip this call entirely
+    assert phy3 == ["wlan0mon", "wlan1"]
+
+
+# --- ADR-0017: list_adapters() --------------------------------------------------
+
+class _ScriptedIwHandle:
+    """Minimal ProcHandle stand-in for list_adapters() tests -- only the
+    methods it actually calls (lines/wait); no stderr_tail needed since
+    list_adapters() never calls it."""
+
+    def __init__(self, lines: list[str], returncode: int) -> None:
+        self._lines = lines
+        self._returncode = returncode
+
+    def lines(self):
+        yield from self._lines
+
+    def wait(self) -> int:
+        return self._returncode
+
+
+class _PerAdapterIwRunner:
+    """Routes `iw dev <name> info` to a per-adapter scripted response.
+    FakeProcRunner's own script dict is keyed only by argv[0] ("iw"), which
+    can't tell two different adapters' `iw dev` calls apart the way
+    list_adapters() (one call per discovered interface) needs."""
+
+    def __init__(self, responses: "dict[str, tuple[list[str], int]]") -> None:
+        self._responses = responses
+
+    def spawn(self, argv: list[str], *, privileged: bool):
+        assert argv[:2] == ["iw", "dev"] and argv[3] == "info"
+        lines, returncode = self._responses[argv[2]]
+        return _ScriptedIwHandle(lines, returncode)
+
+
+def test_list_adapters_reports_bound_live_bound_not_live_and_unbound_rows(monkeypatch):
+    monkeypatch.setattr(
+        "aircommand.core.rf.glob.glob",
+        lambda pattern: [
+            "/sys/class/net/wlan0/phy80211",
+            "/sys/class/net/wlan1/phy80211",
+            "/sys/class/net/wlan2/phy80211",
+        ],
+    )
+
+    def fake_readlink(path: str) -> str:
+        mapping = {
+            "/sys/class/net/wlan0/device/driver": "rt2800usb",
+            "/sys/class/net/wlan1/device/driver": "iwlwifi",
+            # wlan2 deliberately absent -- simulates an unreadable symlink.
+        }
+        try:
+            return mapping[path]
+        except KeyError:
+            raise OSError(f"no such symlink: {path}")
+
+    monkeypatch.setattr("os.readlink", fake_readlink)
+
+    runner = _PerAdapterIwRunner({
+        "wlan0": (IW_DEV_INFO_MONITOR, 0),
+        "wlan1": (IW_DEV_INFO_MANAGED, 0),
+        "wlan2": ([], 1),   # e.g. a card `iw` genuinely can't reach
+    })
+    rf = RadioController("wlan0", runner)   # bound to wlan0, nothing in monitor mode
+
+    infos = {info.name: info for info in rf.list_adapters()}
+
+    assert infos["wlan0"] == AdapterInfo(name="wlan0", description="rt2800usb", live=True, is_bound=True)
+    assert infos["wlan1"] == AdapterInfo(name="wlan1", description="iwlwifi", live=False, is_bound=False)
+    assert infos["wlan2"] == AdapterInfo(
+        name="wlan2", description="(driver unknown)", live=False, is_bound=False
+    )
+
+
+def test_list_adapters_tolerates_iw_raising_for_an_interface(monkeypatch):
+    monkeypatch.setattr("aircommand.core.rf.glob.glob", lambda pattern: ["/sys/class/net/wlan0/phy80211"])
+    monkeypatch.setattr("os.readlink", lambda path: "ath9k")
+
+    class _RaisingRunner:
+        def spawn(self, argv: list[str], *, privileged: bool):
+            raise FileNotFoundError("iw")
+
+    rf = RadioController("wlan0", _RaisingRunner())
+
+    infos = rf.list_adapters()
+
+    assert infos == [AdapterInfo(name="wlan0", description="ath9k", live=False, is_bound=True)]
+
+
+def test_list_adapters_marks_the_monitor_mode_interface_as_bound_after_a_rename(monkeypatch):
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={"airmon-ng": AIRMON_START_OUTPUT_RENAMES, "iw": IW_DEV_INFO_MONITOR},
+        on_spawn=spawned_argvs.append,
+    )
+    rf = RadioController("wlan0", proc)
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)   # renames wlan0 -> wlan0mon
+
+    monkeypatch.setattr("aircommand.core.rf.glob.glob", lambda pattern: ["/sys/class/net/wlan0mon/phy80211"])
+    monkeypatch.setattr("os.readlink", lambda path: "mac80211_hwsim")
+
+    infos = rf.list_adapters()
+
+    # is_bound follows self._monitor_adapter ("wlan0mon"), not the original
+    # self._adapter ("wlan0") -- the interface sysfs actually shows now.
+    assert infos == [AdapterInfo(name="wlan0mon", description="mac80211_hwsim", live=True, is_bound=True)]
+
+
+# --- ADR-0017: the four manual radio control methods ----------------------------
+
+def test_check_conflicting_processes_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.check_conflicting_processes()
+
+
+def test_check_conflicting_processes_raises_adapter_busy_when_a_reservation_is_held():
+    rf = make_controller()
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    with pytest.raises(AdapterBusy):
+        rf.check_conflicting_processes()
+
+
+def test_check_conflicting_processes_runs_airmon_check_and_returns_output_without_raising_on_exit_code():
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={"airmon-ng": ["some check output, content unused"]},
+        on_spawn=spawned_argvs.append,
+        returncodes={"airmon-ng": 1},   # deliberately nonzero -- must NOT raise (ADR-0017 decision 9)
+    )
+    rf = RadioController("wlan0", proc)
+
+    output = rf.check_conflicting_processes()
+
+    assert spawned_argvs == [["airmon-ng", "check", "wlan0"]]
+    assert output == "some check output, content unused"
+
+
+def test_check_conflicting_processes_targets_the_monitor_interface_when_in_monitor_mode():
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={"airmon-ng": AIRMON_START_OUTPUT_RENAMES + ["some check output, content unused"]},
+        on_spawn=spawned_argvs.append,
+    )
+    rf = RadioController("wlan0", proc)
+    rf.start_monitor_mode()
+
+    rf.check_conflicting_processes()
+
+    assert spawned_argvs[-1] == ["airmon-ng", "check", "wlan0mon"]
+
+
+def test_kill_conflicting_processes_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.kill_conflicting_processes()
+
+
+def test_kill_conflicting_processes_raises_adapter_busy_when_a_reservation_is_held():
+    rf = make_controller()
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    with pytest.raises(AdapterBusy):
+        rf.kill_conflicting_processes()
+
+
+def test_kill_conflicting_processes_runs_check_kill():
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"airmon-ng": []}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+
+    rf.kill_conflicting_processes()
+
+    assert spawned_argvs == [["airmon-ng", "check", "kill"]]
+
+
+def test_kill_conflicting_processes_raises_radio_command_failed_on_nonzero_exit():
+    # The manual entry point for _check_kill() (ADR-0017 decision 10) -- same
+    # RadioCommandFailed-raising behavior as the automatic path's own
+    # test_check_kill_failure_raises_radio_command_failed_and_skips_airmon_start
+    # above, which _check_kill() being a pure extraction means still applies,
+    # just exercised here through the new manual entry point instead.
+    proc = FakeProcRunner(
+        script={"airmon-ng": []},
+        returncodes={"airmon-ng": 1},
+        stderr={"airmon-ng": ["sudo: a password is required"]},
+    )
+    rf = RadioController("wlan0", proc)
+
+    with pytest.raises(RadioCommandFailed) as excinfo:
+        rf.kill_conflicting_processes()
+
+    assert excinfo.value.argv == ["airmon-ng", "check", "kill"]
+    assert excinfo.value.returncode == 1
+
+
+def test_start_monitor_mode_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.start_monitor_mode()
+
+
+def test_start_monitor_mode_raises_adapter_busy_when_a_reservation_is_held():
+    rf = make_controller()
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    with pytest.raises(AdapterBusy):
+        rf.start_monitor_mode()
+
+
+def test_start_monitor_mode_runs_check_kill_and_start_and_returns_the_monitor_interface():
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"airmon-ng": AIRMON_START_OUTPUT_RENAMES}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+
+    interface = rf.start_monitor_mode()
+
+    assert interface == "wlan0mon"
+    assert spawned_argvs == [["airmon-ng", "check", "kill"], ["airmon-ng", "start", "wlan0"]]
+    assert rf.is_in_monitor_mode is True
+
+
+def test_start_monitor_mode_is_a_noop_when_already_in_monitor_mode():
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"airmon-ng": AIRMON_START_OUTPUT_RENAMES}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+    rf.start_monitor_mode()
+    spawned_before = list(spawned_argvs)
+
+    interface = rf.start_monitor_mode()
+
+    assert interface == "wlan0mon"
+    assert spawned_argvs == spawned_before   # no second check-kill/start pair
+
+
+def test_stop_monitor_mode_raises_no_adapter_selected_when_nothing_was_ever_bound():
+    rf = RadioController(None, FakeProcRunner(script={}))
+    with pytest.raises(NoAdapterSelected):
+        rf.stop_monitor_mode()
+
+
+def test_stop_monitor_mode_raises_adapter_busy_when_a_reservation_is_held():
+    rf = make_controller()
+    rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY)
+
+    with pytest.raises(AdapterBusy):
+        rf.stop_monitor_mode()
+
+
+def test_stop_monitor_mode_is_a_noop_when_not_in_monitor_mode():
+    spawned_argvs = []
+    proc = FakeProcRunner(script={"airmon-ng": []}, on_spawn=spawned_argvs.append)
+    rf = RadioController("wlan0", proc)
+
+    rf.stop_monitor_mode()
+
+    assert spawned_argvs == []
+    assert rf.is_in_monitor_mode is False
+
+
+def test_stop_monitor_mode_runs_airmon_stop_and_restarts_network_manager():
+    spawned_argvs = []
+    proc = FakeProcRunner(
+        script={
+            "airmon-ng": AIRMON_START_OUTPUT_RENAMES + ["some stop-mode output, content unused"],
+            "systemctl": ["Synchronizing state..."],
+        },
+        on_spawn=spawned_argvs.append,
+    )
+    rf = RadioController("wlan0", proc)
+    rf.start_monitor_mode()
+
+    rf.stop_monitor_mode()
+
+    assert spawned_argvs == [
+        ["airmon-ng", "check", "kill"],
+        ["airmon-ng", "start", "wlan0"],
+        ["airmon-ng", "stop", "wlan0mon"],
+        ["systemctl", "restart", "NetworkManager"],
+    ]
+    assert rf.is_in_monitor_mode is False

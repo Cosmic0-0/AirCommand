@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -33,6 +34,18 @@ class AdapterBusy(Exception):
         super().__init__(f"adapter busy: wanted {requested.value}, held by {holder.value}")
         self.requested = requested
         self.holder = holder
+
+
+class NoAdapterSelected(Exception):
+    """Raised by reserve(), supported_bands(), and all four manual control
+    methods (check_conflicting_processes, kill_conflicting_processes,
+    start_monitor_mode, stop_monitor_mode) when nothing has ever been bound --
+    self._adapter is None and self._monitor_adapter is None. Distinct from
+    AdapterBusy (something IS selected, but another job holds the
+    reservation) and BandUnavailable (something is selected, but querying it
+    failed): the GUI needs to tell these three apart to show the right
+    message -- "select an adapter on the Management page first" vs. "radio
+    busy" vs. "couldn't read this adapter's bands" (ADR-0017)."""
 
 
 class RadioCommandFailed(Exception):
@@ -122,9 +135,30 @@ class AdapterReservation:
     adapter: str
 
 
+@dataclass(frozen=True)
+class AdapterInfo:
+    """One detected wifi-capable interface, for Management page display.
+    `is_bound` is True for whichever interface RadioController is
+    currently bound to (self._monitor_adapter or self._adapter) --
+    recomputed fresh on every list_adapters() call, since select_adapter()
+    can change which row this is mid-session."""
+
+    name: str
+    description: str   # driver name from /sys/class/net/<name>/device/driver,
+                        # or "(driver unknown)" if that symlink can't be read
+    live: bool          # currently in monitor mode, per `iw dev <name> info`
+    is_bound: bool
+
+
 class RadioController:
-    def __init__(self, adapter: str, proc: ProcRunner) -> None:
-        self._adapter = adapter  # the ORIGINAL managed-mode interface name -- never reassigned
+    def __init__(self, adapter: str | None, proc: ProcRunner) -> None:
+        self._adapter = adapter  # the managed-mode interface name selected so far
+        # (ADR-0017) -- may be None (nothing picked at construction) and may be
+        # reassigned at runtime via select_adapter(). No longer "the ORIGINAL
+        # name, never reassigned" the way this comment used to read; every place
+        # that assumes it's always a real interface name (supported_bands(),
+        # reserve(), the private helpers below) has its own explicit "nothing
+        # selected yet" path (NoAdapterSelected) rather than a silent wrong guess.
         self._proc = proc
         self._current: AdapterReservation | None = None
         self._monitor_adapter: str | None = None
@@ -152,6 +186,8 @@ class RadioController:
         # their existing behavior unchanged).
 
     def reserve(self, mode: AdapterMode, holder: JobKind) -> AdapterReservation:
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
         if self._current is not None:
             raise AdapterBusy(mode, self._current.holder)
         active_adapter = self._ensure_mode(mode)
@@ -171,17 +207,55 @@ class RadioController:
         # is what guarantees the adapter isn't left in monitor mode once AirCommand
         # isn't running -- see release_to_managed() below and engine.py's TODO.
 
+    @property
+    def selected_adapter(self) -> str | None:
+        """The adapter name bound via __init__ or select_adapter(), or None if
+        nothing's been picked yet -- lets the Management page show "Adapter:
+        --" instead of guessing (ADR-0017)."""
+        return self._adapter
+
+    def select_adapter(self, name: str) -> None:
+        """Rebinds RadioController to a different physical adapter. Raises
+        AdapterBusy if a job currently holds the reservation -- switching out
+        from under a running Discovery/Capture/Enumerate job is exactly the
+        kind of desync ADR-0016 already had to correct for once, so this
+        never allows it. No-op if `name` already is the bound adapter. If
+        monitor mode is currently active on the OLD adapter, stops it first
+        (airmon-ng stop + NetworkManager restart, same as _stop_monitor_mode
+        always does) -- matches the mockup's own "Switching here stops
+        monitor mode if it was running." Does NOT validate that `name` is a
+        real/wifi-capable interface -- same "accept the string, fail
+        naturally on first real use" posture _ensure_mode already has for
+        airmon-ng's own unconfirmed exit codes; the first subsequent
+        supported_bands()/start_monitor_mode() call surfaces a real error
+        (BandUnavailable/RadioCommandFailed) if the name is bogus."""
+        if self._current is not None:
+            raise AdapterBusy(self._current.mode, self._current.holder)
+        if name == self._adapter:
+            return
+        if self._monitor_adapter is not None:
+            self._stop_monitor_mode()
+        self._adapter = name
+        self._supported_bands = None   # different adapter, different bands -- the
+                                        # old cache must not leak across a switch
+
     def supported_bands(self) -> frozenset[Band]:
         """The Bands this adapter can listen on, from `iw phy <phy> info` -- the
         one phy behind the adapter, not `iw list` (see _phy_name). Needs no
         privilege and no reservation, so it is safe to call at any time, including
-        before the first reserve(). Cached on success (an adapter's bands don't
-        change); a failure is never cached, so replugging or fixing `iw` heals
-        without a restart.
+        before the first reserve() -- but DOES need an adapter to have been
+        selected (via __init__ or select_adapter()); raises NoAdapterSelected,
+        not a guess, if nothing has been chosen yet (ADR-0017). Cached on
+        success (an adapter's bands don't change); a failure is never cached,
+        so replugging or fixing `iw` heals without a restart. The cache is
+        also cleared on every select_adapter() switch -- a different adapter
+        has different bands.
 
         The interface name queried is the monitor one if airmon-ng renamed the
         adapter (the original name no longer exists then), else the original.
         Raises BandUnavailable on any failure to find out -- never guesses."""
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
         if self._supported_bands is not None:
             return self._supported_bands
         interface = self._monitor_adapter or self._adapter
@@ -213,6 +287,121 @@ class RadioController:
         mode, not self._current."""
         if self._monitor_adapter is not None:
             self._stop_monitor_mode()
+
+    def list_adapters(self) -> list[AdapterInfo]:
+        """Every wifi-capable interface on the machine, independent of which
+        one (if any) RadioController is currently bound to -- what the
+        Management page's adapter-select list renders; clicking a row calls
+        select_adapter(row.name) (ADR-0017). Walks /sys/class/net/*/phy80211,
+        the same sysfs path _phy_name/_is_hard_blocked already read, rather
+        than parsing `iw dev`'s text output for the interface list itself --
+        a directory either has a phy80211 subdirectory (it's a wifi
+        interface) or it doesn't, no parsing needed there. One unreachable
+        interface (an unreadable driver symlink, a failing `iw dev` call)
+        reports live=False/"(driver unknown)" for just that row rather than
+        raising and breaking the whole listing -- the operator can still see
+        and pick whichever adapters DO respond."""
+        adapters = []
+        for phy_path in glob.glob("/sys/class/net/*/phy80211"):
+            name = os.path.basename(os.path.dirname(phy_path))
+            try:
+                description = os.path.basename(os.readlink(f"/sys/class/net/{name}/device/driver"))
+            except OSError:
+                description = "(driver unknown)"
+            try:
+                handle = self._proc.spawn(["iw", "dev", name, "info"], privileged=False)
+                output = "\n".join(handle.lines())
+                live = handle.wait() == 0 and parse_iw_dev_type(output) == "monitor"
+            except OSError:   # `iw` not installed / not on PATH
+                live = False
+            adapters.append(
+                AdapterInfo(
+                    name=name,
+                    description=description,
+                    live=live,
+                    is_bound=name == (self._monitor_adapter or self._adapter),
+                )
+            )
+        return adapters
+
+    @property
+    def is_in_monitor_mode(self) -> bool:
+        """True if the Management page's ON/OFF stat should read ON --
+        correct regardless of whether monitor mode changed via a manual
+        start_monitor_mode()/stop_monitor_mode() click or an automatic
+        Discovery/Capture/Enumerate transition (_ensure_mode below), since
+        both paths go through the same self._monitor_adapter (ADR-0017)."""
+        return self._monitor_adapter is not None
+
+    def check_conflicting_processes(self) -> str:
+        """The Management page's manual "Check" button: runs `airmon-ng
+        check` (no `kill`) against whichever adapter is currently bound, so
+        the operator can see what airmon-ng thinks is using the adapter
+        BEFORE deciding to kill anything. Never raises on exit code --
+        RadioCommandFailed's own docstring already limits "exit code is
+        trustworthy" to `check kill` and `systemctl`; plain `check` was never
+        run or confirmed in this codebase, so a nonzero exit here is only
+        logged, same non-authoritative treatment _start_monitor_mode already
+        gives `airmon-ng start`'s exit code. Returns the raw stdout,
+        unparsed -- the Management page just displays it (ADR-0017)."""
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
+        if self._current is not None:
+            raise AdapterBusy(self._current.mode, self._current.holder)
+        target = self._monitor_adapter or self._adapter
+        handle = self._proc.spawn(["airmon-ng", "check", target], privileged=True)
+        output = "\n".join(handle.lines())
+        returncode = handle.wait()
+        if returncode != 0:
+            logger.warning(
+                "airmon-ng check %s exited %d (exit code not treated as authoritative — "
+                "see check_conflicting_processes's own docstring); stderr: %s",
+                target, returncode, handle.stderr_tail(),
+            )
+        return output
+
+    def kill_conflicting_processes(self) -> None:
+        """The Management page's manual "Kill Conflicting Process" button --
+        the same check-kill _start_monitor_mode already runs automatically
+        before every managed->monitor switch (ADR-0005), exposed here as its
+        own entry point so the operator can run it proactively (ADR-0017).
+        Raises RadioCommandFailed on nonzero exit, exactly as the automatic
+        path does -- see _check_kill()."""
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
+        if self._current is not None:
+            raise AdapterBusy(self._current.mode, self._current.holder)
+        self._check_kill()
+
+    def start_monitor_mode(self) -> str:
+        """The Management page's manual "Start Airmon-ng" button (ADR-0017).
+        Calls the same _start_monitor_mode() the automatic
+        reserve(MONITOR_HOPPING/MONITOR_LOCKED, ...) path uses (_ensure_mode
+        below), so check-kill still runs unconditionally every time --
+        ADR-0005's safety net stays in effect; Check/Kill above are for the
+        operator's own proactive inspection, not a replacement for it.
+        No-op returning the existing interface name if monitor mode is
+        already active."""
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
+        if self._current is not None:
+            raise AdapterBusy(self._current.mode, self._current.holder)
+        if self._monitor_adapter is not None:
+            return self._monitor_adapter
+        self._monitor_adapter = self._start_monitor_mode()
+        return self._monitor_adapter
+
+    def stop_monitor_mode(self) -> None:
+        """The Management page's manual "Stop Airmon-ng" button -- the
+        counterpart to start_monitor_mode() above (ADR-0017). No-op if not
+        currently in monitor mode."""
+        if self._adapter is None and self._monitor_adapter is None:
+            raise NoAdapterSelected()
+        if self._current is not None:
+            raise AdapterBusy(self._current.mode, self._current.holder)
+        if self._monitor_adapter is None:
+            return
+        self._stop_monitor_mode()
 
     def _ensure_mode(self, mode: AdapterMode) -> str:
         # NOTE: MONITOR_HOPPING and MONITOR_LOCKED are the SAME physical radio
@@ -312,13 +501,7 @@ class RadioController:
         if _is_hard_blocked(self._adapter):
             raise RadioBlocked(self._adapter)
 
-        check_kill_handle = self._proc.spawn(["airmon-ng", "check", "kill"], privileged=True)
-        "\n".join(check_kill_handle.lines())  # drain; ignored, see comment above
-        check_kill_returncode = check_kill_handle.wait()
-        if check_kill_returncode != 0:
-            raise RadioCommandFailed(
-                ["airmon-ng", "check", "kill"], check_kill_returncode, check_kill_handle.stderr_tail()
-            )
+        self._check_kill()
 
         handle = self._proc.spawn(["airmon-ng", "start", self._adapter], privileged=True)
         output = "\n".join(handle.lines())
@@ -355,4 +538,20 @@ class RadioController:
         if nm_returncode != 0:
             raise RadioCommandFailed(
                 ["systemctl", "restart", "NetworkManager"], nm_returncode, nm_handle.stderr_tail()
+            )
+
+    def _check_kill(self) -> None:
+        # `airmon-ng check kill` -- extracted out of _start_monitor_mode (ADR-0005)
+        # so the manual kill_conflicting_processes() entry point (ADR-0017) can
+        # share the exact same call, rather than reimplementing it a second time.
+        # Pure extraction: raises RadioCommandFailed on nonzero exit, exactly as
+        # before this was pulled out -- see RadioCommandFailed's own docstring for
+        # why THIS call's exit code (unlike airmon-ng start/stop's) is trustworthy
+        # enough to raise on.
+        check_kill_handle = self._proc.spawn(["airmon-ng", "check", "kill"], privileged=True)
+        "\n".join(check_kill_handle.lines())  # drain; ignored, see _start_monitor_mode's own comment
+        check_kill_returncode = check_kill_handle.wait()
+        if check_kill_returncode != 0:
+            raise RadioCommandFailed(
+                ["airmon-ng", "check", "kill"], check_kill_returncode, check_kill_handle.stderr_tail()
             )

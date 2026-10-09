@@ -18,6 +18,7 @@ from aircommand.core.events import CaptureStopped
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.capture_view import CapturePanel
 from aircommand.gui.event_pump import GuiEventPump
+from aircommand.gui.theme import PALETTE
 
 import customtkinter as ctk
 
@@ -88,6 +89,19 @@ def _make_engine(tmp_path, script: dict) -> Engine:
         capture_handshake_check_interval=timedelta(seconds=0),
         drive_tick_interval=DRIVE_TICK_INTERVAL,
     )
+
+
+def _find_all_buttons(widget) -> list:
+    """Recursively collects every CTkButton under `widget`, walking the real
+    Tk widget tree -- used to assert on button placement/uniqueness across
+    the two Cells CapturePanel now renders into, without hardcoding which
+    container holds which button."""
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, ctk.CTkButton):
+            found.append(child)
+        found.extend(_find_all_buttons(child))
+    return found
 
 
 def _tick_until(pump: GuiEventPump, predicate, timeout: float = 2.0) -> None:
@@ -245,5 +259,44 @@ def test_cancel_button_cancels_an_in_progress_capture(tmp_path):
         assert panel._start_passive_button.cget("state") == "normal"
         assert panel._start_deauth_button.cget("state") == "normal"
         assert panel._cancel_button.cget("state") == "disabled"
+    finally:
+        root.destroy()
+
+
+def test_deauth_cell_is_danger_styled_and_cancel_appears_only_once(tmp_path):
+    # docs/design/gui-redesign-gridwatch.md §5/§6 item 5: Capture and Deauth
+    # render as two separate Cells -- Deauth is danger-bordered/red-titled,
+    # and the shared Cancel button lives only in the Capture cell (Deauth
+    # gets its own "Fire Deauth" button instead of a second Cancel).
+    engine = _make_engine(tmp_path, {})
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
+        panel.set_target(target)
+
+        # Deauth cell is danger-bordered and red-titled; Capture cell is not.
+        assert panel._deauth_cell.cget("border_color") == PALETTE["danger"]
+        assert panel._deauth_cell._title_label.cget("text_color") == PALETTE["danger"]
+        assert panel._capture_cell.cget("border_color") != PALETTE["danger"]
+        assert panel._capture_cell._title_label.cget("text_color") != PALETTE["danger"]
+
+        all_buttons = _find_all_buttons(panel)
+        cancel_buttons = [b for b in all_buttons if b.cget("text") == "Cancel"]
+        assert len(cancel_buttons) == 1
+        assert cancel_buttons[0] is panel._cancel_button
+        # The one Cancel button lives inside the Capture cell, not Deauth.
+        assert panel._cancel_button in _find_all_buttons(panel._capture_cell)
+        assert panel._cancel_button not in _find_all_buttons(panel._deauth_cell)
+
+        # "Start Deauth-Assisted Capture" is gone; the button is "Fire Deauth"
+        # and lives in the Deauth cell.
+        fire_deauth_buttons = [b for b in all_buttons if b.cget("text") == "Fire Deauth"]
+        assert len(fire_deauth_buttons) == 1
+        assert fire_deauth_buttons[0] is panel._start_deauth_button
+        assert panel._start_deauth_button in _find_all_buttons(panel._deauth_cell)
+        assert not any(b.cget("text") == "Start Deauth-Assisted Capture" for b in all_buttons)
     finally:
         root.destroy()

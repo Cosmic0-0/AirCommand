@@ -1,16 +1,24 @@
-"""NetworksView, TargetPicker — the Discovery & Targets tab's two tables. See
-docs/design/gui-structure.md 'Discovery & Targets tab'.
+"""NetworksView, TargetPicker — the Discovery & Targets page's two tables. See
+docs/design/gui-structure.md 'Discovery & Targets tab' and
+docs/design/gui-redesign-gridwatch.md §5's "Discovery & Targets" row for the
+Grid Watch restyle this implements.
 
-No table widget exists in CustomTkinter, so each row is built by hand inside a
-ctk.CTkScrollableFrame -- one read-only CTkEntry per column (selectable/
-copyable, unlike CTkLabel -- see table.py's docstring) plus a trailing action
-button, laid out with .grid(row=..., column=...), tracked in a
-dict[BSSID, dict] keyed by bssid so _upsert/_remove can update or destroy a
-specific row's widgets in place. Column widths/alignment go through
-table.py's build_header()/add_row()/update_row() -- see that module's
-docstring for why a plain pack()+grid() header above a CTkScrollableFrame
-body can't just size its columns to fit its own content (ThingsToChange
-item 1).
+No table widget exists in CustomTkinter, so each row is built by hand -- one
+read-only CTkEntry per column (selectable/copyable, unlike CTkLabel -- see
+table.py's docstring) plus a trailing action button, laid out with
+.grid(row=..., column=...), tracked in a dict[BSSID, dict] keyed by bssid so
+_upsert/_remove can update or destroy a specific row's widgets in place.
+Column widths/alignment go through table.py's build_header()/add_row()/
+update_row() -- see that module's docstring for why a plain pack()+grid()
+header above a body frame can't just size its columns to fit its own content
+(ThingsToChange item 1).
+
+Each view wraps its header+body in a themed `Cell` ("Networks seen" /
+"Target allowlist" -- design spec §5). `self._body` is a plain
+ctk.CTkFrame, not a ctk.CTkScrollableFrame: per the design spec §6 item 3,
+neither table gets its own internal fixed-height scroll box any more -- the
+whole page (a ctk.CTkScrollableFrame one layer up, in app.py) scrolls as a
+single unit instead.
 
 NetworksView is session-scoped (ADR-0010): it starts empty and shows only what
 the current Discovery session has heard, so it is never seeded from the
@@ -24,7 +32,21 @@ import customtkinter as ctk
 
 from aircommand.core import BSSID, MacAddress, Network, Target
 from aircommand.core.events import TargetAdded, TargetRemoved
+from aircommand.gui.cell import Cell
 from aircommand.gui.table import Column, add_row, build_header, update_row
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, ui_font
+
+
+def _make_outline_button(master, text: str, command) -> ctk.CTkButton:
+    """Flat-bordered `.btn-outline` look (design spec §3: "Add as Target",
+    "Add manually", "Remove" all use this). Same recipe as
+    ManagementView._make_outline_button -- copied rather than imported so
+    this page's buttons don't depend on an unrelated page's module."""
+    return ctk.CTkButton(
+        master, text=text, command=command, fg_color="transparent", border_width=1,
+        border_color=PALETTE["border"], text_color=PALETTE["text"], corner_radius=CORNER_RADIUS,
+        font=ui_font(12, "bold"),
+    )
 
 
 class NetworksView(ctk.CTkFrame):
@@ -34,15 +56,18 @@ class NetworksView(ctk.CTkFrame):
     )
 
     def __init__(self, master, app) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self._rows: dict[BSSID, dict] = {}   # bssid -> {"labels": [CTkEntry,...], "button": CTkButton}
         self._dialog: "_AddAsTargetDialog | None" = None
 
-        header = build_header(self, self._COLUMNS)
+        cell = Cell(self, "Networks seen")
+        cell.pack(fill="both", expand=True)
+
+        header = build_header(cell.body, self._COLUMNS)
         header.pack(fill="x")
 
-        self._body = ctk.CTkScrollableFrame(self)
+        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
         self._body.pack(fill="both", expand=True)
 
     def upsert_row(self, event) -> None:
@@ -69,8 +94,8 @@ class NetworksView(ctk.CTkFrame):
         if existing is None:
             row_index = len(self._rows)
             labels = add_row(self._body, row_index, self._COLUMNS, values)
-            button = ctk.CTkButton(self._body, text="Add as Target",
-                                    command=lambda n=network: self._open_add_target_dialog(n))
+            button = _make_outline_button(self._body, "Add as Target",
+                                           lambda n=network: self._open_add_target_dialog(n))
             button.grid(row=row_index, column=len(values), padx=5, pady=2)
             self._rows[network.bssid] = {"labels": labels, "button": button}
         else:
@@ -93,16 +118,27 @@ class _AddAsTargetDialog(ctk.CTkToplevel):
         self._app = app
         self._network = network
 
-        ctk.CTkLabel(self, text=f"SSID: {network.ssid or '(hidden)'}").pack(padx=20, pady=(20, 0), anchor="w")
-        ctk.CTkLabel(self, text=f"BSSID: {network.bssid}").pack(padx=20, pady=(0, 0), anchor="w")
-        ctk.CTkLabel(self, text=f"Channel: {network.channel}").pack(padx=20, pady=(0, 10), anchor="w")
+        ctk.CTkLabel(
+            self, text=f"SSID: {network.ssid or '(hidden)'}", font=ui_font(11), text_color=PALETTE["muted"],
+        ).pack(padx=20, pady=(20, 0), anchor="w")
+        ctk.CTkLabel(
+            self, text=f"BSSID: {network.bssid}", font=ui_font(11), text_color=PALETTE["muted"],
+        ).pack(padx=20, pady=(0, 0), anchor="w")
+        ctk.CTkLabel(
+            self, text=f"Channel: {network.channel}", font=ui_font(11), text_color=PALETTE["muted"],
+        ).pack(padx=20, pady=(0, 10), anchor="w")
 
-        ctk.CTkLabel(self, text="Label:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._label_entry = ctk.CTkEntry(self)
+        ctk.CTkLabel(self, text="Label:", font=ui_font(11), text_color=PALETTE["muted"]).pack(
+            padx=20, pady=(0, 0), anchor="w"
+        )
+        self._label_entry = ctk.CTkEntry(
+            self, fg_color=PALETTE["bg"], border_color=PALETTE["border"], text_color=PALETTE["text"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12),
+        )
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._label_entry.bind("<Return>", lambda event: self._on_add())
 
-        self._error_label = ctk.CTkLabel(self, text="", text_color="red")
+        self._error_label = ctk.CTkLabel(self, text="", font=ui_font(11), text_color=PALETTE["danger"])
         self._error_label.pack(padx=20, pady=(0, 10))
 
         button_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -136,18 +172,21 @@ class TargetPicker(ctk.CTkFrame):
     )
 
     def __init__(self, master, app) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self._rows: dict[BSSID, dict] = {}
         self._dialog: "_AddManuallyDialog | None" = None
 
-        header = build_header(self, self._COLUMNS)
+        cell = Cell(self, "Target allowlist")
+        cell.pack(fill="both", expand=True)
+
+        header = build_header(cell.body, self._COLUMNS)
         header.pack(fill="x")
 
-        add_manually_button = ctk.CTkButton(header, text="Add manually", command=self._open_add_manually_dialog)
+        add_manually_button = _make_outline_button(header, "Add manually", self._open_add_manually_dialog)
         add_manually_button.grid(row=0, column=len(self._COLUMNS), padx=5)
 
-        self._body = ctk.CTkScrollableFrame(self)
+        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
         self._body.pack(fill="both", expand=True)
 
         for target in app.engine.targets.list():
@@ -171,8 +210,8 @@ class TargetPicker(ctk.CTkFrame):
         if existing is None:
             row_index = len(self._rows)
             labels = add_row(self._body, row_index, self._COLUMNS, values)
-            button = ctk.CTkButton(self._body, text="Remove",
-                                    command=lambda b=target.bssid: self._app.engine.targets.remove(b))
+            button = _make_outline_button(self._body, "Remove",
+                                           lambda b=target.bssid: self._app.engine.targets.remove(b))
             button.grid(row=row_index, column=len(values), padx=5, pady=2)
             self._rows[target.bssid] = {"labels": labels, "button": button}
         else:
@@ -208,27 +247,36 @@ class _AddManuallyDialog(ctk.CTkToplevel):
         self.title("Add Target manually")
         self._app = app
 
-        ctk.CTkLabel(self, text="BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
-        self._bssid_entry = ctk.CTkEntry(self)
+        def _themed_entry() -> ctk.CTkEntry:
+            return ctk.CTkEntry(
+                self, fg_color=PALETTE["bg"], border_color=PALETTE["border"], text_color=PALETTE["text"],
+                corner_radius=CORNER_RADIUS, font=ui_font(12),
+            )
+
+        def _muted_label(text: str) -> ctk.CTkLabel:
+            return ctk.CTkLabel(self, text=text, font=ui_font(11), text_color=PALETTE["muted"])
+
+        _muted_label("BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
+        self._bssid_entry = _themed_entry()
         self._bssid_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._bssid_entry.bind("<Return>", lambda event: self._on_add())
 
-        ctk.CTkLabel(self, text="SSID:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._ssid_entry = ctk.CTkEntry(self)
+        _muted_label("SSID:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._ssid_entry = _themed_entry()
         self._ssid_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._ssid_entry.bind("<Return>", lambda event: self._on_add())
 
-        ctk.CTkLabel(self, text="Channel:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._channel_entry = ctk.CTkEntry(self)
+        _muted_label("Channel:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._channel_entry = _themed_entry()
         self._channel_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._channel_entry.bind("<Return>", lambda event: self._on_add())
 
-        ctk.CTkLabel(self, text="Label:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._label_entry = ctk.CTkEntry(self)
+        _muted_label("Label:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._label_entry = _themed_entry()
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._label_entry.bind("<Return>", lambda event: self._on_add())
 
-        self._error_label = ctk.CTkLabel(self, text="", text_color="red")
+        self._error_label = ctk.CTkLabel(self, text="", font=ui_font(11), text_color=PALETTE["danger"])
         self._error_label.pack(padx=20, pady=(0, 10))
 
         button_row = ctk.CTkFrame(self, fg_color="transparent")

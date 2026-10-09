@@ -28,7 +28,7 @@ from aircommand.core.events import NetworkDiscovered
 from aircommand.core.jobs import JobRegistry
 from aircommand.core.persistence.db import Database
 from aircommand.core.procutil import FakeProcRunner
-from aircommand.gui.app import App
+from aircommand.gui.app import _BAND_UNCHOSEN, App
 from aircommand.gui.discovery_view import NetworksView, TargetPicker
 from aircommand.gui.status_bar import StatusBar
 from tests.test_discovery_view import AP_HEADER, BSSID_1, BSSID_2, make_network, make_network_discovered
@@ -40,7 +40,27 @@ PASSWORD = "correct-horse-battery-staple"
 # see test_engine.py's identical constant/comment.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
-TAB_NAMES = ["Discovery & Targets", "Target Actions", "Crack", "Audit Log"]
+PAGE_KEYS = ["management", "discovery", "capture", "cracking", "logs"]
+
+
+@pytest.fixture(autouse=True)
+def _fake_sysfs_wifi_adapters(monkeypatch):
+    """ManagementView (ADR-0017) calls engine.radio.list_adapters() as soon as
+    it's shown, which App._show_page does for the landing page during every
+    App's __init__ in this file -- list_adapters() walks the REAL
+    /sys/class/net/*/phy80211, same as test_rf.py's own list_adapters tests
+    already have to fake (see its own make_controller-adjacent tests), or every
+    App constructed here would pick up whatever real wifi hardware happens to
+    be on the machine running the suite instead of only each test's own
+    scripted "wlan0" -- not reproducible, and (confirmed directly) capable of
+    breaking an exact on_spawn-tracked assertion if a real detected interface
+    triggers an extra, untracked iw dev <name> info spawn. autouse, covering
+    every test in this file (not just the make_live_app fixture), since seven
+    other tests construct App directly without going through that fixture."""
+    monkeypatch.setattr(
+        "aircommand.core.rf.glob.glob",
+        lambda pattern: ["/sys/class/net/wlan0/phy80211"] if pattern == "/sys/class/net/*/phy80211" else [],
+    )
 
 
 def _completed(returncode: int) -> subprocess.CompletedProcess:
@@ -107,7 +127,11 @@ def make_live_app(tmp_path, monkeypatch):
 
     App launches Idle (nothing scans until Start is clicked), so by default the
     factory clicks Start and checks the scan is live; start=False hands back the
-    launched-but-Idle App.
+    launched-but-Idle App. Start begins disabled until a real band is picked
+    (ADR-0018), so this factory's own start=True convenience picks the most
+    inclusive real choice first -- explicitly reproducing ADR-0013's old
+    pre-selected default for the many tests here that don't care which band,
+    now that the GUI itself no longer does that automatically.
 
     Also turns the cyclic garbage collector off for the test. These tests block
     the main thread (wait_for_test, Event.wait) while a Discovery driver thread
@@ -131,6 +155,8 @@ def make_live_app(tmp_path, monkeypatch):
             db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=_live_proc(on_spawn, iw)
         )
         if start:
+            _pick_band(app, list(app._band_choices)[-1])   # ADR-0018: an explicit
+            # pick is required before Start enables -- see factory docstring.
             app._pause_resume_button.invoke()   # synchronous: reserves the radio, then the driver thread runs
             assert app._discovery_handle is not None, app.status_bar._error_label.cget("text")
             _assert_scanning_state(app)
@@ -144,6 +170,33 @@ def make_live_app(tmp_path, monkeypatch):
 
 def _state(button) -> str:
     return str(button.cget("state"))
+
+
+def _page_is_shown(page) -> bool:
+    """Every App page is a CTkScrollableFrame (§4: page-level scroll). It
+    overrides pack()/pack_forget() to operate on an internal _parent_frame
+    (see its own source) but does NOT override winfo_ismapped(), which falls
+    through to the wrong inner widget -- one embedded in its own canvas via
+    create_window(), never pack-managed directly, and confirmed directly
+    (against this environment's real customtkinter 6.0.0) to report
+    inconsistent/wrong values for exactly that reason. pack_info() on the
+    actually pack-managed widget (_parent_frame) is what's reliable."""
+    target = getattr(page, "_parent_frame", page)
+    try:
+        return bool(target.pack_info())
+    except Exception:
+        return False
+
+
+def _pick_band(app: App, label: str) -> None:
+    """Simulates the operator actually choosing `label` from the band dropdown
+    (ADR-0018): a real CTkOptionMenu selection updates the shown value AND
+    fires command= together (CTkOptionMenu._dropdown_callback) -- .set() alone
+    (used elsewhere in this file to change the band mid-session, after the
+    gate's already open) only does the former, so any test that needs the
+    ADR-0018 gate to actually react to a pick calls this instead."""
+    app._band_menu.set(label)
+    app._on_band_menu_changed(label)
 
 
 def _pause_and_drain(app: App):
@@ -176,10 +229,15 @@ def _wait_for_airodump_spawns(spawned: list[list[str]], count: int, timeout: flo
         time.sleep(0.01)
 
 
-def _assert_idle_state(app: App) -> None:
+def _assert_idle_state(app: App, *, band_chosen: bool = True) -> None:
+    """band_chosen defaults to True: every existing Idle check in this file
+    runs after at least one Start attempt (even a failed one), which itself
+    required a real band pick (ADR-0018) -- so Start is "normal" there. Pass
+    band_chosen=False only for the genuine pre-pick launch state, where
+    Start is still "disabled"."""
     assert app._discovery_handle is None
     assert app._pause_resume_button.cget("text") == "Start Discovery"
-    assert _state(app._pause_resume_button) == "normal"
+    assert _state(app._pause_resume_button) == ("normal" if band_chosen else "disabled")
     assert _state(app._new_session_button) == "disabled"
     assert app._discovery_paused is False
     assert app._discovery_stopping is False
@@ -210,10 +268,19 @@ def test_happy_path_builds_full_app(mock_run, tmp_path, monkeypatch):
     try:
         assert app.engine.privilege.status == PrivilegeStatus.ACTIVE
         assert isinstance(app.status_bar, StatusBar)
-        assert app.status_bar.master is app
-        for name in TAB_NAMES:
-            assert app.tabview.tab(name) is not None
-        _assert_idle_state(app)   # no auto-start: the operator clicks Start Discovery
+        assert app.status_bar.master is app._main_column   # inside the main column, not
+        # spanning the sidebar too -- the redesign's shell, unlike the old one (see app.py).
+        for key in PAGE_KEYS:
+            assert key in app._pages
+        # Management is the new landing page (the mockup's own page copy: lands
+        # here right after the sudo prompt, before Discovery or Capture starts).
+        assert _page_is_shown(app._pages["management"])
+        for key in PAGE_KEYS:
+            if key != "management":
+                assert not _page_is_shown(app._pages[key])
+        # No auto-start: the operator clicks Start Discovery. band_chosen=False:
+        # launch itself never picks a band (ADR-0018), so Start is disabled too.
+        _assert_idle_state(app, band_chosen=False)
 
         assert isinstance(app.networks_view, NetworksView)
         assert isinstance(app.target_picker, TargetPicker)
@@ -228,6 +295,29 @@ def test_happy_path_builds_full_app(mock_run, tmp_path, monkeypatch):
         app.pump._tick()
 
         assert bssid in app.target_picker._rows
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_sidebar_navigation_shows_exactly_one_page_and_tracks_active_key(mock_run, tmp_path, monkeypatch):
+    mock_run.return_value = _completed(0)
+    monkeypatch.setattr(App, "_ask_sudo_password_dialog", lambda self, error=None: PASSWORD)
+
+    app = App(db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=_fake_proc())
+    try:
+        for key in PAGE_KEYS:
+            app._on_navigate(key)
+            assert _page_is_shown(app._pages[key])
+            assert app.sidebar._active_key == key
+            for other_key in PAGE_KEYS:
+                if other_key != key:
+                    assert not _page_is_shown(app._pages[other_key])
+        # Re-clicking the already-active page is a safe no-op, not an error --
+        # Sidebar's own on_navigate is called for this case too (re-clicking a
+        # row fires the same click binding as any other row).
+        app._on_navigate(PAGE_KEYS[-1])
+        assert _page_is_shown(app._pages[PAGE_KEYS[-1]])
     finally:
         app.on_close()
 
@@ -265,6 +355,7 @@ def test_discovery_dying_unexpectedly_surfaces_error_and_flips_to_resume(mock_ru
 
     app = App(db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=_fake_proc())
     try:
+        _pick_band(app, "2.4 + 5 GHz")   # ADR-0018: Start stays disabled until a real pick
         app._pause_resume_button.invoke()   # Start; Discovery doesn't auto-start
         app._discovery_handle.wait_for_test(timeout=2.0)
         app.pump._tick()  # drain the queued DiscoveryStopped event into the GUI handler
@@ -299,11 +390,16 @@ def test_discovery_tab_launches_idle_and_runs_no_scan_tools(mock_run, make_live_
     spawned: list[list[str]] = []
     app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)), start=False)
     try:
-        _assert_idle_state(app)
+        _assert_idle_state(app, band_chosen=False)   # launch never picks a band (ADR-0018)
         assert _state(app._band_menu) == "normal"
-        # Only the unprivileged `iw` capability query: no airmon-ng (which would
+        assert app._band_menu.get() == _BAND_UNCHOSEN
+        # Only unprivileged `iw` capability queries: no airmon-ng (which would
         # kill NetworkManager and flip the radio to monitor mode), no airodump-ng.
-        assert spawned == [["iw", "phy", "phy3", "info"]]
+        # Two calls, not one: Discovery's own supported_bands() (built first,
+        # "iw phy ... info"), then ManagementView.refresh()'s list_adapters()
+        # (ADR-0017, "iw dev ... info") once App._show_page shows the landing
+        # page -- Management, not Discovery, is the new default page.
+        assert spawned == [["iw", "phy", "phy3", "info"], ["iw", "dev", "wlan0", "info"]]
         assert app.networks_view._rows == {}
     finally:
         app.on_close()
@@ -314,6 +410,7 @@ def test_clicking_start_from_idle_begins_scanning_and_locks_the_band_menu(mock_r
     mock_run.return_value = _completed(0)
     app = make_live_app(start=False)
     try:
+        _pick_band(app, "2.4 + 5 GHz")   # ADR-0018: Start stays disabled until a real pick
         app._pause_resume_button.invoke()
 
         assert app._discovery_handle is not None
@@ -335,6 +432,7 @@ def test_a_failed_first_start_stays_idle_and_can_be_retried(mock_run, make_live_
 
         monkeypatch.setattr(app.engine.discovery, "start", fail_to_start)
 
+        _pick_band(app, "2.4 + 5 GHz")   # ADR-0018: Start stays disabled until a real pick
         app._pause_resume_button.invoke()   # must not raise out of the Tk callback
 
         assert "Discovery couldn't start" in app.status_bar._error_label.cget("text")
@@ -360,6 +458,7 @@ def test_band_unavailable_from_start_is_reported_not_raised(mock_run, make_live_
 
         monkeypatch.setattr(app.engine.discovery, "start", refuse)
 
+        _pick_band(app, "2.4 + 5 GHz")   # ADR-0018: Start stays disabled until a real pick
         app._pause_resume_button.invoke()
 
         error = app.status_bar._error_label.cget("text")
@@ -372,34 +471,76 @@ def test_band_unavailable_from_start_is_reported_not_raised(mock_run, make_live_
 
 
 @patch("aircommand.core.privilege.subprocess.run")
-def test_a_dual_band_adapter_offers_every_band_choice_defaulting_to_all(mock_run, make_live_app):
+def test_a_dual_band_adapter_offers_every_band_choice_starting_unchosen(mock_run, make_live_app):
+    """ADR-0018 amends ADR-0013's old "defaults to the most inclusive choice"
+    behavior: the menu now opens on the placeholder, with nothing pre-selected,
+    and Start stays disabled until the operator picks a real band."""
     mock_run.return_value = _completed(0)
     app = make_live_app(start=False)
     try:
         assert list(app._band_choices) == ["2.4 GHz", "5 GHz", "2.4 + 5 GHz"]
-        assert app._band_menu.get() == "2.4 + 5 GHz"
+        assert app._band_menu.get() == _BAND_UNCHOSEN
+        assert _state(app._pause_resume_button) == "disabled"
         assert app.status_bar._error_label.cget("text") == ""
     finally:
         app.on_close()
 
 
 @patch("aircommand.core.privilege.subprocess.run")
-def test_a_2_4ghz_only_adapter_offers_one_permanently_disabled_choice(mock_run, make_live_app):
+def test_start_is_disabled_until_a_band_is_chosen(mock_run, make_live_app):
+    """ADR-0018 points 3-4, dual-band case: Start begins disabled (the menu
+    reads the placeholder), clicking it while the placeholder shows is a
+    no-op -- CTkButton itself won't call a disabled button's command
+    (confirmed against this environment's real customtkinter: invoke() checks
+    self._state != tkinter.DISABLED before calling the command), so nothing in
+    Discovery runs -- and it enables the instant a real band is picked."""
+    mock_run.return_value = _completed(0)
+    spawned: list[list[str]] = []
+    app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)), start=False)
+    try:
+        assert app._band_menu.get() == _BAND_UNCHOSEN
+        assert _state(app._pause_resume_button) == "disabled"
+
+        app._pause_resume_button.invoke()   # no-op: placeholder still showing
+        assert app._discovery_handle is None
+        assert not any(argv[0] == "airodump-ng" for argv in spawned)
+
+        _pick_band(app, "2.4 + 5 GHz")
+        assert _state(app._pause_resume_button) == "normal"
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_a_2_4ghz_only_adapter_still_needs_one_explicit_pick(mock_run, make_live_app):
+    """ADR-0018 point 5 amends ADR-0013's old "permanently disabled below two
+    choices" rule: a single real choice is still enabled (not auto-selected),
+    because the operator must move off the placeholder once to satisfy the
+    Start/New Session gate, same as a multi-band adapter -- no special-casing
+    the single-choice case."""
     mock_run.return_value = _completed(0)
     spawned: list[list[str]] = []
     app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)), start=False, iw=IW_2_4_ONLY)
     try:
         assert list(app._band_choices) == ["2.4 GHz"]
-        assert app._band_menu.get() == "2.4 GHz"
-        assert _state(app._band_menu) == "disabled"   # even in Idle: nothing to choose between
+        assert app._band_menu.get() == _BAND_UNCHOSEN
+        assert _state(app._band_menu) == "normal"   # one real choice is still a choice to make
+        assert _state(app._pause_resume_button) == "disabled"   # nothing picked yet
         assert app.status_bar._error_label.cget("text") == ""
+
+        app._pause_resume_button.invoke()   # no-op: the placeholder is still showing
+        assert app._discovery_handle is None
+        assert not any(argv[0] == "airodump-ng" for argv in spawned)
+
+        _pick_band(app, "2.4 GHz")
+        assert _state(app._pause_resume_button) == "normal"
 
         app._pause_resume_button.invoke()
         _wait_for_airodump_spawns(spawned, 1)
         assert _airodump_bands(spawned) == ["bg"]
         _pause_and_drain(app)
 
-        assert _state(app._band_menu) == "disabled"   # Pause must not unlock a one-choice menu
+        assert _state(app._band_menu) == "normal"   # still the one real choice, still pickable
     finally:
         app.on_close()
 
@@ -411,8 +552,8 @@ def test_unreadable_adapter_bands_fall_back_to_2_4ghz_and_say_so(mock_run, make_
     app = make_live_app(start=False)
     try:
         assert list(app._band_choices) == ["2.4 GHz"]
-        assert app._band_menu.get() == "2.4 GHz"
-        assert _state(app._band_menu) == "disabled"
+        assert app._band_menu.get() == _BAND_UNCHOSEN
+        assert _state(app._band_menu) == "normal"   # one real choice is still pickable (ADR-0018 pt 5)
         assert "2.4 GHz only" in app.status_bar._error_label.cget("text")
     finally:
         app.on_close()
@@ -425,7 +566,7 @@ def test_the_selected_band_reaches_the_airodump_command_line(mock_run, make_live
     spawned: list[list[str]] = []
     app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)), start=False)
     try:
-        app._band_menu.set(label)
+        _pick_band(app, label)
         app._pause_resume_button.invoke()
 
         _wait_for_airodump_spawns(spawned, 1)
@@ -435,11 +576,18 @@ def test_the_selected_band_reaches_the_airodump_command_line(mock_run, make_live
 
 
 @patch("aircommand.core.privilege.subprocess.run")
-def test_the_default_band_selection_scans_both_bands(mock_run, make_live_app):
+def test_picking_the_both_bands_choice_scans_both(mock_run, make_live_app):
+    """ADR-0018 removed ADR-0013's old pre-selected default -- this test picks
+    "2.4 + 5 GHz" explicitly and asserts DiscoveryOptions.bands (via the
+    scripted airodump-ng spawn's --band flag) against a choice it made itself,
+    rather than relying on a GUI default that no longer exists."""
     mock_run.return_value = _completed(0)
     spawned: list[list[str]] = []
-    app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)))   # Start, selection untouched
+    app = make_live_app(on_spawn=lambda argv: spawned.append(list(argv)), start=False)
     try:
+        _pick_band(app, "2.4 + 5 GHz")
+        app._pause_resume_button.invoke()
+
         _wait_for_airodump_spawns(spawned, 1)
         assert _airodump_bands(spawned) == ["abg"]
     finally:
@@ -462,6 +610,41 @@ def test_band_menu_is_locked_while_scanning_and_pausing_and_unlocked_once_paused
         app.pump._tick()
         _assert_paused_state(app)
         assert _state(app._band_menu) == "normal"     # Paused
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_new_session_gate_is_the_and_of_paused_and_band_chosen(mock_run, make_live_app):
+    """ADR-0018 point 3's New Session rule is an AND of two independent
+    conditions -- Discovery's own Paused run-state, and a real band being
+    chosen -- combined through the shared _update_discovery_gating() helper,
+    not two separate ad-hoc toggles that could drift out of sync.
+
+    In practice the placeholder-while-Paused combination can't arise through
+    real GUI use: Paused is only reachable via a prior successful Start/Resume,
+    which itself requires a real band already picked (Start/Resume are
+    disabled until then), and nothing in this GUI's own code ever re-selects
+    the placeholder once a real band is chosen (ADR-0018 point 3's "one-time
+    gate in practice"). This test drives the band menu's value directly to
+    cover the AND itself, rather than relying on that invariant to make the
+    placeholder-while-Paused path untestable."""
+    mock_run.return_value = _completed(0)
+    app = make_live_app()   # Scanning, with a real band already chosen
+    try:
+        _pause_and_drain(app)
+        assert app._discovery_paused is True
+        assert _state(app._new_session_button) == "normal"   # Paused AND band chosen
+
+        app._band_menu.set(_BAND_UNCHOSEN)   # synthetic only -- see docstring
+        app._update_discovery_gating()
+        assert _state(app._new_session_button) == "disabled"   # Paused but NOT band chosen
+        assert _state(app._pause_resume_button) == "disabled"   # Resume is gated the same way
+
+        app._band_menu.set("5 GHz")
+        app._update_discovery_gating()
+        assert _state(app._new_session_button) == "normal"   # Paused AND band chosen again
+        assert _state(app._pause_resume_button) == "normal"
     finally:
         app.on_close()
 
@@ -846,8 +1029,9 @@ def test_check_kill_failure_on_first_start_surfaces_error_and_stays_idle_and_ret
     try:
         assert not any(argv[0] == "airmon-ng" for argv in spawned)   # launch is Idle
         assert app.status_bar._error_label.cget("text") == ""
-        _assert_idle_state(app)
+        _assert_idle_state(app, band_chosen=False)   # launch never picks a band (ADR-0018)
 
+        _pick_band(app, "2.4 + 5 GHz")
         app._pause_resume_button.invoke()
 
         assert "Discovery couldn't start" in app.status_bar._error_label.cget("text")
