@@ -9,6 +9,8 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from aircommand.gui.theme import PALETTE
+
 
 class SudoPasswordDialog(ctk.CTkToplevel):
     def __init__(self, master, *, error: Optional[str] = None) -> None:
@@ -24,7 +26,7 @@ class SudoPasswordDialog(ctk.CTkToplevel):
         self._entry.pack(padx=20, pady=(0, 10), fill="x")
         self._entry.bind("<Return>", lambda event: self._on_ok())
 
-        self._error_label = ctk.CTkLabel(self, text=error or "", text_color="red")
+        self._error_label = ctk.CTkLabel(self, text=error or "", text_color=PALETTE["danger"])
         self._error_label.pack(padx=20, pady=(0, 10))
 
         button_row = ctk.CTkFrame(self, fg_color="transparent")

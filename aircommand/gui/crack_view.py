@@ -1,5 +1,8 @@
 """HandshakePicker, WordlistPicker, CrackPanel — the Crack tab's three widgets.
-See docs/design/gui-structure.md 'Crack tab'.
+See docs/design/gui-structure.md 'Crack tab' for the event wiring and gating
+logic (unchanged here), and docs/design/gui-redesign-gridwatch.md §5
+("Cracking") for the Grid Watch restyle this file applies -- each widget's
+own content now lives inside an internal themed `Cell`, restyle only.
 
 No Cancel button here (considered, not added): unlike CapturePanel's deauth
 transmission (a real-world safety concern), an in-progress Crack is a local
@@ -17,18 +20,25 @@ import customtkinter as ctk
 from aircommand.core import CrackResultRow, Handshake, JobHandle
 from aircommand.core.domain import Exhausted, Found, StopReason
 from aircommand.core.events import CrackProgress, CrackResult
+from aircommand.gui.cell import Cell
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
 
 
 class HandshakePicker(ctk.CTkFrame):
     def __init__(self, master, app, on_selected: Callable[[Optional[Handshake]], None]) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self._on_selected = on_selected
         self._rows: dict[int, dict] = {}   # handshake.id -> {"row": CTkFrame, "button": CTkButton}
         self._selected_id: Optional[int] = None
 
-        ctk.CTkLabel(self, text="Handshakes", font=ctk.CTkFont(weight="bold")).pack(side="top", anchor="w")
-        self._body = ctk.CTkScrollableFrame(self)
+        cell = Cell(self, "Handshakes")
+        cell.pack(side="top", fill="both", expand=True)
+        # A plain CTkFrame, not CTkScrollableFrame -- app.py's page is already
+        # a CTkScrollableFrame (the whole page scrolls as one unit), so an
+        # internal scroll box here would reintroduce the per-cell
+        # fixed-height scroll the redesign explicitly removed elsewhere.
+        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
         self._body.pack(side="top", fill="both", expand=True)
 
         for handshake in app.engine.capture.list_handshakes():
@@ -38,18 +48,26 @@ class HandshakePicker(ctk.CTkFrame):
         self._add_row(event.handshake)
 
     def _add_row(self, handshake: Handshake) -> None:
-        row = ctk.CTkFrame(self._body)
+        row = ctk.CTkFrame(
+            self._body, fg_color=PALETTE["bg"], border_width=1,
+            border_color=PALETTE["border"], corner_radius=CORNER_RADIUS,
+        )
         row.pack(side="top", fill="x", pady=2)
 
         text = (
             f"{handshake.bssid} — {handshake.kind.value} — "
             f"captured {handshake.captured_at.strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        ctk.CTkLabel(row, text=text, anchor="w").pack(side="left", fill="x", expand=True, padx=(5, 5))
+        ctk.CTkLabel(
+            row, text=text, font=mono_font(11), text_color=PALETTE["text"], anchor="w",
+        ).pack(side="left", fill="x", expand=True, padx=(8, 5), pady=6)
 
-        button = ctk.CTkButton(row, text="Select", width=80,
-                                command=lambda h=handshake: self._select(h))
-        button.pack(side="right", padx=5)
+        button = ctk.CTkButton(
+            row, text="Select", width=80, command=lambda h=handshake: self._select(h),
+            fg_color="transparent", border_width=1, border_color=PALETTE["border"],
+            text_color=PALETTE["text"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )
+        button.pack(side="right", padx=6, pady=4)
 
         self._rows[handshake.id] = {"row": row, "button": button}
 
@@ -70,13 +88,25 @@ class WordlistPicker(ctk.CTkFrame):
     consistency would be pointless -- keep it minimal."""
 
     def __init__(self, master, on_selected: Callable[[Optional[Path]], None]) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._on_selected = on_selected
         self.selected_path: Optional[Path] = None
 
-        self._path_label = ctk.CTkLabel(self, text="No wordlist selected")
+        # No fixed title for this widget in the design spec's page table --
+        # "Wordlist" is this file's own pick, matching the "Handshakes"/
+        # "Crack" naming of its two sibling cells on the same page.
+        cell = Cell(self, "Wordlist")
+        cell.pack(side="top", fill="both", expand=True)
+
+        self._path_label = ctk.CTkLabel(
+            cell.body, text="No wordlist selected", font=mono_font(11), text_color=PALETTE["muted"],
+        )
         self._path_label.pack(side="left", padx=(0, 10))
-        self._browse_button = ctk.CTkButton(self, text="Choose Wordlist…", command=self._on_browse_clicked)
+        self._browse_button = ctk.CTkButton(
+            cell.body, text="Choose Wordlist…", command=self._on_browse_clicked,
+            fg_color="transparent", border_width=1, border_color=PALETTE["border"],
+            text_color=PALETTE["text"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )
         self._browse_button.pack(side="left")
 
     def _on_browse_clicked(self) -> None:
@@ -91,24 +121,31 @@ class WordlistPicker(ctk.CTkFrame):
 
 class CrackPanel(ctk.CTkFrame):
     def __init__(self, master, app) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self.selected_handshake: Optional[Handshake] = None
         self.selected_wordlist: Optional[Path] = None
         self.active_handle: Optional[JobHandle] = None
 
-        ctk.CTkLabel(self, text="Crack", font=ctk.CTkFont(weight="bold")).pack(side="top", anchor="w")
+        cell = Cell(self, "Crack")
+        cell.pack(side="top", fill="both", expand=True)
 
-        self._start_button = ctk.CTkButton(self, text="Start Crack", command=self.on_start_clicked)
+        self._start_button = ctk.CTkButton(
+            cell.body, text="Start Crack", command=self.on_start_clicked,
+            fg_color=PALETTE["accent"], hover_color=PALETTE["accent"], border_color=PALETTE["accent"],
+            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )
         self._start_button.pack(side="top", anchor="w", pady=(0, 5))
 
-        self._status_label = ctk.CTkLabel(self, text="")
+        self._status_label = ctk.CTkLabel(cell.body, text="", font=mono_font(12), text_color=PALETTE["text"])
         self._status_label.pack(side="top", anchor="w")
 
-        ctk.CTkLabel(self, text="Past Results", font=ctk.CTkFont(weight="bold")).pack(
-            side="top", anchor="w", pady=(10, 0)
-        )
-        self._results_body = ctk.CTkScrollableFrame(self)
+        ctk.CTkLabel(
+            cell.body, text="Past Results", font=ui_font(12, "bold"), text_color=PALETTE["text"], anchor="w",
+        ).pack(side="top", anchor="w", pady=(10, 0))
+        # A plain CTkFrame, not CTkScrollableFrame -- same reasoning as
+        # HandshakePicker._body above: the page itself already scrolls.
+        self._results_body = ctk.CTkFrame(cell.body, fg_color="transparent")
         self._results_body.pack(side="top", fill="both", expand=True)
 
         self._update_button_state()
@@ -133,7 +170,10 @@ class CrackPanel(ctk.CTkFrame):
         if self.selected_handshake is None:
             return
         for result in self._app.engine.crack.list_results(self.selected_handshake):
-            ctk.CTkLabel(self._results_body, text=self._format_result(result), anchor="w").pack(side="top", fill="x")
+            ctk.CTkLabel(
+                self._results_body, text=self._format_result(result), font=mono_font(11),
+                text_color=PALETTE["text"], anchor="w",
+            ).pack(side="top", fill="x")
 
     def _format_result(self, result: CrackResultRow) -> str:
         # ADR-0009: a crashed hashcat run leaves outcome=Exhausted() (CrackOutcome

@@ -41,6 +41,8 @@ from dataclasses import dataclass
 
 import customtkinter as ctk
 
+from aircommand.gui.theme import PALETTE, mono_font, ui_font
+
 
 @dataclass(frozen=True)
 class Column:
@@ -49,13 +51,20 @@ class Column:
 
 
 def build_header(parent: ctk.CTkFrame, columns: tuple[Column, ...]) -> ctk.CTkFrame:
-    """One bold label per column, each pinned to its Column.width. Pass the
-    SAME `columns` tuple to add_row()/update_row() below for the body grid --
-    that pairing is what keeps the two separate grid masters aligned."""
-    header = ctk.CTkFrame(parent)
+    """One muted label per column (design spec: .table's "muted 10.5px
+    headers"), each pinned to its Column.width. Pass the SAME `columns` tuple
+    to add_row()/update_row() below for the body grid -- that pairing is what
+    keeps the two separate grid masters aligned. Returns a plain CTkFrame
+    using .grid() internally, same as before the Grid Watch restyle -- kept
+    this way (no extra divider/border wrapper baked in here) because at
+    least one caller (TargetPicker) grids its own "Add manually" button
+    directly onto this return value; every caller that wants the header set
+    visually apart from the body now wraps this whole table in a themed Cell
+    instead, whose own head/body border already provides that structure."""
+    header = ctk.CTkFrame(parent, fg_color="transparent")
     for col_index, column in enumerate(columns):
         ctk.CTkLabel(
-            header, text=column.title, font=ctk.CTkFont(weight="bold"),
+            header, text=column.title, font=ui_font(10), text_color=PALETTE["muted"],
             width=column.width, anchor="w",
         ).grid(row=0, column=col_index, padx=5, sticky="w")
     return header
@@ -82,6 +91,8 @@ def add_row(
         entry = ctk.CTkEntry(
             body, width=column.width, fg_color="transparent",
             border_width=0, corner_radius=0, justify="left",
+            font=mono_font(11), text_color=PALETTE["text"],   # design spec:
+            # "11.5px Fira Code data cells" -- adapter names, BSSIDs, etc.
         )
         _set_cell_text(entry, value)
         entry.grid(row=row_index, column=col_index, padx=5, pady=2, sticky="w")

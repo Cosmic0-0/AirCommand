@@ -23,8 +23,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--adapter",
-        required=True,
-        help="Wifi interface name to use (e.g. wlan0). See `ip link`.",
+        help="Wifi interface name to pre-select (e.g. wlan0). See `ip link`. Optional -- "
+        "if omitted, pick one on the Management page once the app is open.",
     )
     parser.add_argument(
         "--db-path",

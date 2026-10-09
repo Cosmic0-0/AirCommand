@@ -63,7 +63,7 @@ def test_processes_terminated_with_interrupted_targets_mentions_audit_log():
 
         assert bar._reconciliation_banner is not None
         banner_text = _banner_label_text(bar._reconciliation_banner)
-        assert "Audit Log" in banner_text
+        assert "Logs" in banner_text   # renamed from "Audit Log tab" -- see status_bar.py
     finally:
         root.destroy()
 
@@ -77,11 +77,11 @@ def test_show_sudo_warning_and_clear_sudo_warning_toggle_privilege_label():
 
         failed = SudoKeepaliveFailed(event_id=uuid.uuid4(), occurred_at=datetime.now(), consecutive_failures=1)
         bar.show_sudo_warning(failed)
-        assert "LOST" in bar._privilege_label.cget("text")
+        assert "LOST" in bar._privilege_pill._label.cget("text")
 
         recovered = SudoKeepaliveRecovered(event_id=uuid.uuid4(), occurred_at=datetime.now())
         bar.clear_sudo_warning(recovered)
-        assert "ACTIVE" in bar._privilege_label.cget("text")
+        assert "Sudo session active" == bar._privilege_pill._label.cget("text")
     finally:
         root.destroy()
 

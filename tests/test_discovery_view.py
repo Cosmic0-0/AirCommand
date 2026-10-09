@@ -16,6 +16,7 @@ from aircommand.core.domain import EncryptionType, MacAddress, Network
 from aircommand.core.engine import Engine
 from aircommand.core.events import NetworkDiscovered, NetworkSightingUpdated, TargetAdded, TargetRemoved
 from aircommand.core.procutil import FakeProcRunner
+from aircommand.gui.cell import Cell
 from aircommand.gui.discovery_view import NetworksView, TargetPicker
 
 BSSID_1 = "AA:BB:CC:DD:EE:01"
@@ -87,6 +88,23 @@ def make_target_removed(bssid) -> TargetRemoved:
 
 
 # --- NetworksView ------------------------------------------------------------------
+
+
+def test_networks_view_wraps_its_table_in_a_titled_cell_with_no_internal_scroll(tmp_path):
+    """Design spec §5/§6 item 3: "Networks seen" is a Cell, and the table body
+    grows with the page instead of carrying its own fixed-height scroll box."""
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        assert not isinstance(view._body, ctk.CTkScrollableFrame)
+        assert isinstance(view._body, ctk.CTkFrame)
+
+        cell = view._body.master.master
+        assert isinstance(cell, Cell)
+        assert cell._title_label.cget("text") == "Networks seen"
+    finally:
+        root.destroy()
 
 
 def test_does_not_seed_from_networks_persisted_by_an_earlier_discovery_job(tmp_path):
@@ -270,6 +288,24 @@ def test_add_as_target_dialog_empty_label_shows_error_and_does_not_add(tmp_path)
 
 
 # --- TargetPicker ------------------------------------------------------------------
+
+
+def test_wraps_its_table_in_a_titled_cell_with_no_internal_scroll(tmp_path):
+    """Design spec §5/§6 item 3: "Target allowlist" is a Cell, and the table
+    body grows with the page instead of carrying its own fixed-height scroll
+    box."""
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        picker = TargetPicker(root, _FakeApp(engine))
+        assert not isinstance(picker._body, ctk.CTkScrollableFrame)
+        assert isinstance(picker._body, ctk.CTkFrame)
+
+        cell = picker._body.master.master
+        assert isinstance(cell, Cell)
+        assert cell._title_label.cget("text") == "Target allowlist"
+    finally:
+        root.destroy()
 
 
 def test_target_picker_seeds_from_existing_targets(tmp_path):

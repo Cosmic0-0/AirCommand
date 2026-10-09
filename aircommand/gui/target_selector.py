@@ -13,6 +13,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from aircommand.core import BSSID, Target
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
 
 
 class TargetSelector(ctk.CTkFrame):
@@ -34,15 +35,23 @@ class TargetSelector(ctk.CTkFrame):
         on_change: Callable[[Optional[Target]], None],
         include_all_option: bool = False,
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self._on_change = on_change
         self._include_all_option = include_all_option
         self._targets_by_label: dict[str, Optional[Target]] = {}  # label -> Target, or None for "All Targets"
         self._selected_label: Optional[str] = None
 
-        ctk.CTkLabel(self, text="Target:").pack(side="left", padx=(0, 5))
-        self._menu = ctk.CTkOptionMenu(self, values=[self._NO_TARGETS_LABEL], command=self._on_menu_selected)
+        ctk.CTkLabel(self, text="Target:", font=ui_font(11), text_color=PALETTE["muted"]).pack(
+            side="left", padx=(0, 5)
+        )
+        self._menu = ctk.CTkOptionMenu(
+            self, values=[self._NO_TARGETS_LABEL], command=self._on_menu_selected,
+            font=mono_font(11), text_color=PALETTE["text"], fg_color=PALETTE["bg"],
+            button_color=PALETTE["panel"], button_hover_color=PALETTE["border"],
+            dropdown_fg_color=PALETTE["panel"], dropdown_text_color=PALETTE["text"],
+            corner_radius=CORNER_RADIUS,
+        )
         self._menu.pack(side="left")
 
         self._rebuild(app.engine.targets.list())

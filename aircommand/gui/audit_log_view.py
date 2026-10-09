@@ -1,7 +1,11 @@
 """AuditLogView — the Audit Log tab: a TargetSelector-driven filter over
 engine.capture.list_audit_log(), plus a persistent "interrupted prior session"
 banner (ADR-0004) and a live DeauthFired append. See
-docs/design/gui-structure.md 'Audit Log tab'.
+docs/design/gui-structure.md 'Audit Log tab' for that wiring (unchanged here),
+and docs/design/gui-redesign-gridwatch.md §5 ("Logs") for the Grid Watch
+restyle this file applies -- banner, filter row, and the log table all now
+live inside one internal themed `Cell` titled "Transmission log", restyle
+only, plus FAILED rows rendering via `Tag` instead of appended text.
 
 This is also where a deliberately-deferred piece of wiring from the Target
 Actions tab slice finally happens: CapturePanel registers its OWN per-job
@@ -20,14 +24,19 @@ import customtkinter as ctk
 
 from aircommand.core import Target
 from aircommand.core.events import DeauthFired
+from aircommand.gui.cell import Cell, Tag
 from aircommand.gui.target_selector import TargetSelector
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
 
 
 class AuditLogView(ctk.CTkFrame):
     def __init__(self, master, app, interrupted_deauth_targets: list[Target]) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self._current_filter_target: Optional[Target] = None  # None = "All Targets"
+
+        cell = Cell(self, "Transmission log")
+        cell.pack(side="top", fill="both", expand=True)
 
         if interrupted_deauth_targets:
             ssid_list = ", ".join(t.ssid for t in interrupted_deauth_targets)
@@ -37,7 +46,8 @@ class AuditLogView(ctk.CTkFrame):
                 "unlogged before this reconciliation."
             )
             self._banner_label = ctk.CTkLabel(
-                self, text=banner_text, wraplength=600, justify="left", text_color="orange"
+                cell.body, text=banner_text, font=ui_font(11), wraplength=600,
+                justify="left", text_color=PALETTE["warn"],
             )
             self._banner_label.pack(side="top", anchor="w", pady=(0, 10))
         else:
@@ -54,15 +64,23 @@ class AuditLogView(ctk.CTkFrame):
         # construction-order comment. Construction order and pack() (i.e.
         # on-screen layout) order are independent -- packing control_row
         # before self._body below still renders banner/control_row/body
-        # top-to-bottom as intended.
-        self._body = ctk.CTkScrollableFrame(self)
+        # top-to-bottom as intended. A plain CTkFrame, not CTkScrollableFrame
+        # -- app.py's page is already a CTkScrollableFrame (the whole page
+        # scrolls as one unit), so an internal scroll box here would
+        # reintroduce the per-cell fixed-height scroll the redesign
+        # explicitly removed elsewhere.
+        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
 
-        control_row = ctk.CTkFrame(self, fg_color="transparent")
+        control_row = ctk.CTkFrame(cell.body, fg_color="transparent")
         self.target_selector = TargetSelector(
             control_row, app, on_change=self._on_filter_changed, include_all_option=True
         )
         self.target_selector.pack(side="left")
-        self._refresh_button = ctk.CTkButton(control_row, text="Refresh", command=self._refresh)
+        self._refresh_button = ctk.CTkButton(
+            control_row, text="Refresh", command=self._refresh,
+            fg_color="transparent", border_width=1, border_color=PALETTE["border"],
+            text_color=PALETTE["text"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )
         self._refresh_button.pack(side="left", padx=(10, 0))
 
         control_row.pack(side="top", fill="x", pady=(0, 10))
@@ -93,11 +111,21 @@ class AuditLogView(ctk.CTkFrame):
         # succeeded/error_detail: docs/adr/0012 -- a failed injection attempt
         # is still logged (ADR-0001's "every firing, no exceptions" covers the
         # attempt, not only a confirmed-successful one) but must read as
-        # distinct from a real burst, not identical to one.
+        # distinct from a real burst, not identical to one -- rendered here as
+        # a separate Tag(warn=True) ("design spec: `.tag-warn` (amber) flags
+        # rows like 'Interrupted by crash'") rather than appended plain text.
         text = f"{fired_at.strftime('%Y-%m-%d %H:%M:%S')} — {target_label} — {frame_count} frame(s)"
-        if not succeeded:
-            text += f" — FAILED ({error_detail or 'no further detail'})"
-        ctk.CTkLabel(self._body, text=text, anchor="w").pack(side="top", fill="x")
+        if succeeded:
+            ctk.CTkLabel(
+                self._body, text=text, font=mono_font(11), text_color=PALETTE["text"], anchor="w",
+            ).pack(side="top", fill="x")
+            return
+        row = ctk.CTkFrame(self._body, fg_color="transparent")
+        row.pack(side="top", fill="x")
+        ctk.CTkLabel(
+            row, text=text, font=mono_font(11), text_color=PALETTE["text"], anchor="w",
+        ).pack(side="left", padx=(0, 8))
+        Tag(row, text=f"FAILED ({error_detail or 'no further detail'})", warn=True).pack(side="left")
 
     def append(self, event: DeauthFired) -> None:
         if self._current_filter_target is not None and event.target_id != self._current_filter_target.id:

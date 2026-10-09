@@ -1,6 +1,7 @@
 """EnumeratePanel — start an nmap Enumerate scan against the Target Actions
 tab's currently selected Target. See docs/design/gui-structure.md 'Target
-Actions tab'.
+Actions tab' and docs/design/gui-redesign-gridwatch.md §5/§6 item 5: Enumerate
+is visually and structurally its own Cell, separate from Capture/Deauth.
 
 No Cancel button here (deliberate, not an oversight): enumerate.py's own
 _drive docstring already notes cancellation isn't meaningfully checkable
@@ -21,7 +22,9 @@ import customtkinter as ctk
 from aircommand.core import AdapterBusy, JobHandle, RadioCommandFailed, Target
 from aircommand.core.domain import EnumHost
 from aircommand.core.events import EnumerationFailed, NmapScanCompleted
+from aircommand.gui.cell import Cell
 from aircommand.gui.table import Column, add_row, build_header
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, ui_font
 
 
 class EnumeratePanel(ctk.CTkFrame):
@@ -32,26 +35,42 @@ class EnumeratePanel(ctk.CTkFrame):
     _COLUMNS = (Column("IP", 120), Column("Hostname", 160), Column("Open Ports", 220))
 
     def __init__(self, master, app) -> None:
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self._app = app
         self.target: Optional[Target] = None
         self.active_handle: Optional[JobHandle] = None
 
-        ctk.CTkLabel(self, text="Enumerate", font=ctk.CTkFont(weight="bold")).pack(side="top", anchor="w")
+        cell = Cell(self, "Enumerate")
+        cell.pack(side="top", fill="both", expand=True)
 
-        self._hint_label = ctk.CTkLabel(self, text=self._HINT_TEXT, wraplength=500, justify="left")
-        self._hint_label.pack(side="top", anchor="w", pady=(0, 5))
+        self._hint_label = ctk.CTkLabel(
+            cell.body, text=self._HINT_TEXT, font=ui_font(11), text_color=PALETTE["muted"],
+            wraplength=500, justify="left", anchor="w",
+        )
+        self._hint_label.pack(side="top", anchor="w", pady=(0, 8))
 
-        self._start_button = ctk.CTkButton(self, text="Start Enumerate", command=self.on_start_clicked)
-        self._start_button.pack(side="top", anchor="w", pady=(0, 5))
+        self._start_button = ctk.CTkButton(
+            cell.body, text="Start Enumerate", command=self.on_start_clicked,
+            fg_color=PALETTE["accent"], hover_color=PALETTE["accent"], border_color=PALETTE["accent"],
+            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )
+        self._start_button.pack(side="top", anchor="w", pady=(0, 8))
 
-        self._status_label = ctk.CTkLabel(self, text="")
-        self._status_label.pack(side="top", anchor="w")
+        self._status_label = ctk.CTkLabel(
+            cell.body, text="", font=ui_font(11), text_color=PALETTE["muted"], anchor="w",
+        )
+        self._status_label.pack(side="top", anchor="w", pady=(0, 8))
 
-        header = build_header(self, self._COLUMNS)
+        header = build_header(cell.body, self._COLUMNS)
         header.pack(side="top", fill="x")
 
-        self._results_body = ctk.CTkScrollableFrame(self)
+        # Plain CTkFrame, not CTkScrollableFrame: design spec §6 item 3 -- no
+        # page puts its own fixed-height scroll box inside an individual
+        # cell any more. The page itself (a CTkScrollableFrame, one layer up
+        # in app.py) already scrolls as a single unit; nesting a second
+        # scrollable frame in here would reintroduce exactly what that rule
+        # removed elsewhere (NetworksView/TargetPicker got the same fix).
+        self._results_body = ctk.CTkFrame(cell.body, fg_color=PALETTE["bg"])
         self._results_body.pack(side="top", fill="both", expand=True)
 
         self._update_button_state()

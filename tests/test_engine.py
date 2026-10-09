@@ -24,9 +24,28 @@ from aircommand.core.domain import MacAddress, StopReason
 from aircommand.core.engine import Engine
 from aircommand.core.events import CaptureStopped
 from aircommand.core.procutil import FakeProcRunner
+from aircommand.core.rf import RadioController
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 PASSWORD = "correct-horse-battery-staple"
+
+
+# --- ADR-0017: adapter becomes optional, Engine.radio is the new public facade --
+
+def test_engine_constructs_with_no_adapter_selected_yet_and_exposes_radio(tmp_path):
+    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter=None, proc=FakeProcRunner(script={}))
+
+    assert isinstance(engine.radio, RadioController)
+    assert engine.radio.selected_adapter is None
+
+
+def test_engine_still_constructs_with_an_adapter_pre_selected(tmp_path):
+    # Same call shape every other test in this file already uses -- optional
+    # with a real value passed is identical to the old required-arg behavior.
+    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter="wlan0", proc=FakeProcRunner(script={}))
+
+    assert isinstance(engine.radio, RadioController)
+    assert engine.radio.selected_adapter == "wlan0"
 
 # RadioController.reserve() really spawns "airmon-ng" on its first monitor-mode
 # use -- see test_capture_acceptance.py's identical constant/comment.

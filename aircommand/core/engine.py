@@ -38,7 +38,7 @@ class Engine:
         self,
         db_path: "str | Path",
         work_dir: "str | Path",
-        adapter: str,
+        adapter: Optional[str] = None,
         proc: Optional[ProcRunner] = None,
         discovery_poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
         capture_handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
@@ -56,6 +56,10 @@ class Engine:
         # instead — see procutil.py and the headless call site in the design doc.
         self._proc: ProcRunner = proc or SubprocessRunner(self.privilege.run_privileged)
         self._rf = RadioController(adapter, self._proc)
+        self.radio = self._rf   # the Management page's public facade onto RadioController
+        # (ADR-0017) -- adapter selection moved from a mandatory launch-time flag to
+        # an in-app, changeable decision, so the GUI needs a way in that isn't
+        # already private to Engine the way self._rf is.
 
         # self._db.networks/.handshakes/.audit_log/.crack_results/.enum_results
         # below are each facade's MAIN-connection repo, for that facade's own
