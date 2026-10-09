@@ -41,15 +41,18 @@ a hard boundary, not just a suggestion.
 From the repo root, with the project's venv active:
 
 ```
-.venv/bin/python -m aircommand --adapter wlan0   # replace with your interface name from `ip link`
+.venv/bin/python -m aircommand   # --adapter is optional; see below
 ```
 
 Or, once installed with `pip install -e .`, the console-script form:
 
 ```
-aircommand --adapter wlan0
+aircommand
 ```
 
+`--adapter` pre-selects a wifi interface name (e.g. `wlan0`, from `ip link`)
+so you don't have to pick one on the Management page after launch — it's
+optional, not required, and can still be changed at runtime from that page.
 `--db-path` and `--work-dir` default to `~/.aircommand/aircommand.db` and
 `~/.aircommand/work` respectively, and are created on first run if they don't
 exist. Pass `--help` to see all options.
@@ -60,12 +63,39 @@ exist. Pass `--help` to see all options.
    anything, including passive Discovery — there's no reduced-privilege mode.
    A wrong password re-prompts with an error; cancelling either prompt exits
    the app.
-2. Discovery does not start by itself. Pick a band in the **Band** dropdown,
-   then click **Start Discovery**. Give it a few seconds. It polls a CSV file
-   `airodump-ng` writes on a short interval, so networks don't all appear
-   instantly.
+2. The app opens on the **Management** page. If you didn't pass `--adapter`,
+   pick one from the adapter list here first — Discovery's Band dropdown and
+   every Action are disabled until an adapter is selected.
+3. Switch to **Discovery & Targets**. Discovery does not start by itself, and
+   the **Band** dropdown opens on a disabled "Choose a band…" placeholder —
+   **Start Discovery** stays disabled until you pick a real band. Give it a
+   few seconds after starting. It polls a CSV file `airodump-ng` writes on a
+   short interval, so networks don't all appear instantly.
 
-## The four tabs
+## The five pages
+
+### Management
+
+The landing page — it opens right after the sudo prompt, before Discovery or
+any Action can start.
+
+- Three stats: the currently selected **Adapter**, whether **Monitor mode**
+  is ON/OFF, and **Session time** (how long monitor mode has been on).
+- **Adapter select**: every wifi-capable interface AirCommand detected, each
+  as a clickable row (name, driver description, a LIVE/OFF pill). Clicking a
+  row switches AirCommand to that adapter — if monitor mode was running on
+  the old one, switching stops it first. Switching while Discovery is paused
+  also resets the Discovery & Targets page to Idle, since a Discovery session
+  is tied to one physical adapter.
+- **Monitor-mode controls**: **Check** (runs `airmon-ng check`, read-only),
+  **Kill Conflicting Process** (`airmon-ng check kill`), **Start Airmon-ng**
+  (relabels to "Airmon-ng Running" once monitor mode is on), **Stop
+  Airmon-ng**. All four need an adapter selected first; Stop additionally
+  needs monitor mode actually running. A "Last action" line under the buttons
+  shows the result of whichever you clicked last.
+- All four buttons (and switching adapters) fail with a visible error if
+  Discovery, Capture, or Enumerate currently holds the radio — free it first
+  (Pause Discovery, or wait for the running Action to finish).
 
 ### Discovery & Targets
 
@@ -78,12 +108,17 @@ Targets.
 
 - **Band** and **Start Discovery**: the dropdown lists only the bands your
   adapter supports, read from `iw`: "2.4 GHz", "5 GHz", and "2.4 + 5 GHz" when
-  it has both. An adapter with one band shows one entry. The dropdown is
-  editable before the first Start and while Discovery is paused, and greyed out
-  while a scan runs. A change applies the next time you click Resume or New
-  Session. If AirCommand can't read the adapter's bands, the dropdown offers
-  2.4 GHz only and the status bar says why. Scanning both bands means each
-  channel is visited less often, so networks can take longer to show up.
+  it has both. An adapter with one band still shows that one entry, and you
+  need to pick it explicitly — the dropdown opens on a "Choose a band…"
+  placeholder, and **Start Discovery stays disabled until you pick a real
+  band**, even if there's only one to choose. Once picked, it stays picked for
+  the rest of the session (switching adapters on the Management page resets
+  this). The dropdown is editable before the first Start and while Discovery
+  is paused, and greyed out while a scan runs. A change applies the next time
+  you click Resume or New Session. If AirCommand can't read the adapter's
+  bands, the dropdown offers 2.4 GHz only (still requiring the explicit pick)
+  and the status bar says why. Scanning both bands means each channel is
+  visited less often, so networks can take longer to show up.
 - **Add as Target**: click it on a row to authorize that specific network for
   gated Actions (Capture, Enumerate). You'll be asked for a label (e.g.
   "My house") — the BSSID/SSID/channel are pre-filled from the row.
@@ -93,7 +128,7 @@ Targets.
 - **Pause/Resume Discovery**: there's only one radio. Discovery holds it in a
   channel-hopping mode indefinitely, which blocks Capture and Enumerate
   outright (you'll see a "Radio busy" error if you don't pause first). Click
-  Pause before switching to the Target Actions tab to actually do something
+  Pause before switching to the Capture & Attack page to actually do something
   with a Target; Resume afterward to keep watching for new networks. Pause
   takes about a second to finish (the button reads "Pausing…" and both
   buttons are greyed out until the scan has really stopped). While paused the
@@ -107,31 +142,37 @@ Targets.
   and reopening AirCommand. Anything still in range reappears within a few
   seconds. Nothing is lost: Targets are untouched.
 
-### Target Actions
+### Capture & Attack
 
-Pick a Target from the dropdown at the top — this drives both panels below it.
+Pick a Target from the dropdown at the top — this drives all three sections
+below it, stacked top to bottom: Capture, then Deauth, then — separately —
+Enumerate.
 
 **Capture**
 - *Start Passive Capture*: listens for a handshake without transmitting
   anything. Works if the Target's own legitimate clients reconnect on their
   own; can take a while.
-- *Start Deauth-Assisted Capture*: actively transmits deauthentication frames
-  at the Target to force a client to reconnect (and hand over a handshake) —
-  much faster, but it's a real transmission, not passive listening. You'll
-  get a confirmation dialog first every time; every burst fired is written to
-  the Audit Log the instant it happens, with no way to skip that logging.
 - *Cancel*: stops an in-progress capture (enabled only while one is running).
 - Captured handshakes for this Target show up in a list under the buttons and
-  are also available from any Target in the Crack tab.
+  are also available from any Target on the Cracking page.
 
-**Enumerate**
+**Deauth** (its own section, bordered and titled in red — a destructive
+action, not part of Capture's passive listening)
+- *Fire Deauth*: actively transmits deauthentication frames at the Target to
+  force a client to reconnect (and hand over a handshake) — much faster than
+  passive Capture, but it's a real transmission. You'll get a confirmation
+  dialog first every time; every burst fired is written to the Audit Log the
+  instant it happens, with no way to skip that logging.
+
+**Enumerate** (its own section — visually and structurally separate from
+Capture/Deauth, though it contends for the same radio)
 - Before clicking *Start Enumerate*, join the Target's network yourself
   through your OS's normal wifi settings first — AirCommand doesn't do this
   for you (deliberately; see `enumerate.py`'s own docstring). If you haven't
   joined yet, the scan will fail with a readable error instead of hanging.
 - Results are a simple table: IP, hostname (if resolvable), open ports.
 
-### Crack
+### Cracking
 
 - Pick a captured Handshake from the list (from any Target, not just the one
   currently selected elsewhere).
@@ -144,7 +185,7 @@ Pick a Target from the dropdown at the top — this drives both panels below it.
   effect if left running (unlike a live Capture), so closing the app if you
   want to stop it is enough.
 
-### Audit Log
+### Logs
 
 Every deauth burst ever fired, across every Target, append-only. Filter by
 Target with the dropdown at top (or "All Targets"); *Refresh* re-queries if
@@ -161,10 +202,12 @@ Always visible at the bottom:
   sudo keepalive starts failing (e.g. your session's sudo timestamp got
   invalidated some other way). Privileged actions will start failing if you
   see this — re-launching re-establishes it.
+- The currently selected adapter's name (or `--` if none is selected yet).
+  Updates live if you switch adapters on the Management page.
 - A one-time banner if AirCommand cleaned up leftover processes from a
-  previous crash, with a pointer to the Audit Log tab if any of those were a
+  previous crash, with a pointer to the Logs page if any of those were a
   deauth session.
-- Error messages from any tab (e.g. "Radio busy") land here.
+- Error messages from any page (e.g. "Radio busy") land here.
 
 ## Closing
 

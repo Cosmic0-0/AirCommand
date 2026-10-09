@@ -1,5 +1,13 @@
 # NetworkManager: kill automatically when entering monitor mode, restore on the way back
 
+**Partially superseded by ADR-0017 (2026-10-09)**, for exactly one new flow:
+the Management page's manual Check/Kill/Start/Stop controls let the operator
+run `airmon-ng check`/`check kill`/`start`/`stop` by hand. The automatic
+behavior decided below — `check kill` and the NetworkManager restart running
+automatically around every Discovery/Capture/Enumerate mode switch — is
+unchanged; the manual page is a second, additional entry point, not a
+replacement.
+
 `RadioController` now runs `airmon-ng check kill` immediately before every managed->monitor switch (`_start_monitor_mode`), and restarts NetworkManager immediately after every monitor->managed switch (`_stop_monitor_mode`), instead of leaving both to the operator. This replaces the decision previously recorded in `_ensure_mode`'s comment, and supersedes the "confirmed, no code change needed" conclusion in `docs/roadmap.md`.
 
 ## Why

@@ -212,12 +212,12 @@ not a suggestion). Concretely:
       confirmed end to end, since this session had no interactive sudo to
       exercise it. The next real launch + Enumerate click is what closes
       that out, and is now also this checklist item's actual next step.**
-- [ ] Crack tab: pick the real Handshake from above, pick a real wordlist,
-      run a crack to completion (use a small wordlist that you know contains
-      the real key, to get a `Found` result in reasonable time, not just an
-      `Exhausted` one).
+- [ ] Cracking page (the old Crack tab, pre-redesign): pick the real
+      Handshake from above, pick a real wordlist, run a crack to completion
+      (use a small wordlist that you know contains the real key, to get a
+      `Found` result in reasonable time, not just an `Exhausted` one).
       **The underlying engine path is now confirmed this way, just not yet
-      through the actual GUI tab**: a real Engine + real `Crack`, driven
+      through the actual GUI page**: a real Engine + real `Crack`, driven
       directly (not through `App`/the Crack panel), against a real captured
       handshake and a real wordlist, through the real installed
       `hcxpcapngtool` and `hashcat` — found the real password. Two real bugs
@@ -225,8 +225,8 @@ not a suggestion). Concretely:
       hashcat's own stdout (ADR-0014), and hashcat's -m 22000 needing a real
       `hcxpcapngtool` conversion step it was never given (ADR-0015) — before
       ADR-0015, Crack could not find a real password at all, regardless of
-      ADR-0014's own fix. Still open: clicking through the actual Crack tab
-      for this same confirmation.
+      ADR-0014's own fix. Still open: clicking through the actual Cracking
+      page for this same confirmation.
 - [ ] Status bar: confirm the privilege indicator looks right; if you can
       arrange it, let sudo's cache lapse (or kill the keepalive) and confirm
       the "LOST" warning actually shows up.
@@ -273,9 +273,49 @@ Same ground rule as item 2: your own network, and only listening
 - [ ] Still open from ADR-0006, unchanged: 5GHz deauth-assisted Capture. The
       new adapter makes it testable, but nothing here tests it.
 
+## 4. Verify the Gridwatch redesign's new flows on real hardware
+
+Built 2026-10-09 on branch `feat/gridwatch-gui-redesign` (`docs/adr/0017` +
+`docs/adr/0018`; see `docs/roadmap.md`'s own entry for the full writeup).
+384 tests pass, against `FakeProcRunner` and a real Tk window — none of the
+boxes below have been run on real hardware yet. Both ADRs' own Consequences
+sections flag this explicitly as open.
+
+- [ ] Management page: `list_adapters()` against this machine's real sysfs
+      tree — confirm every real wifi-capable interface shows up, with a
+      sane driver description and an accurate LIVE/OFF pill.
+- [ ] Click an adapter row and confirm `select_adapter()` really switches —
+      if this machine only has one monitor-mode-capable adapter, at minimum
+      confirm selecting it works and re-selecting the same one is a no-op;
+      a genuine two-adapter switch (stopping monitor mode on the old one
+      first) needs a second adapter to test with.
+- [ ] Check / Kill Conflicting Process / Start Airmon-ng / Stop Airmon-ng,
+      each against the real selected adapter — confirm the button
+      gating (disabled with no adapter selected, Start relabels once live,
+      Stop disabled until live) matches what actually happens, and that
+      Start's underlying check-kill still runs every time, same as the
+      automatic path.
+- [ ] Confirm switching adapters while a job (Discovery/Capture/Enumerate)
+      holds the radio shows a visible `AdapterBusy` error instead of
+      silently doing nothing.
+- [ ] Discovery & Targets' revised band gate (ADR-0018): confirm the
+      dropdown really opens on "Choose a band…" and that value can't be
+      picked as a real `DiscoveryOptions.bands`; confirm Start Discovery
+      truly can't be clicked before a real pick, including on a
+      single-supported-band adapter; confirm the dual-band adapter
+      (`wlx5c628b9faa9d`, phy3, per ADR-0013's own hardware notes) still
+      reports both bands correctly once a real choice is made.
+- [ ] Capture & Attack page: confirm the three stacked sections (Capture,
+      Deauth, Enumerate) all still work exactly as they did on the old
+      Target Actions tab — this redesign changed layout only, not wiring,
+      but a real click-through is still worth doing once.
+- [ ] Launch with no `--adapter` flag at all and confirm the app opens
+      correctly on the Management page with nothing pre-selected, rather
+      than assuming the `Optional[str]` default path only works in tests.
+
 ## Once the above is done
 
 That's it — there's no further roadmap phase written down. v1 is "done" when
-items 1, 2 and 3 above have actually been carried out, for real, on your own
-hardware. Item 0 no longer blocks either — you can start whenever you're
+items 1 through 4 above have actually been carried out, for real, on your
+own hardware. Item 0 no longer blocks either — you can start whenever you're
 ready.
