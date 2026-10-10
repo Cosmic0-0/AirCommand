@@ -280,7 +280,7 @@ class RadioController:
 
 ### Handshake provenance for Crack — no separate check
 
-`Crack.start(handshake: Handshake, wordlist_path: Path)` takes a `Handshake` value, not a path or BSSID string. Since `Handshake` is mint-restricted to `Capture`, and `Capture` only produces one after a fresh `require_target` succeeded, `target_id` on the `Handshake` is proof Crack can trust without re-querying `Allowlist` — matching CONTEXT.md exactly. The SQLite FK `handshakes.target_id REFERENCES targets.id` is a referential-integrity constraint, a different concern from the authorization check itself, worth naming so it isn't mistaken for a second, redundant gate.
+`Crack.start(handshake: Handshake, wordlist_path: Path)` takes a `Handshake` value, not a path or BSSID string. Since `Handshake` is mint-restricted to `Capture`, and `Capture` only produces one after a fresh `require_target` succeeded, `target_id` on the `Handshake` is proof Crack can trust without re-querying `Allowlist` — matching CONTEXT.md exactly. `handshakes.target_id REFERENCES targets.id` documents that relationship. It is not an enforced SQLite foreign key. `PRAGMA foreign_keys` is never turned on, since job rows are deleted at termination while `handshakes`/`audit_log`/`enum_results` keep referencing them. Either way, this is a different concern from the authorization check itself, worth naming so it isn't mistaken for a second, redundant gate.
 
 ### Cancellation — a command in, an event out
 
