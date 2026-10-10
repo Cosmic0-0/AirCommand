@@ -7,12 +7,15 @@ docs/design/core-gui-boundary.md 'SQLite and the event stream'.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable
 
 from aircommand.core.domain import BSSID, Network
 from aircommand.core.events import EventBus, NetworkSightingUpdated
 from aircommand.core.persistence.db import ConnectionScope
+
+logger = logging.getLogger(__name__)
 
 
 class SightingBatcher:
@@ -58,7 +61,12 @@ class SightingBatcher:
         with self._lock:
             pending, self._pending = self._pending, {}
         for network in pending.values():
-            self._scope.networks.update_sighting(network)
+            try:
+                self._scope.networks.update_sighting(network)
+            except Exception:
+                # One bad row here must not also take self._scope.close() below
+                # with it -- same reasoning as _flush_loop's own try/except.
+                logger.exception("SightingBatcher failed to flush a sighting for %s", network.bssid)
         self._scope.close()
 
     def _on_event(self, event: NetworkSightingUpdated) -> None:
@@ -70,4 +78,12 @@ class SightingBatcher:
             with self._lock:
                 batch, self._pending = self._pending, {}
             for network in batch.values():
-                self._scope.networks.update_sighting(network)
+                try:
+                    self._scope.networks.update_sighting(network)
+                except Exception:
+                    # This is a daemon thread with nothing else watching it --
+                    # letting one bad write raise out of here kills the thread
+                    # silently, and every sighting queued after that point is
+                    # never flushed again for the rest of the session. Log and
+                    # keep going instead; the next tick gets a fresh batch.
+                    logger.exception("SightingBatcher failed to flush a sighting for %s", network.bssid)

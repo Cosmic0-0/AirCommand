@@ -1,10 +1,15 @@
-from datetime import datetime
+import uuid
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from aircommand.core.domain import (
-    Band, DiscoveryOptions, EncryptionType, MacAddress, Network, band_of_channel,
+    Band, DeauthOptions, DiscoveryOptions, EncryptionType, HandshakeKind, JobId, MacAddress, Network,
+    band_of_channel,
 )
+from aircommand.core.persistence.db import Database
 
 CANONICAL = "AA:BB:CC:DD:EE:FF"
 
@@ -149,3 +154,112 @@ def test_discovery_options_default_is_2_4ghz_only_matching_airodumps_own_default
 def test_discovery_options_rejects_an_empty_band_set():
     with pytest.raises(ValueError):
         DiscoveryOptions(bands=frozenset())
+
+
+# --- Target / Handshake mint protection ------------------------------------------------
+
+# Target is only legitimately constructed through TargetRepository (via
+# Allowlist in production); Handshake only through HandshakeRepository (via
+# Capture). Both repository methods pass the right module-private mint
+# sentinel as a keyword argument, so going through them -- rather than calling
+# Target(...)/Handshake(...) directly here -- is what actually exercises the
+# real, reachable construction path, same as test_persistence_db.py's own
+# target/handshake round-trip tests.
+
+
+def _make_target(db: Database):
+    return db.targets.upsert(MacAddress.parse(CANONICAL), "Home-WiFi", 6, "My house")
+
+
+def _make_handshake(db: Database, target):
+    return db.handshakes.insert(
+        target_id=target.id,
+        bssid=target.bssid,
+        capture_job_id=JobId(uuid.uuid4()),
+        cap_file_path=Path("capture.cap"),
+        cap_file_sha256="a" * 64,
+        kind=HandshakeKind.WPA2_EAPOL,
+    )
+
+
+def test_target_construction_through_the_repository_still_works():
+    db = Database(":memory:")
+
+    target = _make_target(db)
+
+    assert target.bssid == MacAddress.parse(CANONICAL)
+    assert target.label == "My house"
+
+
+def test_handshake_construction_through_the_repository_still_works():
+    db = Database(":memory:")
+    target = _make_target(db)
+
+    handshake = _make_handshake(db, target)
+
+    assert handshake.target_id == target.id
+    assert handshake.kind == HandshakeKind.WPA2_EAPOL
+
+
+def test_dataclasses_replace_cannot_forge_a_tampered_target():
+    # Before this fix, _proof was a plain stored field (field(default=None,
+    # ...)): dataclasses.replace() reuses an EXISTING instance's own stored
+    # value for any field the caller doesn't override, so
+    # replace(target, bssid=attacker_bssid) silently carried over the
+    # original's already-valid proof and the tampered copy's __post_init__
+    # saw a valid mint sentinel anyway. _proof is now an InitVar, which is
+    # never stored on the instance at all -- replace() has nothing to recover
+    # it from, so a call that doesn't explicitly pass _proof= fails instead of
+    # quietly minting an unauthorized Target with an attacker-controlled bssid.
+    db = Database(":memory:")
+    target = _make_target(db)
+    attacker_bssid = MacAddress.parse("00:11:22:33:44:55")
+
+    with pytest.raises((TypeError, ValueError)):
+        replace(target, bssid=attacker_bssid)
+
+
+def test_dataclasses_replace_cannot_forge_a_tampered_handshake():
+    db = Database(":memory:")
+    target = _make_target(db)
+    handshake = _make_handshake(db, target)
+    attacker_bssid = MacAddress.parse("00:11:22:33:44:55")
+
+    with pytest.raises((TypeError, ValueError)):
+        replace(handshake, bssid=attacker_bssid)
+
+
+# --- DeauthOptions ----------------------------------------------------------------------
+
+
+def test_deauth_options_defaults_construct_fine():
+    options = DeauthOptions()
+
+    assert options.burst_size == 5
+    assert options.interval == timedelta(seconds=15)
+    assert options.max_bursts is None
+
+
+def test_deauth_options_accepts_explicit_valid_values():
+    options = DeauthOptions(burst_size=1, interval=timedelta(seconds=0), max_bursts=0)
+
+    assert options.burst_size == 1
+    assert options.interval == timedelta(seconds=0)
+    assert options.max_bursts == 0
+
+
+def test_deauth_options_rejects_burst_size_zero():
+    # burst_size=0 means "continuous deauth, never stop" to aireplay-ng -- that
+    # must be rejected at construction, not silently accepted.
+    with pytest.raises(ValueError):
+        DeauthOptions(burst_size=0)
+
+
+def test_deauth_options_rejects_negative_interval():
+    with pytest.raises(ValueError):
+        DeauthOptions(interval=timedelta(seconds=-1))
+
+
+def test_deauth_options_rejects_negative_max_bursts():
+    with pytest.raises(ValueError):
+        DeauthOptions(max_bursts=-1)

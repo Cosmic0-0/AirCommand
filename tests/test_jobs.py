@@ -2,6 +2,8 @@ import threading
 import time
 import uuid
 
+import pytest
+
 from aircommand.core.domain import JobId, JobKind
 from aircommand.core.jobs import JobRegistry
 from aircommand.core.persistence.db import Database
@@ -25,6 +27,22 @@ class _RaisingOnMarkTerminalRepo:
 
     def mark_terminal(self, job_id):
         raise RuntimeError("DB write failed")
+
+
+class _RaisingOnInsertRunningRepo:
+    """Mirrors new_job()'s own DB insert failing (e.g. a lost connection, a
+    schema problem) -- the inverse of _RaisingOnMarkTerminalRepo above, which
+    covers mark_terminal() failing instead. mark_terminal() here just
+    delegates to a real repo; no test below needs it to do anything else."""
+
+    def __init__(self, repo):
+        self._repo = repo
+
+    def insert_running(self, job_id, kind, target_id):
+        raise RuntimeError("DB insert failed")
+
+    def mark_terminal(self, job_id):
+        self._repo.mark_terminal(job_id)
 
 
 def test_new_job_mints_a_working_cancellation_token():
@@ -133,3 +151,18 @@ def test_mark_terminal_completes_in_memory_cleanup_even_if_the_db_write_raises()
 
     assert elapsed < 1.0
     assert job_id not in registry.active_job_ids()
+
+
+def test_new_job_reraises_and_leaves_no_trace_when_insert_running_fails():
+    # Before this fix, a failing insert_running() left job_id permanently
+    # sitting in the registry's own _tokens/_terminal_events with no
+    # corresponding DB row and nothing that would ever clean it up (it never
+    # reaches mark_terminal(), since the start_*() call that was minting it
+    # never got that far). new_job() must undo its own in-memory registration
+    # before re-raising.
+    registry = JobRegistry(_RaisingOnInsertRunningRepo(Database(":memory:").jobs))
+
+    with pytest.raises(RuntimeError):
+        registry.new_job(JobKind.DISCOVERY)
+
+    assert registry.active_job_ids() == []

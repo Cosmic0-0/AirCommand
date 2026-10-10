@@ -49,6 +49,11 @@ class Engine:
         self._jobs = JobRegistry(self._db.jobs)
         self._work_dir = Path(work_dir)
         self._work_dir.mkdir(parents=True, exist_ok=True)
+        self._work_dir.chmod(0o700)   # unconditional, every launch -- not just on
+        # first creation. Capture artifacts (handshakes, wordlists) living under
+        # here are the whole reason this matters; a work dir that predates this
+        # fix and is still group/world-readable must get tightened on the very
+        # next launch, not only for an install that happens to create it fresh.
 
         self.privilege = SudoSession(self._bus)
         # proc defaults to the real subprocess runner, routed through the sudo
@@ -110,19 +115,40 @@ class Engine:
         self._jobs.cancel(job_id)
 
     def shutdown(self) -> None:
+        # Every step below is independent of the others: this method's existing
+        # contract (the job-wait timeout, and the RadioCommandFailed handling
+        # that was already here) is best-effort, not a guarantee, so a failure
+        # in any ONE step must not skip the ones after it -- e.g. a wedged
+        # privilege.stop() must not prevent self._db.close() from running.
         job_ids = self._jobs.active_job_ids()
         for job_id in job_ids:
-            self._jobs.cancel(job_id)
+            # Per-job, not one try/except around the whole loop: one job raising
+            # on cancel() must not stop the OTHER jobs in job_ids from getting
+            # their own cancel signal too -- same per-item isolation already
+            # applied to reconciliation.py's per-stale-job loop and
+            # sighting_batch.py's per-network flush.
+            try:
+                self._jobs.cancel(job_id)
+            except Exception:
+                logger.warning("Failed to cancel job %s during shutdown", job_id, exc_info=True)
         for job_id in job_ids:
-            self._jobs.wait_for_terminal(job_id, timeout=SHUTDOWN_JOB_WAIT_TIMEOUT_S)
-            # Best-effort grace period, not a guarantee: a driver thread stuck
-            # past the timeout (e.g. a wedged subprocess) is left running and
-            # left RUNNING in the jobs table -- next launch's reconcile_startup()
-            # (ADR-0004) is what actually cleans it up. shutdown() must not hang
-            # the app closing indefinitely on one stuck thread.
-        self._sighting_batcher.stop()   # final flush -- AFTER jobs are confirmed
-        # terminal, so no NetworkSightingUpdated from a still-running Discovery
-        # job can arrive after the batcher's last flush and get silently dropped.
+            try:
+                self._jobs.wait_for_terminal(job_id, timeout=SHUTDOWN_JOB_WAIT_TIMEOUT_S)
+                # Best-effort grace period, not a guarantee: a driver thread stuck
+                # past the timeout (e.g. a wedged subprocess) is left running and
+                # left RUNNING in the jobs table -- next launch's reconcile_startup()
+                # (ADR-0004) is what actually cleans it up. shutdown() must not hang
+                # the app closing indefinitely on one stuck thread.
+            except Exception:
+                logger.warning("Failed to await termination of job %s during shutdown", job_id, exc_info=True)
+
+        try:
+            self._sighting_batcher.stop()   # final flush -- AFTER jobs are confirmed
+            # terminal, so no NetworkSightingUpdated from a still-running Discovery
+            # job can arrive after the batcher's last flush and get silently dropped.
+        except Exception:
+            logger.warning("Failed to stop the sighting batcher during shutdown", exc_info=True)
+
         try:
             self._rf.release_to_managed()   # don't leave the adapter in monitor mode
             # once AirCommand isn't running. Safe here: every job that might have held
@@ -134,8 +160,16 @@ class Engine:
             # existing contract (see the job-wait timeout above) is best-effort,
             # not a guarantee, and that applies here too.
             logger.warning("Failed to fully restore managed mode during shutdown: %s", e)
-        self.privilege.stop()   # AFTER waiting for jobs, not before: a privileged
-        # job's own cancellation path (ProcHandle.terminate() on a root-owned
-        # process, see procutil.py's _RealProcHandle) needs run_privileged still
-        # working while that job is being cancelled above.
-        self._db.close()   # last -- nothing above touches the DB after this point
+
+        try:
+            self.privilege.stop()   # AFTER waiting for jobs, not before: a privileged
+            # job's own cancellation path (ProcHandle.terminate() on a root-owned
+            # process, see procutil.py's _RealProcHandle) needs run_privileged still
+            # working while that job is being cancelled above.
+        except Exception:
+            logger.warning("Failed to stop the privilege session during shutdown", exc_info=True)
+
+        try:
+            self._db.close()   # last -- nothing above touches the DB after this point
+        except Exception:
+            logger.warning("Failed to close the database during shutdown", exc_info=True)

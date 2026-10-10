@@ -112,7 +112,20 @@ class JobRegistry:
         with self._lock:
             self._tokens[job_id] = token
             self._terminal_events[job_id] = terminal
-        self._repo.insert_running(job_id, kind, target_id)
+        try:
+            self._repo.insert_running(job_id, kind, target_id)
+        except Exception:
+            # If the DB insert fails, job_id must not be left sitting in
+            # _tokens/_terminal_events with no corresponding row -- nothing
+            # would ever clean that up (mark_terminal() is never called for a
+            # job that never actually started), so it would hang
+            # wait_for_test() forever and misreport the job as active for the
+            # rest of the live session. Undo the in-memory registration and
+            # let the caller's start_*() see the original failure.
+            with self._lock:
+                self._tokens.pop(job_id, None)
+                self._terminal_events.pop(job_id, None)
+            raise
         return job_id, token
 
     def record_process(
