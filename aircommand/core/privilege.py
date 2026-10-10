@@ -116,8 +116,22 @@ class SudoSession:
             # would risk hanging the keepalive thread indefinitely once the cache
             # actually lapses -- a real gap in the pre-Phase-2 sketch, caught here
             # rather than shipped.
-            result = subprocess.run(["sudo", "-n", "-v"], capture_output=True)
-            if result.returncode == 0:
+            try:
+                result = subprocess.run(["sudo", "-n", "-v"], capture_output=True)
+                ok = result.returncode == 0
+            except OSError:
+                # e.g. sudo itself missing/unreadable. Unhandled, this used to kill
+                # the thread outright (daemon=True -- see start() -- means it just
+                # silently vanishes, no traceback anywhere a user would see it):
+                # self.status freezes at whatever it last was (often ACTIVE, since
+                # that's the common case right up until this fails), nothing ever
+                # ticks again, and nothing ever publishes LOST -- the one failure
+                # mode ADR-0002's "keepalive failure must surface clearly, not
+                # silently" promise is entirely about. Treated the same as a
+                # nonzero returncode below: a real, visible LOST, not a dead thread
+                # masquerading as a healthy one.
+                ok = False
+            if ok:
                 if self.status == PrivilegeStatus.LOST:
                     self.status = PrivilegeStatus.ACTIVE
                     self._bus.publish(SudoKeepaliveRecovered(event_id=uuid.uuid4(), occurred_at=datetime.now()))

@@ -221,6 +221,14 @@ class StartupReconciliationCompleted(DurableEvent):
     interrupted_deauth_target_ids: tuple[int, ...]   # mirrors ReconciliationSummary,
     # for symmetry with any future non-GUI subscriber — the GUI itself uses the
     # synchronous return value, not this event, at startup (see Status bar above).
+    unterminated_job_count: int = 0
+    # Count of stale jobs whose process survived BOTH SIGTERM and SIGKILL (e.g.
+    # the cached sudo credential lapsed between the crash and this reconciliation
+    # pass, so the privileged kill silently failed) -- their job rows are
+    # deliberately left RUNNING rather than marked terminal, since a real,
+    # unkilled process is still out there with nothing tracking it otherwise.
+    # Defaulted so every construction site that predates this field keeps
+    # meaning exactly what it always meant: nothing left unterminated.
 
 
 # --- Bus -------------------------------------------------------------------------------

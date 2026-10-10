@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections
 import itertools
+import logging
 import os
 import queue
 import signal
@@ -17,6 +18,8 @@ import time
 from typing import Callable, Iterator, Optional, Protocol
 
 _fake_pid_counter = itertools.count(90000)  # high enough not to collide with anything real
+
+_log = logging.getLogger(__name__)
 
 
 class ProcHandle(Protocol):
@@ -34,8 +37,13 @@ class ProcHandle(Protocol):
         like airodump-ng or aireplay-ng may itself fork helpers."""
         ...
 
-    def lines(self) -> Iterator[str]:
-        """Yields stdout lines as they arrive. Streaming, cancellable mid-iteration."""
+    def lines(self, idle_timeout: Optional[float] = None) -> Iterator[Optional[str]]:
+        """Yields stdout lines as they arrive. idle_timeout=None (default): blocks
+        until the next line or EOF, same as before. A real idle_timeout: yields
+        None instead of blocking past that many seconds with nothing new, so a
+        caller mid-iteration can check a cancellation token without waiting
+        indefinitely for the spawned tool to say something. Still ends (StopIteration)
+        only on EOF, never on an idle timeout."""
         ...
 
     def terminate(self) -> None:
@@ -205,7 +213,15 @@ class _RealProcHandle:
         # Confirmed against this repo's target OS (Linux) semantics, not assumed.
         return self._popen.pid
 
-    def lines(self) -> Iterator[str]:
+    def lines(self, idle_timeout: Optional[float] = None) -> Iterator[Optional[str]]:
+        """See ProcHandle.lines' own docstring for the idle_timeout contract. None
+        from queue.Queue.get(timeout=...) expiring is a DIFFERENT None than
+        _drain_stdout's EOF sentinel below -- this distinguishes them by catching
+        queue.Empty (timeout, nothing new -- yield None and keep waiting) before
+        ever checking the value for the real sentinel (an item actually taken off
+        the queue, equal to None -- EOF, stop). queue.Queue.get(timeout=None)
+        already blocks forever, matching this method's own pre-idle_timeout
+        behavior exactly, so idle_timeout=None needs no separate code path."""
         # Consumes the queue _drain_stdout feeds, rather than reading
         # self._popen.stdout directly -- that background thread is what
         # guarantees stdout gets drained even when NOTHING calls lines() at
@@ -214,7 +230,11 @@ class _RealProcHandle:
         # most once per handle (verified directly, not assumed) so a single
         # consumer draining this queue is the only usage shape that exists.
         while True:
-            line = self._stdout_queue.get()
+            try:
+                line = self._stdout_queue.get(timeout=idle_timeout)
+            except queue.Empty:
+                yield None
+                continue
             if line is None:
                 return
             yield line
@@ -240,7 +260,19 @@ class _RealProcHandle:
             # explicitly ends option parsing so the negative number after it is
             # unambiguously the process-group target. Confirmed against this
             # machine's real /usr/bin/kill, not assumed from documentation.
-            self._run_privileged(["kill", f"-{sig}", "--", f"-{self.pgid}"]).wait()
+            returncode = self._run_privileged(["kill", f"-{sig}", "--", f"-{self.pgid}"]).wait()
+            if returncode != 0:
+                # A lapsed cached sudo credential is the common real-world cause
+                # (SudoSession's own comment: a lapsed cache surfaces as the Popen
+                # exiting fast, non-zero, no output) -- `sudo -n` fails silently
+                # from this call site's point of view, since .wait()'s return
+                # value was previously discarded entirely. Logged, not raised: a
+                # failed kill here means the root-owned process is still running,
+                # which is a real operational problem, but this method's own
+                # contract (ProcHandle.terminate()/kill()) is "ask it to die", not
+                # "confirm it died" -- callers that need the confirmation already
+                # use terminate_with_escalation's poll()-based check instead.
+                _log.warning("privileged kill -%s on pgid %s exited %s", sig, self.pgid, returncode)
         else:
             try:
                 os.killpg(self.pgid, sig)
@@ -272,21 +304,32 @@ class _RealProcHandle:
 
     def _drain_stdout(self) -> None:
         assert self._popen.stdout is not None
-        for line in self._popen.stdout:
-            try:
-                self._stdout_queue.put_nowait(line.rstrip("\n"))
-            except queue.Full:
-                pass  # See __init__'s comment: nobody's draining lines() (the
-                # Discovery/Capture case) -- discard rather than block, since
-                # blocking here would reintroduce the exact write-side pipe
-                # deadlock this thread exists to prevent.
-        # Sentinel uses a blocking put, deliberately not put_nowait: by now
-        # content production has stopped, so an ACTIVELY-consumed queue (one a
-        # real lines() caller is draining) has room well before this point --
-        # this only blocks in the already-discarding case above (nobody ever
-        # going to call lines()), where blocking forever is harmless (daemon
-        # thread, same "just dies with the process" fate as _drain_stderr).
-        self._stdout_queue.put(None)
+        # try/finally is load-bearing, not defensive padding: if iterating
+        # self._popen.stdout itself raises (any I/O error reading the pipe, not
+        # just the per-line queue.Full case already handled below), the sentinel
+        # put was previously skipped entirely -- lines() (crack.py's `for line in
+        # handle.lines()`, this codebase's only stdout *consumer*) blocks on
+        # queue.get() forever with nothing left to ever wake it, since nothing
+        # else ever puts to this queue. Whatever raised still propagates (this is
+        # a daemon thread -- see __init__ -- so it just dies after unwinding),
+        # but the sentinel reaching lines() either way is what actually matters.
+        try:
+            for line in self._popen.stdout:
+                try:
+                    self._stdout_queue.put_nowait(line.rstrip("\n"))
+                except queue.Full:
+                    pass  # See __init__'s comment: nobody's draining lines() (the
+                    # Discovery/Capture case) -- discard rather than block, since
+                    # blocking here would reintroduce the exact write-side pipe
+                    # deadlock this thread exists to prevent.
+        finally:
+            # Sentinel uses a blocking put, deliberately not put_nowait: by now
+            # content production has stopped, so an ACTIVELY-consumed queue (one a
+            # real lines() caller is draining) has room well before this point --
+            # this only blocks in the already-discarding case above (nobody ever
+            # going to call lines()), where blocking forever is harmless (daemon
+            # thread, same "just dies with the process" fate as _drain_stderr).
+            self._stdout_queue.put(None)
         # Same "ends naturally on exit" reasoning as _drain_stderr above.
 
 
@@ -345,7 +388,11 @@ class _FakeProcHandle:
         self.pid = next(_fake_pid_counter)
         self.pgid = self.pid  # ProcHandle.pgid's own contract: == pid, one session per spawn
 
-    def lines(self) -> Iterator[str]:
+    def lines(self, idle_timeout: Optional[float] = None) -> Iterator[Optional[str]]:
+        # idle_timeout is accepted and ignored: every script= here is a finite,
+        # already-known list, so there's no real "idle" to simulate -- a test
+        # that needs idle_timeout's None-yielding behavior exercises it against
+        # a real _RealProcHandle instead (see test_procutil.py).
         yield from self._scripted_lines
 
     def terminate(self) -> None:
@@ -473,7 +520,15 @@ def is_process_group_alive(pgid: int, expected_fingerprint: str) -> bool:
             continue
         pid = int(entry)
         try:
-            stat = open(f"/proc/{pid}/stat").read()
+            # Binary + tolerant decode, same fix as cmdline just below: comm
+            # (field 2, embedded in this same read) is whatever the process
+            # renamed itself to, which can be any byte string -- not guaranteed
+            # UTF-8. A strict decode here raised UnicodeDecodeError uncaught,
+            # aborting this entire scan (see reconcile_orphaned_processes, which
+            # calls this once per stale job -- one unrelated process on the box
+            # with a bad-byte name used to take down reconciliation for every
+            # OTHER job too).
+            stat = open(f"/proc/{pid}/stat", "rb").read().decode(errors="replace")
         except (FileNotFoundError, ProcessLookupError):
             continue   # exited between listdir() and open() -- not a match, keep going
         # comm (field 2) is parenthesized and can itself contain spaces/parens;
@@ -496,12 +551,59 @@ def is_process_group_alive(pgid: int, expected_fingerprint: str) -> bool:
     # — reconcile_orphaned_processes treats both identically: nothing to signal.
 
 
+DEFAULT_TERMINATE_GRACE_PERIOD_S = 3.0
+
+
+def terminate_with_escalation(
+    handle: ProcHandle,
+    grace_period_s: float = DEFAULT_TERMINATE_GRACE_PERIOD_S,
+    tick_s: float = 0.1,
+) -> bool:
+    """SIGTERM via handle.terminate(), poll every tick_s up to grace_period_s; if
+    still alive, escalate to handle.kill() and poll the same way for a second
+    grace_period_s window. Returns True if handle.poll() is not None (confirmed
+    exited) by the end, False if it's still alive after both attempts.
+
+    This exists so a driver's own finally block (Capture/Discovery/Enumerate/
+    Crack, each in a later wave of this hardening pass) can make sure the root
+    tool it spawned doesn't keep running after that driver's loop exits for ANY
+    reason -- not just the cooperative-cancel path a driver already expects, but
+    an unexpected exception too, which today leaves the spawned process orphaned
+    exactly like a crash does (ADR-0004's scenario, except triggered by a bug in
+    this process rather than this process dying outright). Mirrors
+    terminate_process_group's escalation policy (SIGTERM, grace period, SIGKILL,
+    grace period) but acts on a ProcHandle THIS process is still holding, rather
+    than a bare pgid recovered from the DB after the fact -- so it calls
+    handle.terminate()/kill() directly instead of needing terminate_process_group's
+    send_unprivileged/send_privileged injection or its is_process_group_alive
+    fingerprint re-check: a live handle already knows unambiguously whether it's
+    privileged (see _RealProcHandle's own docstring) and already knows its target
+    is the right process, since it spawned it itself."""
+    if handle.poll() is not None:
+        return True
+    handle.terminate()
+    deadline = time.monotonic() + grace_period_s
+    while time.monotonic() < deadline:
+        if handle.poll() is not None:
+            return True
+        time.sleep(tick_s)
+    if handle.poll() is not None:
+        return True
+    handle.kill()
+    deadline = time.monotonic() + grace_period_s
+    while time.monotonic() < deadline:
+        if handle.poll() is not None:
+            return True
+        time.sleep(tick_s)
+    return handle.poll() is not None
+
+
 def terminate_process_group(
     pgid: int,
     expected_fingerprint: str,
     send_unprivileged: Callable[[int, int], None],
     send_privileged: Callable[[int, int], None],
-    grace_period_s: float = 3.0,
+    grace_period_s: float = DEFAULT_TERMINATE_GRACE_PERIOD_S,
 ) -> bool:
     """SIGTERM, wait grace_period_s, escalate to SIGKILL if still alive — the same
     escalation policy as ordinary job cancellation (capture.py). Tries
@@ -509,17 +611,34 @@ def terminate_process_group(
     hashcat); a PermissionError (root-owned, e.g. anything spawned via sudo for
     airodump-ng/aireplay-ng) falls back to send_privileged, which is expected to
     be SudoSession.run_privileged-backed. Returns True if a process was actually
-    found and signaled, False if is_process_group_alive was already False."""
+    found and signaled, False if is_process_group_alive was already False.
+
+    Return value's MEANING deliberately stops there -- "found and signaled", NOT
+    "confirmed dead afterward" -- even though the caller (reconciliation.py) does
+    its own separate is_process_group_alive re-check to decide whether a job row
+    is safe to delete. Splitting it that way keeps this function's contract
+    exactly what every existing caller/test already expects, rather than
+    overloading True/False with a second meaning this function would then need
+    its own extra return value (or a raise) to express."""
+    if pgid <= 1:
+        # Never signal pgid 0/1/negative: as root, `kill -- -1` signals every
+        # process the caller can see, not just our orphan. A corrupted or
+        # legacy job row is the only way pgid could be <= 1 here.
+        return False
     if not is_process_group_alive(pgid, expected_fingerprint):
         return False
     try:
         send_unprivileged(pgid, signal.SIGTERM)
     except PermissionError:
         send_privileged(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True  # exited between our liveness check and this call -- already gone
     time.sleep(grace_period_s)
     if is_process_group_alive(pgid, expected_fingerprint):
         try:
             send_unprivileged(pgid, signal.SIGKILL)
         except PermissionError:
             send_privileged(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
     return True
