@@ -13,6 +13,7 @@ thread is genuine proof, not an assumption.
 from __future__ import annotations
 
 import sqlite3
+import stat
 import subprocess
 import time
 from datetime import timedelta
@@ -198,3 +199,42 @@ def test_shutdown_still_stops_privilege_and_closes_db_when_network_manager_resta
     assert not engine.privilege._keepalive_thread.is_alive()
     with pytest.raises(sqlite3.ProgrammingError):
         engine._db._conn.execute("SELECT 1")
+
+
+def test_shutdown_still_closes_db_when_privilege_stop_fails(tmp_path):
+    # A DIFFERENT step than the NetworkManager-restart failure covered above:
+    # here privilege.stop() itself raises, proving shutdown()'s try/except
+    # now wraps every OTHER step too (not just release_to_managed(), which
+    # already had one before this fix) -- a failure here must not skip
+    # self._db.close() right after it.
+    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter="wlan0", proc=FakeProcRunner(script={}))
+
+    def _raising_stop() -> None:
+        raise RuntimeError("privilege teardown failed")
+
+    engine.privilege.stop = _raising_stop
+
+    engine.shutdown()  # must not raise despite privilege.stop() failing
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        engine._db._conn.execute("SELECT 1")
+
+
+def test_work_dir_is_chmodded_to_0700_on_every_launch(tmp_path):
+    # Meaningful on POSIX/Linux (the real execution target); on this Windows
+    # dev host, st_mode's permission bits don't reflect NTFS ACLs the way
+    # they do on Linux, so this assertion may trivially pass or be a near
+    # no-op here -- it is not proof of anything on this host, only on Linux.
+    #
+    # "on every launch", not just first creation: a work dir that predates
+    # this fix and is still group/world-readable needs tightening the next
+    # time Engine opens it too, so this constructs Engine TWICE against the
+    # same path.
+    work_dir = tmp_path / "workdir"
+
+    Engine(db_path=":memory:", work_dir=work_dir, adapter="wlan0", proc=FakeProcRunner(script={}))
+    assert stat.S_IMODE(work_dir.stat().st_mode) == 0o700
+
+    work_dir.chmod(0o755)  # simulate a pre-fix work dir left group/world-readable
+    Engine(db_path=":memory:", work_dir=work_dir, adapter="wlan0", proc=FakeProcRunner(script={}))
+    assert stat.S_IMODE(work_dir.stat().st_mode) == 0o700

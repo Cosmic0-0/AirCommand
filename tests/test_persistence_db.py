@@ -1,4 +1,5 @@
 import sqlite3
+import stat
 import uuid
 from datetime import datetime
 
@@ -261,6 +262,33 @@ def test_target_get_returns_none_for_unknown_bssid():
     db = Database(":memory:")
 
     assert db.targets.get(MacAddress(value="00:00:00:00:00:00")) is None
+
+
+def test_database_file_is_chmodded_to_0600_on_every_open(tmp_path):
+    # Meaningful on POSIX/Linux (the real execution target); on this Windows
+    # dev host, st_mode's permission bits don't reflect NTFS ACLs the way they
+    # do on Linux, so this assertion may trivially pass or be a near no-op
+    # here -- it is not proof of anything on this host, only on Linux.
+    #
+    # "on every open", not just first creation: a database file that predates
+    # this fix and is still group/world-readable needs tightening the next
+    # time it's opened too, so this constructs TWICE against the same path.
+    db_path = tmp_path / "aircommand.db"
+
+    Database(str(db_path))
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+    db_path.chmod(0o644)  # simulate a pre-fix file left group/world-readable
+    Database(str(db_path))
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_in_memory_database_construction_does_not_chmod_anything(tmp_path):
+    # ":memory:" resolves to a shared-cache URI (file:...?mode=memory&...),
+    # which starts with "file:" -- the same check Database.__init__ uses to
+    # skip the chmod for it. Nothing to assert on disk; this just proves
+    # construction doesn't raise trying to chmod a URI that isn't a real path.
+    Database(":memory:")  # must not raise
 
 
 # --- ConnectionScope / new_connection_scope -- docs/roadmap.md Phase 2 item 4 ---

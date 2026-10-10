@@ -200,6 +200,15 @@ class Database:
     def __init__(self, db_path: "str | Path") -> None:
         self._db_path = self._resolve_path(db_path)
         self._conn = self._connect(check_same_thread=True)
+        if not self._db_path.startswith("file:"):
+            # A real on-disk file, not the ":memory:"-derived shared-cache URI
+            # (see _resolve_path) -- tighten it on EVERY open, not only when
+            # sqlite3.connect() just created it, since a database file that
+            # predates this fix is still sitting there group/world-readable
+            # until the next launch re-chmods it. sqlite3 always creates the
+            # file by the time _connect() above returns, so this path exists
+            # unconditionally here.
+            Path(self._db_path).chmod(0o600)
         if self._conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
             self._conn.executescript(SCHEMA)
             _migrate_audit_log_success_columns(self._conn)  # SCHEMA_VERSION 2, docs/adr/0012

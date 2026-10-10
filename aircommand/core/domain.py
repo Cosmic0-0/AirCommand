@@ -9,7 +9,7 @@ check" structural facts rather than conventions someone has to remember to enfor
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
@@ -131,10 +131,17 @@ class Target:
     # to already be a Discovered Network.
     label: str
     date_added: datetime
-    _proof: object = field(default=None, repr=False, compare=False)
+    # InitVar, not a stored field: dataclasses.replace() can only recover a
+    # value for a field it doesn't see overridden from the EXISTING instance's
+    # own stored attributes. When _proof was a plain `field(default=None, ...)`,
+    # replace(some_target, bssid=attacker_bssid) silently reused the original's
+    # already-valid proof for the untouched _proof slot, so the tampered copy's
+    # __post_init__ passed the mint check too. An InitVar has no stored slot to
+    # recover from, so replace() without an explicit _proof= now fails instead.
+    _proof: InitVar[object]
 
-    def __post_init__(self) -> None:
-        if self._proof is not _TARGET_MINT:
+    def __post_init__(self, _proof: object) -> None:
+        if _proof is not _TARGET_MINT:
             raise TypeError("Target is only constructible by Allowlist")
 
 
@@ -155,10 +162,12 @@ class Handshake:
     cap_file_sha256: str  # dedup key — see docs/design/core-gui-boundary.md Open questions
     kind: "HandshakeKind"
     captured_at: datetime
-    _proof: object = field(default=None, repr=False, compare=False)
+    # InitVar -- see Target._proof's comment above for why this, not a stored
+    # field, is what closes the dataclasses.replace() mint bypass.
+    _proof: InitVar[object]
 
-    def __post_init__(self) -> None:
-        if self._proof is not _HANDSHAKE_MINT:
+    def __post_init__(self, _proof: object) -> None:
+        if _proof is not _HANDSHAKE_MINT:
             raise TypeError("Handshake is only constructible by Capture")
 
 
@@ -283,6 +292,17 @@ class DeauthOptions:
     burst_size: int = 5
     interval: timedelta = timedelta(seconds=15)
     max_bursts: Optional[int] = None  # None = fire until handshake seen or job cancelled
+
+    def __post_init__(self) -> None:
+        # burst_size=0 means "continuous deauth, never stop" to aireplay-ng --
+        # that must be rejected here, at construction, rather than accepted and
+        # only discovered once Capture is already firing it at a live Target.
+        if self.burst_size < 1:
+            raise ValueError("DeauthOptions.burst_size must be >= 1")
+        if self.interval < timedelta(0):
+            raise ValueError("DeauthOptions.interval must be >= 0")
+        if self.max_bursts is not None and self.max_bursts < 0:
+            raise ValueError("DeauthOptions.max_bursts must be None or >= 0")
 
 
 @dataclass(frozen=True)
