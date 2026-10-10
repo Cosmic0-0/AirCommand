@@ -181,6 +181,39 @@ def test_keepalive_loop_tracks_consecutive_failures_and_publishes_recovery():
     assert [e.consecutive_failures for e in failed_events] == [1, 2]
 
 
+def test_keepalive_loop_treats_an_oserror_from_subprocess_run_as_a_failed_tick():
+    # Regression: subprocess.run itself raising OSError (e.g. sudo missing from
+    # PATH) used to be unhandled -- it killed this daemon thread outright with no
+    # visible failure anywhere (see _keepalive_loop's own comment), leaving
+    # .status frozen at whatever it last was instead of ever reaching LOST. Same
+    # assertions as test_keepalive_loop_tracks_consecutive_failures_and_publishes_
+    # recovery's failure case, just with the tick raising instead of returning a
+    # nonzero returncode.
+    session, bus = make_session()
+    session.status = PrivilegeStatus.ACTIVE
+
+    failed_events = []
+    bus.subscribe(failed_events.append, SudoKeepaliveFailed)
+
+    with patch("aircommand.core.privilege.subprocess.run") as mock_run:
+        mock_run.side_effect = [OSError("sudo not found")] + [_completed(0)] * 20
+
+        thread = threading.Thread(target=session._keepalive_loop, daemon=True)
+        session._keepalive_thread = thread
+        thread.start()
+        try:
+            _wait_until(lambda: len(failed_events) >= 1)
+            assert session.status == PrivilegeStatus.LOST
+            assert failed_events[0].consecutive_failures == 1
+            # The thread must still be alive and ticking -- the whole point of
+            # the fix is that OSError no longer kills it.
+            assert thread.is_alive()
+        finally:
+            session.stop()
+
+    assert not thread.is_alive()
+
+
 def test_stop_joins_keepalive_thread_without_recaching_sudo():
     with patch("aircommand.core.privilege.subprocess.run") as mock_run:
         mock_run.side_effect = [_completed(0), _completed(0)] + [_completed(0)] * 20

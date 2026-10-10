@@ -94,6 +94,95 @@ def test_reconcile_clears_job_row_even_when_recorded_process_is_already_gone():
     run_privileged.assert_not_called()
 
 
+def test_reconcile_never_signals_a_job_row_with_a_pgid_of_one_or_less(monkeypatch):
+    # pgid<=1 is procutil.py's own terminate_process_group guard (never signal
+    # pgid 0/1/negative -- as root, `kill -- -1` signals every process the
+    # caller can see, not just our orphan). A corrupted/legacy job row is the
+    # only realistic way this value gets this small, but reconciliation must
+    # still never let it through to a real signal call. The guard runs before
+    # is_process_group_alive, so this needs no real /proc at all.
+    db, jobs = make_registry()
+    bus = EventBus()
+    job_id, _ = jobs.new_job(JobKind.DISCOVERY)
+    jobs.record_process(job_id, pid=1, pgid=1, fingerprint="corrupted row")
+
+    send_unprivileged_calls = []
+    monkeypatch.setattr(
+        "aircommand.core.reconciliation._send_signal_unprivileged",
+        lambda pgid, sig: send_unprivileged_calls.append((pgid, sig)),
+    )
+    run_privileged = Mock()
+
+    summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=run_privileged)
+
+    assert send_unprivileged_calls == []
+    run_privileged.assert_not_called()
+    assert summary.processes_terminated == 0
+    assert jobs.find_stale_jobs() == []  # still cleared -- nothing to signal, same as "already gone"
+
+
+def test_reconcile_continues_past_one_jobs_failure_and_still_processes_the_rest(monkeypatch):
+    # Regression: an exception raised while reconciling one stale job (here,
+    # simulated underneath terminate_process_group -- could equally be a /proc
+    # race or an unexpected fingerprint shape) used to propagate straight out of
+    # reconcile_orphaned_processes, leaving every OTHER stale job in the same
+    # batch un-reconciled and skipping the StartupReconciliationCompleted
+    # publish entirely. The failing job's own row must be left untouched (not
+    # guessed at as terminal), while the other job still gets fully processed.
+    db, jobs = make_registry()
+    bus = EventBus()
+
+    failing_job_id, _ = jobs.new_job(JobKind.DISCOVERY)
+    jobs.record_process(failing_job_id, pid=424242, pgid=424242, fingerprint="airodump-ng wlan0mon")
+    ok_job_id, _ = jobs.new_job(JobKind.CRACK)   # no recorded process -- never reaches the faked
+    # function below, so it's untouched by the failure and only proves the
+    # OTHER job still gets cleared.
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated terminate_process_group failure")
+
+    monkeypatch.setattr("aircommand.core.reconciliation.terminate_process_group", _raise)
+
+    summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
+
+    assert summary.stale_job_count == 2
+    assert summary.processes_terminated == 0
+    remaining_ids = {job.job_id for job in jobs.find_stale_jobs()}
+    assert remaining_ids == {failing_job_id}   # left untouched, not guessed at
+    assert ok_job_id not in remaining_ids      # still cleared despite the other job's failure
+
+
+def test_reconcile_leaves_the_job_row_running_when_the_process_survives_sigkill(monkeypatch):
+    # Regression: before this fix, terminate_process_group's own return value
+    # (True == "found and signaled", never "confirmed dead" -- see its own
+    # docstring) was treated as sufficient to mark the row terminal. If the
+    # privileged kill silently failed (e.g. a lapsed cached sudo credential --
+    # logged in procutil.py, not raised), the row was deleted anyway, leaving a
+    # REAL, still-running process with nothing tracking it. Faking both
+    # terminate_process_group (pretend "signaled") and is_process_group_alive
+    # (pretend "still alive" on the post-check reconciliation.py now does) is
+    # the only way to force this exact outcome without a process that can
+    # actually survive a real SIGKILL.
+    db, jobs = make_registry()
+    bus = EventBus()
+    completed = []
+    bus.subscribe(completed.append, StartupReconciliationCompleted)
+
+    job_id, _ = jobs.new_job(JobKind.CAPTURE_DEAUTH)
+    jobs.record_process(job_id, pid=55555, pgid=55555, fingerprint="aireplay-ng wlan0mon")
+
+    monkeypatch.setattr("aircommand.core.reconciliation.terminate_process_group", lambda *a, **k: True)
+    monkeypatch.setattr("aircommand.core.reconciliation.is_process_group_alive", lambda *a, **k: True)
+
+    summary = reconcile_orphaned_processes(jobs, db.audit_log, bus, run_privileged=Mock())
+
+    assert summary.unterminated_job_count == 1
+    assert summary.processes_terminated == 0
+    assert completed[0].unterminated_job_count == 1
+    stale_ids = {job.job_id for job in jobs.find_stale_jobs()}
+    assert job_id in stale_ids   # NOT marked terminal -- still RUNNING for the next startup
+
+
 def test_reconcile_terminates_a_real_unprivileged_orphan_and_clears_its_job_row():
     # The real send_unprivileged path (plain os.killpg via
     # _send_signal_unprivileged, module-level -- not injected, so nothing to
