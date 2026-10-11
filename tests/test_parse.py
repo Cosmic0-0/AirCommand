@@ -6,6 +6,7 @@ from aircommand.core.parse import (
     parse_aircrack_handshake_check,
     parse_airmon_monitor_interface,
     parse_airodump_csv_line,
+    parse_iw_dev_link_bssid,
     parse_iw_dev_type,
     parse_iw_phy_bands,
 )
@@ -441,3 +442,53 @@ def test_non_wpa_and_blank_lines_are_skipped_not_raised():
 
 def test_empty_content_returns_empty_list():
     assert filter_hc22000_lines_by_bssid("", REAL_LINE_BSSID) == []
+
+
+# --- parse_iw_dev_link_bssid (ADR-0019) --------------------------------------
+# Real `iw dev <interface> link` output shapes confirmed on this machine (see
+# enumerate.py's own _verify_adapter_on_target docstring): a connected
+# interface's first line is "Connected to <mac> (on <if>)" (lowercase hex,
+# colon-separated); an unassociated one prints the single line
+# "Not connected."; a bad interface name exits nonzero with "command failed:
+# No such device (-19)" on stdout, never reaching this parser at all (the
+# caller only parses when `iw`'s own exit code is 0 -- see
+# _verify_adapter_on_target).
+
+def test_connected_output_parses_to_the_bssid():
+    output = "Connected to aa:bb:cc:dd:ee:01 (on wlan0)\n\tssid Test-SSID\n\tfreq: 2437\n"
+
+    assert parse_iw_dev_link_bssid(output) == MacAddress.parse("AA:BB:CC:DD:EE:01")
+
+
+def test_result_is_case_insensitive_by_construction():
+    # MacAddress.parse uppercases both sides (domain.py) -- confirmed here
+    # rather than assumed, since this is exactly what makes the comparison
+    # against a Target's own (canonically uppercase) bssid case-insensitive.
+    output = "Connected to AA:BB:CC:DD:EE:01 (on wlan0)\n"
+
+    assert parse_iw_dev_link_bssid(output) == MacAddress.parse("aa:bb:cc:dd:ee:01")
+
+
+def test_not_connected_returns_none():
+    assert parse_iw_dev_link_bssid("Not connected.\n") is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["", "\n", "   \n", "command failed: No such device (-19)", "garbage that doesn't match at all"],
+)
+def test_empty_or_unparsable_output_returns_none_rather_than_raising(output):
+    # Fails closed, per this function's own docstring: anything that isn't a
+    # recognizable "Connected to <mac>" line reads as "not connected", never
+    # "skip the check".
+    assert parse_iw_dev_link_bssid(output) is None
+
+
+def test_malformed_mac_after_connected_to_returns_none_not_a_raise():
+    # "aaa:bb:cc:dd:ee:f" is exactly 17 characters of hex digits/colons --
+    # matches the regex's own {17} character-class quantifier -- but isn't a
+    # real MAC shape (first octet is 3 characters, not 2): MacAddress.parse
+    # rejects it with ValueError. This exercises the try/except around that
+    # parse call, not just the regex's own "doesn't match at all" case the
+    # other unparsable-input test above covers.
+    assert parse_iw_dev_link_bssid("Connected to aaa:bb:cc:dd:ee:f (on wlan0)\n") is None

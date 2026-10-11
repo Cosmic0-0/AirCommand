@@ -20,6 +20,7 @@ credentials) was rejected — see docs/roadmap.md Phase 1 item 3 for the tradeof
 from __future__ import annotations
 
 import fcntl
+import logging
 import socket
 import struct
 import threading
@@ -33,10 +34,12 @@ from aircommand.core.allowlist import Allowlist
 from aircommand.core.domain import EnumOptions, JobKind, Target
 from aircommand.core.events import EnumerationFailed, EventBus, NmapScanCompleted
 from aircommand.core.jobs import CancellationToken, JobHandle, JobId, JobRegistry
-from aircommand.core.parse import parse_nmap_xml
+from aircommand.core.parse import parse_iw_dev_link_bssid, parse_nmap_xml
 from aircommand.core.persistence.db import ConnectionScope, EnumResultRepository
-from aircommand.core.procutil import ProcRunner
+from aircommand.core.procutil import ProcRunner, summarize_stderr, terminate_with_escalation
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
+
+logger = logging.getLogger(__name__)
 
 _SIOCGIFADDR = 0x8915
 _SIOCGIFNETMASK = 0x891B
@@ -101,8 +104,26 @@ class Enumerator:
         fresh = self._allowlist.require_target(target.bssid)   # the gate
         reservation = self._rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)  # nmap needs the
         # adapter associated to the network, not in monitor mode — raises AdapterBusy if contended
-        job_id, token = self._jobs.new_job(JobKind.NMAP_SCAN, target_id=fresh.id)
-        threading.Thread(target=self._drive, args=(job_id, token, reservation, fresh, options), daemon=True).start()
+        job_id = None
+        try:
+            # GAP FOUND, same shape as discovery.py's own fix this wave: if
+            # new_job() raises (it re-raises after its own internal rollback,
+            # see jobs.py) or Thread.start() itself raises, `reservation` was
+            # never released -- every later start_scan()/start()/start_passive()
+            # call for the rest of the live session would then raise
+            # AdapterBusy against a reservation nothing is actually using
+            # anymore. If new_job() itself succeeded first (only Thread.start()
+            # failed), its own registry entry also needs explicit unwinding --
+            # new_job() only self-rolls-back when ITS OWN insert_running() raises.
+            job_id, token = self._jobs.new_job(JobKind.NMAP_SCAN, target_id=fresh.id)
+            threading.Thread(
+                target=self._drive, args=(job_id, token, reservation, fresh, options), daemon=True
+            ).start()
+        except Exception:
+            if job_id is not None:
+                self._jobs.mark_terminal(job_id)
+            self._rf.release(reservation)
+            raise
         return JobHandle(job_id, JobKind.NMAP_SCAN, self._jobs)
 
     def _await_subnet(self, adapter: str, token: CancellationToken) -> str:
@@ -128,6 +149,30 @@ class Enumerator:
                     raise
                 time.sleep(self._subnet_retry_interval_s)
 
+    def _verify_adapter_on_target(self, adapter: str, target: Target) -> None:
+        """ADR-0019: start_scan()'s allowlist gate proves the Target is
+        authorized, not that THIS adapter is actually associated to it right
+        now -- nmap would otherwise happily scan whatever network the adapter
+        holds. Checked once here, immediately before the scan: a single
+        point-in-time check, not continuously revalidated for the scan's
+        duration -- the same accepted trade-off as Capture not re-checking the
+        allowlist mid-capture (see CONTEXT.md). Fails closed on every
+        ambiguous case: not connected, empty output, a nonzero `iw` exit, or
+        anything parse_iw_dev_link_bssid can't parse -- never "skip the check
+        and scan anyway"."""
+        handle = self._proc.spawn(["iw", "dev", adapter, "link"], privileged=False)
+        output = "\n".join(handle.lines())
+        exit_code = handle.wait()
+        associated = parse_iw_dev_link_bssid(output) if exit_code == 0 else None
+        if associated is None:
+            raise RuntimeError(
+                f"Enumerate refused: {adapter} is not currently connected to the Target's "
+                f"network ({target.bssid})")
+        if associated != target.bssid:
+            raise RuntimeError(
+                f"Enumerate refused: {adapter} is connected to {associated}, not the "
+                f"Target's network ({target.bssid})")
+
     def _drive(
         self,
         job_id: JobId,
@@ -140,6 +185,12 @@ class Enumerator:
         # from _new_connection_scope() itself still reaches finally below --
         # without this, the RF reservation leaks for the rest of the live session.
         db_scope = None
+        # Must exist even if an exception occurs before spawn() ever runs (e.g.
+        # _await_subnet/_verify_adapter_on_target raising, or
+        # _new_connection_scope itself raising) -- otherwise finally's own "is
+        # nmap still running" safety net below would NameError instead of
+        # having nothing to check.
+        handle = None
         try:
             # This thread's own connection -- never self._repo (the main connection)
             # from in here. See persistence/db.py's Database/ConnectionScope docstrings.
@@ -148,6 +199,14 @@ class Enumerator:
             # lets an OSError here (interface not yet joined to anything, or genuinely never
             # finishes reconnecting within the bounded retry above) propagate, same as any other
             # unexpected mid-drive error elsewhere in this codebase
+            # ADR-0019: confirms THIS adapter is actually associated to the
+            # Target's own network right now, not just that the Target is
+            # authorized -- see _verify_adapter_on_target's own docstring.
+            # Deliberately AFTER _await_subnet succeeds, not before: 3 existing
+            # tests use a get_subnet that always raises specifically to
+            # exercise _await_subnet's own OSError/retry path, and must keep
+            # failing there, never reaching this new check at all.
+            self._verify_adapter_on_target(reservation.adapter, target)
             argv = ["nmap", "-oX", "-", *(["-p", options.ports] if options.ports else []),
                     *(["-sV"] if options.service_detection else []), subnet]
             handle = self._proc.spawn(argv, privileged=True)   # raw-socket scan types need sudo
@@ -162,6 +221,20 @@ class Enumerator:
                                        repo=db_scope.jobs)  # ADR-0004
             xml = b"".join(l.encode() for l in handle.lines())   # nmap XML isn't line-streamable the
             # same way airodump CSV is; buffer to completion, or switch to a streaming XML parser later
+            # BUG FOUND (not hardware-triggered -- nmap's exit code and stderr
+            # were both ignored entirely before this): a failed nmap (bad
+            # subnet, permission issue, a lapsed sudo credential) writes
+            # nothing/garbage to stdout, and parse_nmap_xml on empty bytes
+            # raises its own unhelpful xml.etree.ElementTree.ParseError ("no
+            # element found: line 1, column 0") -- a real failure surfacing as
+            # a confusing XML error instead of nmap's own explanation. Checked
+            # before parse_nmap_xml, not after, so a non-zero exit is reported
+            # in nmap's own terms even in the edge case where it also happened
+            # to write enough garbage to parse without raising.
+            exit_code = handle.wait()
+            if exit_code != 0:
+                detail = summarize_stderr(handle.stderr_tail())
+                raise RuntimeError(f"nmap exited {exit_code}" + (f": {detail}" if detail else ""))
             hosts = parse_nmap_xml(xml)
             db_scope.enum_results.insert(target_id=target.id, job_id=job_id, hosts=hosts)   # sync write, BEFORE the event
             self._bus.publish(NmapScanCompleted(event_id=uuid.uuid4(), occurred_at=datetime.now(),
@@ -172,6 +245,20 @@ class Enumerator:
             raise   # unchanged control flow otherwise — still logged via the default
                     # threading excepthook, still reaches `finally` below
         finally:
+            # GAP FOUND, same shape as discovery.py's own fix this wave: a
+            # crash between spawn() and the normal end of the try block above
+            # (a record_process DB write failing, parse_nmap_xml raising on
+            # garbage output, anything else) used to leave nmap orphaned --
+            # finally only ever released the RF reservation, never checked
+            # whether the spawned process was actually still running. Logged
+            # rather than folded into an event field: Enumerate has no
+            # StopReason-carrying stopped event the way Discovery/Capture do
+            # (EnumerationFailed's own `error` field above already carries
+            # whatever killed the scan; there's nowhere meaningful to attach a
+            # separate stop-failure note).
+            if handle is not None and handle.poll() is None:
+                if not terminate_with_escalation(handle):
+                    logger.warning("Enumerate's nmap process (job %s) could not be stopped", job_id)
             self._rf.release(reservation)
             self._jobs.mark_terminal(job_id, repo=db_scope.jobs if db_scope is not None else None)
             if db_scope is not None:

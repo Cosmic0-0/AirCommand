@@ -149,7 +149,14 @@ def make_live_app(tmp_path, monkeypatch):
         monkeypatch.setattr(App, "_ask_sudo_password_dialog", lambda self, error=None: PASSWORD)
         monkeypatch.setattr(
             "aircommand.gui.app.Engine",
-            functools.partial(Engine, discovery_poll_interval=FAST_TICK, drive_tick_interval=FAST_TICK),
+            functools.partial(Engine, discovery_poll_interval=FAST_TICK, drive_tick_interval=FAST_TICK,
+                               # Discovery's Cancel now waits for confirmed termination (SIGTERM, a
+                               # grace period, then SIGKILL) instead of firing-and-forgetting --
+                               # _live_proc's airodump-ng ignores plain terminate() by design (see its
+                               # own docstring: LIVE_AIRODUMP_POLLS is sized to never exhaust on its
+                               # own), so without this it only reaches "confirmed dead" via the real
+                               # multi-second production grace period, not this test's own fast clock.
+                               discovery_cancel_grace_period=FAST_TICK),
         )
         app = App(
             db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=_live_proc(on_spawn, iw)

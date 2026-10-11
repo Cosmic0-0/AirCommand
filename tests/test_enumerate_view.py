@@ -94,13 +94,20 @@ def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
     # test_enumerate_acceptance.py's own get_interface_subnet test and module
     # docstring for why this is the right way to get a deterministic real
     # subnet through Engine without needing wifi hardware.
-    # "iw": [] -- RadioController.reserve(MANAGED, ...) now runs a real-mode
-    # sync check once (ADR-0016); empty output has no "type" line to find, so
-    # it's a harmless no-op here, same as every other RadioController call
-    # site not specifically exercising that check.
+    # "iw": [...] -- RadioController.reserve(MANAGED, ...) runs a real-mode
+    # sync check once (ADR-0016; a "Connected to..." line has no "type" line
+    # for it to find, so it's a harmless no-op there, same as every other
+    # RadioController call site not specifically exercising that check).
+    # Enumerator._verify_adapter_on_target (ADR-0019) shares this SAME "iw"
+    # script key for its own, different "iw dev <if> link" call -- it needs
+    # this exact line to find a match against the adapter actually used here
+    # ("lo", not "wlan0" -- Engine is constructed with adapter="lo" below,
+    # unlike test_enumerate_acceptance.py's _make_enumerator, which always
+    # hardcodes "wlan0") and BSSID_1, or this successful-scan scenario would
+    # be wrongly refused.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="lo",
-        proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": []}),
+        proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on lo)"]}),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
