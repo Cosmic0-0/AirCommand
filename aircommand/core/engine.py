@@ -13,7 +13,7 @@ from typing import Callable, Optional
 from aircommand.core.allowlist import Allowlist
 from aircommand.core.capture import DEFAULT_HANDSHAKE_CHECK_INTERVAL, Capture
 from aircommand.core.crack import Crack
-from aircommand.core.discovery import DEFAULT_DISCOVERY_POLL_INTERVAL, Discovery
+from aircommand.core.discovery import DEFAULT_CANCEL_GRACE_PERIOD, DEFAULT_DISCOVERY_POLL_INTERVAL, Discovery
 from aircommand.core.enumerate import Enumerator
 from aircommand.core.events import Event, EventBus, Subscription
 from aircommand.core.jobs import DEFAULT_DRIVE_TICK_INTERVAL, JobId, JobRegistry
@@ -43,6 +43,7 @@ class Engine:
         discovery_poll_interval: timedelta = DEFAULT_DISCOVERY_POLL_INTERVAL,
         capture_handshake_check_interval: timedelta = DEFAULT_HANDSHAKE_CHECK_INTERVAL,
         drive_tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
+        discovery_cancel_grace_period: timedelta = DEFAULT_CANCEL_GRACE_PERIOD,
     ) -> None:
         self._db = Database(db_path)
         self._bus = EventBus()
@@ -78,7 +79,7 @@ class Engine:
         self.discovery = Discovery(
             self._db.networks, self._bus, self._jobs, self._rf, self._proc,
             self._work_dir, self._db.new_connection_scope, discovery_poll_interval,
-            drive_tick_interval,
+            drive_tick_interval, discovery_cancel_grace_period,
         )
         self.capture = Capture(
             self.targets, self._db.handshakes, self._db.audit_log, self._bus,

@@ -218,6 +218,25 @@ def parse_iw_dev_type(output: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def parse_iw_dev_link_bssid(output: str) -> Optional[MacAddress]:
+    """`iw dev <interface> link`'s stdout -> the BSSID it's currently
+    associated to, or None if not connected, if output is empty, or if it
+    doesn't match the expected shape at all. Enumerate's own BSSID-binding
+    check (ADR-0019) deliberately fails closed on every one of those -- an
+    unparsable or missing result is treated identically to "not connected",
+    never "skip the check". Confirmed against real `iw` output on real
+    hardware: a connected interface's first line is "Connected to <mac> (on
+    <if>)" (lowercase hex, colon-separated); an unassociated one prints the
+    single line "Not connected."."""
+    match = re.match(r"Connected to ([0-9a-fA-F:]{17})", output.strip())
+    if match is None:
+        return None
+    try:
+        return MacAddress.parse(match.group(1))
+    except ValueError:
+        return None
+
+
 # One `iw phy <phy> info` frequency entry: "\t\t\t* 2412.0 MHz [1] (20.0 dBm)".
 # See parse_iw_phy_bands's docstring for why the bracket is kept.
 _IW_FREQUENCY_LINE = re.compile(r"^\s*\*\s+(\d+(?:\.\d+)?)\s+MHz\s+\[\d+\](.*)$")

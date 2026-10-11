@@ -120,7 +120,15 @@ def test_successful_scan_publishes_nmap_scan_completed_with_both_hosts():
         get_subnet_calls.append(adapter)
         return "192.168.1.0/24"
 
-    enumerator, allowlist, bus, _ = _make_enumerator({"nmap": [NMAP_XML]}, fake_get_subnet)
+    # ADR-0019: _verify_adapter_on_target's own "iw dev <if> link" check shares
+    # FakeProcRunner's "iw" script key with RadioController's own unrelated
+    # "iw dev <if> info" sync check (see this module's "FakeProcRunner iw
+    # collision" note below _make_enumerator) -- a "Connected to <target's
+    # bssid>" line is needed here so the new check finds a match and lets
+    # this successful-scan scenario actually reach NmapScanCompleted.
+    enumerator, allowlist, bus, _ = _make_enumerator(
+        {"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on wlan0)"]}, fake_get_subnet
+    )
     target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
 
     completed = []
@@ -162,7 +170,11 @@ def test_subnet_retry_succeeds_once_a_transient_oserror_clears():
             raise OSError("network is unreachable")
         return "192.168.1.0/24"
 
-    enumerator, allowlist, bus, _ = _make_enumerator({"nmap": [NMAP_XML]}, flaky_get_subnet)
+    # ADR-0019's own "iw dev <if> link" check needs a matching "Connected to"
+    # line too -- see the first successful-scan test's own comment above.
+    enumerator, allowlist, bus, _ = _make_enumerator(
+        {"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on wlan0)"]}, flaky_get_subnet
+    )
     enumerator._subnet_retry_interval_s = 0.01   # real but tiny -- keeps this test fast
     target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
 
@@ -356,7 +368,14 @@ def test_enumerate_releases_rf_reservation_even_if_new_connection_scope_raises()
     def fake_get_subnet(adapter: str) -> str:
         return "192.168.1.0/24"
 
-    enumerator, allowlist, bus, jobs = _make_enumerator({"nmap": [NMAP_XML]}, fake_get_subnet)
+    # ADR-0019's own "iw dev <if> link" check needs a matching "Connected to"
+    # line too -- the second start_scan() below (the real assertion) must
+    # reach it and succeed, not get refused. See the first successful-scan
+    # test's own comment for why this collides with RadioController's
+    # unrelated "iw dev <if> info" sync check.
+    enumerator, allowlist, bus, jobs = _make_enumerator(
+        {"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on wlan0)"]}, fake_get_subnet
+    )
     target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
 
     real_new_connection_scope = enumerator._new_connection_scope
@@ -390,6 +409,245 @@ def test_enumerate_releases_rf_reservation_even_if_new_connection_scope_raises()
     # than raising AdapterBusy.
     second_handle = enumerator.start_scan(target)
     second_handle.wait_for_test(timeout=2.0)
+
+
+def test_enumerate_releases_rf_reservation_if_new_job_raises():
+    """Fix 4 regression, same shape as discovery.py's own equivalent: if
+    new_job() raises (it re-raises after its own internal rollback, see
+    jobs.py), start_scan() used to leak the RF reservation it had already
+    taken -- every later start_scan() for the rest of the live session would
+    then raise AdapterBusy against a reservation nothing is actually using
+    anymore. This fires SYNCHRONOUSLY inside start_scan() itself (new_job()
+    runs before the driver thread is ever spawned) -- no thread/excepthook
+    dance needed."""
+
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    enumerator, allowlist, bus, jobs = _make_enumerator(
+        {"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on wlan0)"]}, fake_get_subnet
+    )
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    real_new_job = jobs.new_job
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("new_job failed")
+        return real_new_job(*args, **kwargs)
+
+    jobs.new_job = raise_on_first_call
+
+    with pytest.raises(RuntimeError, match="new_job failed"):
+        enumerator.start_scan(target)
+
+    # The real assertion: the reservation from the failed start_scan() was
+    # released -- a second start_scan() right after succeeds all the way
+    # through, rather than raising AdapterBusy.
+    completed = []
+    bus.subscribe(completed.append, NmapScanCompleted)
+    second_handle = enumerator.start_scan(target)
+    second_handle.wait_for_test(timeout=2.0)
+    assert len(completed) == 1
+
+
+# --- Fix 5 (ADR-0019): bind the scan to the Target's actual BSSID -------------------
+# start_scan()'s allowlist gate proves the Target is authorized; these tests cover
+# _verify_adapter_on_target's OWN refusal paths -- the adapter is authorized to touch
+# this Target but isn't actually associated to its network right now.
+
+def test_scan_refused_when_adapter_is_connected_to_a_different_network():
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    other_bssid = "AA:BB:CC:DD:EE:99"
+    enumerator, allowlist, bus, jobs = _make_enumerator(
+        {"iw": [f"Connected to {other_bssid.lower()} (on wlan0)"]}, fake_get_subnet
+    )
+    # No "nmap" key needed -- the refusal happens before nmap is ever spawned.
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    completed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+    bus.subscribe(completed.append, NmapScanCompleted)
+
+    # Polls briefly for the thread exception rather than restoring the hook
+    # immediately -- wait_for_test() unblocks the instant mark_terminal() sets
+    # its internal event, inside `finally`, slightly BEFORE the RuntimeError
+    # actually finishes propagating out of the thread and hits
+    # threading.excepthook (same race test_failed_scan_publishes_
+    # enumeration_failed_and_cleans_up's own docstring documents).
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        threading.excepthook = original_hook
+
+    assert len(completed) == 0
+    assert len(failed) == 1
+    assert other_bssid in failed[0].error
+    assert BSSID_1.value in failed[0].error
+    assert jobs.active_job_ids() == []  # finally still ran -- reservation/job row cleared
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
+
+
+def test_scan_refused_when_adapter_is_not_connected_to_anything():
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    enumerator, allowlist, bus, jobs = _make_enumerator({"iw": ["Not connected."]}, fake_get_subnet)
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    completed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+    bus.subscribe(completed.append, NmapScanCompleted)
+
+    # See the previous test's own comment for why this polls briefly rather
+    # than restoring the hook immediately.
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        threading.excepthook = original_hook
+
+    assert len(completed) == 0
+    assert len(failed) == 1
+    assert "not currently connected" in failed[0].error
+    assert BSSID_1.value in failed[0].error
+    assert jobs.active_job_ids() == []
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
+
+
+def test_scan_refused_when_iw_exits_nonzero():
+    """ADR-0019 fails closed on a nonzero `iw` exit too -- a bad interface
+    name (real `iw dev <if> link` behavior: "command failed: No such device
+    (-19)", nonzero exit) must never be treated as "parse whatever stdout
+    there is anyway". Built by hand rather than via _make_enumerator: that
+    helper has no returncodes= passthrough, and RadioController's OWN "iw
+    dev <if> info" sync check (sharing this same FakeProcRunner "iw" key) is
+    already tolerant of any exit code (see _make_enumerator's own
+    docstring), so scripting this nonzero code is safe for both call sites."""
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    db = Database(":memory:")
+    bus = EventBus()
+    jobs = JobRegistry(db.jobs)
+    proc = FakeProcRunner(
+        script={"iw": ["command failed: No such device (-19)"]},
+        returncodes={"iw": 1},
+    )
+    rf = RadioController("wlan0", proc)
+    allowlist = Allowlist(db.targets, bus)
+    enumerator = Enumerator(
+        allowlist, db.enum_results, bus, jobs, rf, proc, db.new_connection_scope, get_subnet=fake_get_subnet
+    )
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    completed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+    bus.subscribe(completed.append, NmapScanCompleted)
+
+    # See test_scan_refused_when_adapter_is_connected_to_a_different_network's
+    # own comment for why this polls briefly rather than restoring the hook
+    # immediately.
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        threading.excepthook = original_hook
+
+    assert len(completed) == 0
+    assert len(failed) == 1
+    # A nonzero `iw` exit is treated identically to "not connected" (fails
+    # closed), per _verify_adapter_on_target's own docstring/code.
+    assert "not currently connected" in failed[0].error
+    assert jobs.active_job_ids() == []
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
+
+
+# --- Fix 6: nmap's own exit code and stderr must not be ignored ---------------------
+
+def test_failed_nmap_surfaces_its_own_exit_code_and_stderr_not_an_xml_parse_error():
+    """Before this fix, a failed nmap (bad subnet, permission issue, a lapsed
+    sudo credential) writing nothing/garbage to stdout surfaced as
+    parse_nmap_xml's own unhelpful xml.etree.ElementTree.ParseError ("no
+    element found: line 1, column 0") instead of nmap's own explanation.
+    Built by hand (see test_scan_refused_when_iw_exits_nonzero's own comment
+    for why) to script a nonzero "nmap" exit + stderr without affecting any
+    other FakeProcRunner "iw"/"airmon-ng" call sharing the same script dict."""
+    def fake_get_subnet(adapter: str) -> str:
+        return "192.168.1.0/24"
+
+    db = Database(":memory:")
+    bus = EventBus()
+    jobs = JobRegistry(db.jobs)
+    proc = FakeProcRunner(
+        script={"nmap": [""], "iw": [f"Connected to {BSSID_1.value.lower()} (on wlan0)"]},
+        returncodes={"nmap": 1},
+        stderr={"nmap": ["NSOCK ERROR: Failed to open socket", "QUITTING!"]},
+    )
+    rf = RadioController("wlan0", proc)
+    allowlist = Allowlist(db.targets, bus)
+    enumerator = Enumerator(
+        allowlist, db.enum_results, bus, jobs, rf, proc, db.new_connection_scope, get_subnet=fake_get_subnet
+    )
+    target = allowlist.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    failed = []
+    completed = []
+    bus.subscribe(failed.append, EnumerationFailed)
+    bus.subscribe(completed.append, NmapScanCompleted)
+
+    # See test_scan_refused_when_adapter_is_connected_to_a_different_network's
+    # own comment for why this polls briefly rather than restoring the hook
+    # immediately.
+    thread_exceptions = []
+    original_hook = threading.excepthook
+    threading.excepthook = thread_exceptions.append
+    try:
+        handle = enumerator.start_scan(target)
+        handle.wait_for_test(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        threading.excepthook = original_hook
+
+    assert len(completed) == 0
+    assert len(failed) == 1
+    assert "nmap exited 1" in failed[0].error
+    assert "QUITTING!" in failed[0].error
+    assert "ParseError" not in failed[0].error
+    assert jobs.active_job_ids() == []
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
 
 
 def test_get_interface_subnet_against_real_loopback_interface():
