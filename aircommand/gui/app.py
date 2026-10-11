@@ -44,7 +44,7 @@ from aircommand.gui.sidebar import Sidebar
 from aircommand.gui.status_bar import StatusBar
 from aircommand.gui.sudo_dialog import SudoPasswordDialog
 from aircommand.gui.target_actions_view import TargetActionsView
-from aircommand.gui.theme import PALETTE
+from aircommand.gui.theme import PALETTE, ui_font
 
 # ADR-0018: sentinel label for the band menu's "nothing picked yet" placeholder.
 # Deliberately never added as a key in self._band_choices -- looking it up
@@ -528,6 +528,10 @@ class _ClosingDialog(ctk.CTkToplevel):
     def __init__(self, master) -> None:
         super().__init__(master)
         self.title("AirCommand — closing")
+        # Explicit dark background: like every CTkToplevel here, left unset it
+        # falls back to CustomTkinter's light-theme default (near-white gray92),
+        # since nothing sets dark appearance mode.
+        self.configure(fg_color=PALETTE["bg"])
         self.protocol("WM_DELETE_WINDOW", lambda: None)  # no escape route -- see class docstring
 
         # No progress bar: this window never gets another chance to redraw
@@ -537,7 +541,10 @@ class _ClosingDialog(ctk.CTkToplevel):
         # does, but less honestly. The label alone already satisfies the
         # actual complaint (nothing currently tells the user closing is in
         # progress at all).
-        ctk.CTkLabel(self, text="Closing AirCommand…\nplease wait", justify="center").pack(padx=30, pady=20)
+        ctk.CTkLabel(
+            self, text="Closing AirCommand…\nplease wait", justify="center",
+            font=ui_font(12), text_color=PALETTE["text"],
+        ).pack(padx=30, pady=20)
 
         self.resizable(False, False)
         self.grab_set()

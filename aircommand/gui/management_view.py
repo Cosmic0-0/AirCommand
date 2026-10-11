@@ -22,10 +22,12 @@ from aircommand.gui.cell import Cell, DashGrid, StatusPill
 from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
 
 _PAGE_TITLE = "Management"
-_PAGE_SUBTITLE = (
-    "Select the adapter, then step its monitor-mode cycle by hand. The console "
-    "lands here right after the sudo prompt, before Discovery or Capture starts."
-)
+# The page subtitle ("Select the adapter, then step its monitor-mode cycle by
+# hand. The console lands here right after the sudo prompt, before Discovery or
+# Capture starts.") was removed at the user's request. It is a deliberate
+# deviation from the approved mockup (gridwatch-wireframe-a.dc.html's
+# <p class="page-sub">), which still carries the line -- left as-is there, not a
+# bug. _ADAPTER_SELECT_HINT and _CONTROLS_HINT below are unaffected.
 _ADAPTER_SELECT_HINT = "Switching here stops monitor mode if it was running."
 _CONTROLS_HINT = (
     "Buttons stay disabled until an adapter is selected. Stop only enables "
@@ -39,13 +41,13 @@ class ManagementView(ctk.CTkFrame):
         self._app = app
         self._session_start: Optional[float] = None
 
+        # pady bottom is 10 (not 2) now that the subtitle label below the title
+        # is gone -- it keeps the same gap above the stats grid the subtitle's
+        # own bottom padding used to provide, so removing the line leaves no odd
+        # empty band under the title.
         ctk.CTkLabel(
             self, text=_PAGE_TITLE, font=ui_font(20, "bold"), text_color=PALETTE["text"], anchor="w",
-        ).pack(side="top", anchor="w", padx=16, pady=(16, 2))
-        ctk.CTkLabel(
-            self, text=_PAGE_SUBTITLE, font=ui_font(12), text_color=PALETTE["muted"],
-            anchor="w", wraplength=760, justify="left",
-        ).pack(side="top", anchor="w", padx=16, pady=(0, 10))
+        ).pack(side="top", anchor="w", padx=16, pady=(16, 10))
 
         stats_grid = DashGrid(self)
         stats_grid.pack(side="top", fill="x", padx=12)

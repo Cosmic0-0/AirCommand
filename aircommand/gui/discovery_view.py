@@ -32,6 +32,7 @@ import customtkinter as ctk
 
 from aircommand.core import BSSID, MacAddress, Network, Target
 from aircommand.core.events import TargetAdded, TargetRemoved
+from aircommand.gui import dialog
 from aircommand.gui.cell import Cell
 from aircommand.gui.table import Column, add_row, build_header, update_row
 from aircommand.gui.theme import CORNER_RADIUS, PALETTE, ui_font
@@ -114,44 +115,34 @@ class _AddAsTargetDialog(ctk.CTkToplevel):
 
     def __init__(self, master, app, network: Network) -> None:
         super().__init__(master)
-        self.title("Add as Target")
         self._app = app
         self._network = network
+        dialog.apply_chrome(self, "Add as Target", min_width=400, min_height=250)
 
-        ctk.CTkLabel(
-            self, text=f"SSID: {network.ssid or '(hidden)'}", font=ui_font(11), text_color=PALETTE["muted"],
-        ).pack(padx=20, pady=(20, 0), anchor="w")
-        ctk.CTkLabel(
-            self, text=f"BSSID: {network.bssid}", font=ui_font(11), text_color=PALETTE["muted"],
-        ).pack(padx=20, pady=(0, 0), anchor="w")
-        ctk.CTkLabel(
-            self, text=f"Channel: {network.channel}", font=ui_font(11), text_color=PALETTE["muted"],
-        ).pack(padx=20, pady=(0, 10), anchor="w")
+        dialog.field_label(self, f"SSID: {network.ssid or '(hidden)'}").pack(
+            padx=20, pady=(20, 0), anchor="w"
+        )
+        dialog.field_label(self, f"BSSID: {network.bssid}").pack(padx=20, pady=(0, 0), anchor="w")
+        dialog.field_label(self, f"Channel: {network.channel}").pack(padx=20, pady=(0, 10), anchor="w")
 
-        ctk.CTkLabel(self, text="Label:", font=ui_font(11), text_color=PALETTE["muted"]).pack(
-            padx=20, pady=(0, 0), anchor="w"
-        )
-        self._label_entry = ctk.CTkEntry(
-            self, fg_color=PALETTE["bg"], border_color=PALETTE["border"], text_color=PALETTE["text"],
-            corner_radius=CORNER_RADIUS, font=ui_font(12),
-        )
+        dialog.field_label(self, "Label:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._label_entry = dialog.themed_entry(self)
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._label_entry.bind("<Return>", lambda event: self._on_add())
 
-        self._error_label = ctk.CTkLabel(self, text="", font=ui_font(11), text_color=PALETTE["danger"])
+        self._error_label = dialog.error_label(self)
         self._error_label.pack(padx=20, pady=(0, 10))
 
         button_row = ctk.CTkFrame(self, fg_color="transparent")
         button_row.pack(padx=20, pady=(0, 20), fill="x")
 
-        self._add_button = ctk.CTkButton(button_row, text="Add", command=self._on_add)
+        self._add_button = dialog.primary_button(button_row, "Add", self._on_add)
         self._add_button.pack(side="right", padx=(10, 0))
 
-        self._cancel_button = ctk.CTkButton(button_row, text="Cancel", command=self._on_cancel)
+        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
         self._cancel_button.pack(side="right")
 
-        self._label_entry.focus_set()
-        self.grab_set()
+        dialog.make_modal(self, focus=self._label_entry)
 
     def _on_add(self) -> None:
         label = self._label_entry.get().strip()
@@ -244,52 +235,42 @@ class _AddManuallyDialog(ctk.CTkToplevel):
 
     def __init__(self, master, app) -> None:
         super().__init__(master)
-        self.title("Add Target manually")
         self._app = app
+        dialog.apply_chrome(self, "Add Target manually", min_width=400, min_height=390)
 
-        def _themed_entry() -> ctk.CTkEntry:
-            return ctk.CTkEntry(
-                self, fg_color=PALETTE["bg"], border_color=PALETTE["border"], text_color=PALETTE["text"],
-                corner_radius=CORNER_RADIUS, font=ui_font(12),
-            )
-
-        def _muted_label(text: str) -> ctk.CTkLabel:
-            return ctk.CTkLabel(self, text=text, font=ui_font(11), text_color=PALETTE["muted"])
-
-        _muted_label("BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
-        self._bssid_entry = _themed_entry()
+        dialog.field_label(self, "BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
+        self._bssid_entry = dialog.themed_entry(self)
         self._bssid_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._bssid_entry.bind("<Return>", lambda event: self._on_add())
 
-        _muted_label("SSID:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._ssid_entry = _themed_entry()
+        dialog.field_label(self, "SSID:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._ssid_entry = dialog.themed_entry(self)
         self._ssid_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._ssid_entry.bind("<Return>", lambda event: self._on_add())
 
-        _muted_label("Channel:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._channel_entry = _themed_entry()
+        dialog.field_label(self, "Channel:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._channel_entry = dialog.themed_entry(self)
         self._channel_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._channel_entry.bind("<Return>", lambda event: self._on_add())
 
-        _muted_label("Label:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._label_entry = _themed_entry()
+        dialog.field_label(self, "Label:").pack(padx=20, pady=(0, 0), anchor="w")
+        self._label_entry = dialog.themed_entry(self)
         self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
         self._label_entry.bind("<Return>", lambda event: self._on_add())
 
-        self._error_label = ctk.CTkLabel(self, text="", font=ui_font(11), text_color=PALETTE["danger"])
+        self._error_label = dialog.error_label(self)
         self._error_label.pack(padx=20, pady=(0, 10))
 
         button_row = ctk.CTkFrame(self, fg_color="transparent")
         button_row.pack(padx=20, pady=(0, 20), fill="x")
 
-        self._add_button = ctk.CTkButton(button_row, text="Add", command=self._on_add)
+        self._add_button = dialog.primary_button(button_row, "Add", self._on_add)
         self._add_button.pack(side="right", padx=(10, 0))
 
-        self._cancel_button = ctk.CTkButton(button_row, text="Cancel", command=self._on_cancel)
+        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
         self._cancel_button.pack(side="right")
 
-        self._bssid_entry.focus_set()
-        self.grab_set()
+        dialog.make_modal(self, focus=self._bssid_entry)
 
     def _on_add(self) -> None:
         try:
