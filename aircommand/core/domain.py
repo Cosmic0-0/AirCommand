@@ -230,6 +230,11 @@ class AuditLogEntry:
     frame_count: int
     succeeded: bool = True
     error_detail: Optional[str] = None
+    bssid: Optional[MacAddress] = None
+    # Snapshot of the Target's bssid at firing time (persistence/db.py's own
+    # migration docstring). None for any pre-SCHEMA_VERSION-3 row whose Target
+    # was already gone by the time that migration's backfill ran, and for any
+    # direct construction that predates this field.
 
 
 class CrackOutcome:

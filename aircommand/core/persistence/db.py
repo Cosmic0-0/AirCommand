@@ -36,7 +36,7 @@ from aircommand.core.domain import (
     Target,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS networks (
@@ -95,7 +95,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     fired_at TEXT NOT NULL,
     frame_count INTEGER NOT NULL,
     succeeded INTEGER NOT NULL DEFAULT 1,
-    error_detail TEXT
+    error_detail TEXT,
+    bssid TEXT
+    -- Nullable snapshot of the Target's bssid AT FIRING TIME (SCHEMA_VERSION 3).
+    -- target_id alone loses its identity once Allowlist.remove() hard-deletes
+    -- the Target row -- an audit entry for a since-removed network would read
+    -- back with a target_id that no longer resolves to anything. NULL means
+    -- "no snapshot" (a pre-migration row whose Target was already gone by the
+    -- time _migrate_audit_log_bssid_column ran), not "no bssid at the time".
 );
 
 -- outcome/outcome_key encode the sealed CrackOutcome union (domain.py):
@@ -142,6 +149,33 @@ def _migrate_audit_log_success_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE audit_log ADD COLUMN succeeded INTEGER NOT NULL DEFAULT 1")
     if "error_detail" not in existing:
         conn.execute("ALTER TABLE audit_log ADD COLUMN error_detail TEXT")
+
+
+def _migrate_audit_log_bssid_column(conn: sqlite3.Connection) -> None:
+    """One-shot, idempotent ALTER TABLE + backfill for a pre-SCHEMA_VERSION-3
+    audit_log table that predates the bssid snapshot column. Same
+    PRAGMA-table_info-guarded shape as _migrate_audit_log_success_columns above,
+    for the same reason (a generic OperationalError on ALTER TABLE shouldn't be
+    swallowed blindly). The backfill only runs once, right after the column is
+    added -- an already-migrated database (bssid already present) always skips
+    straight past both statements below and does nothing, so this is safe to
+    call on every startup, not just the first one after upgrading.
+
+    Rows whose target_id no longer resolves to a targets row (the Target was
+    removed before this migration ever ran) are left with bssid=NULL by the
+    subselect itself -- there is no way to recover an identity that was never
+    snapshotted and is already gone by the time this runs. That's the
+    documented limit of this fix, not a bug in it: a bssid snapshot taken AT
+    THIS MIGRATION's run time, not at the original firing time, is already a
+    best-effort backfill for history written before the column existed."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    if "bssid" not in existing:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN bssid TEXT")
+        conn.execute(
+            """UPDATE audit_log SET bssid = (
+                   SELECT targets.bssid FROM targets WHERE targets.id = audit_log.target_id
+               ) WHERE bssid IS NULL"""
+        )
 
 
 class _RetryingConnection(sqlite3.Connection):
@@ -212,6 +246,7 @@ class Database:
         if self._conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
             self._conn.executescript(SCHEMA)
             _migrate_audit_log_success_columns(self._conn)  # SCHEMA_VERSION 2, docs/adr/0012
+            _migrate_audit_log_bssid_column(self._conn)  # SCHEMA_VERSION 3
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._conn.commit()
         self.networks = NetworkRepository(self._conn)
@@ -496,6 +531,7 @@ def _row_to_audit_log_entry(row: sqlite3.Row) -> AuditLogEntry:
         client_mac=MacAddress(value=row["client_mac"]) if row["client_mac"] is not None else None,
         fired_at=datetime.fromisoformat(row["fired_at"]), frame_count=row["frame_count"],
         succeeded=bool(row["succeeded"]), error_detail=row["error_detail"],
+        bssid=MacAddress(value=row["bssid"]) if row["bssid"] is not None else None,
     )
 
 
@@ -515,6 +551,7 @@ class AuditLogRepository:
         frame_count: int,
         succeeded: bool = True,
         error_detail: Optional[str] = None,
+        bssid: Optional[MacAddress] = None,
     ) -> AuditLogEntry:
         # ADR-0001: this write must complete before capture.py publishes
         # DeauthFired. Enforcing that order is capture.py's job (call this, then
@@ -524,12 +561,19 @@ class AuditLogRepository:
         # succeeded/error_detail (docs/adr/0012): defaulted so every call site
         # that predates this change keeps recording exactly what it always
         # recorded -- a successful, unremarkable firing.
+        #
+        # bssid: a snapshot taken AT FIRING TIME, independent of target_id --
+        # Allowlist.remove() hard-deletes the Target row, which would otherwise
+        # leave this row's only identity pointing at nothing. Defaulted to None
+        # so this call site's only caller before now (capture.py, wired up to
+        # pass the real value separately) is unaffected until it's updated.
         cursor = self._conn.execute(
             """INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count,
-                                       succeeded, error_detail)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                       succeeded, error_detail, bssid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (target_id, str(capture_job_id), str(client_mac) if client_mac is not None else None,
-             datetime.now().isoformat(), frame_count, int(succeeded), error_detail))
+             datetime.now().isoformat(), frame_count, int(succeeded), error_detail,
+             str(bssid) if bssid is not None else None))
         self._conn.commit()
         row = self._conn.execute("SELECT * FROM audit_log WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return _row_to_audit_log_entry(row)
