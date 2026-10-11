@@ -18,6 +18,7 @@ from aircommand.core.events import NetworkDiscovered, NetworkSightingUpdated, Ta
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.cell import Cell
 from aircommand.gui.discovery_view import NetworksView, TargetPicker
+from aircommand.gui.theme import PALETTE
 
 BSSID_1 = "AA:BB:CC:DD:EE:01"
 BSSID_2 = "AA:BB:CC:DD:EE:02"
@@ -287,6 +288,26 @@ def test_add_as_target_dialog_empty_label_shows_error_and_does_not_add(tmp_path)
         root.destroy()
 
 
+def test_add_as_target_dialog_uses_grid_watch_tokens(tmp_path):
+    """Themed to match the pages: dark toplevel, accent-fill Add, outline Cancel
+    -- not CTk's light-theme defaults."""
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        view = NetworksView(root, _FakeApp(engine))
+        view.upsert_row(make_network_discovered(make_network()))
+        view._rows[MacAddress.parse(BSSID_1)]["button"].invoke()
+
+        dialog = view._dialog
+        assert dialog.cget("fg_color") == PALETTE["bg"]
+        assert dialog._add_button.cget("fg_color") == PALETTE["accent"]
+        assert dialog._add_button.cget("text_color") == PALETTE["bg"]
+        assert dialog._cancel_button.cget("fg_color") == "transparent"
+        assert dialog._label_entry.cget("fg_color") == PALETTE["bg"]
+    finally:
+        root.destroy()
+
+
 # --- TargetPicker ------------------------------------------------------------------
 
 
@@ -434,5 +455,24 @@ def test_add_manually_dialog_invalid_channel_shows_error_and_does_not_add(tmp_pa
 
         assert dialog._error_label.cget("text") != ""
         assert engine.targets.list() == []
+    finally:
+        root.destroy()
+
+
+def test_add_manually_dialog_uses_grid_watch_tokens(tmp_path):
+    """Themed to match the pages: dark toplevel, accent-fill Add, outline Cancel,
+    dark bordered entries -- not CTk's light-theme defaults."""
+    engine = _make_engine(tmp_path)
+    root = ctk.CTk()
+    try:
+        picker = TargetPicker(root, _FakeApp(engine))
+        picker._open_add_manually_dialog()
+        dialog = picker._dialog
+
+        assert dialog.cget("fg_color") == PALETTE["bg"]
+        assert dialog._add_button.cget("fg_color") == PALETTE["accent"]
+        assert dialog._add_button.cget("text_color") == PALETTE["bg"]
+        assert dialog._cancel_button.cget("fg_color") == "transparent"
+        assert dialog._bssid_entry.cget("fg_color") == PALETTE["bg"]
     finally:
         root.destroy()
