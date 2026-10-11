@@ -109,6 +109,71 @@ def test_pre_adr_0012_audit_log_table_is_migrated_in_place(tmp_path):
     assert entries[0].error_detail is None
 
 
+def test_pre_bssid_column_audit_log_table_is_migrated_and_backfilled(tmp_path):
+    """SCHEMA_VERSION 2 -> 3 adds audit_log.bssid, backfilled from targets for
+    any row whose target_id still resolves there. Builds that pre-migration
+    shape by hand (post-ADR-0012 columns present, bssid absent, user_version
+    left at 2) with two rows: one whose Target still exists (must backfill)
+    and one whose Target was already removed before this migration ever ran
+    (must stay NULL -- there is nothing left to recover its bssid from)."""
+    db_path = tmp_path / "pre-bssid-migration.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bssid TEXT NOT NULL UNIQUE, ssid TEXT NOT NULL, channel INTEGER NOT NULL,
+            label TEXT NOT NULL, date_added TEXT NOT NULL
+        );
+        CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_id INTEGER REFERENCES targets(id),
+            pid INTEGER, pgid INTEGER, process_fingerprint TEXT
+        );
+        CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_id INTEGER NOT NULL REFERENCES targets(id),
+            capture_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            client_mac TEXT, fired_at TEXT NOT NULL, frame_count INTEGER NOT NULL,
+            succeeded INTEGER NOT NULL DEFAULT 1, error_detail TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO targets (id, bssid, ssid, channel, label, date_added) VALUES "
+        "(1, 'AA:BB:CC:DD:EE:01', 'Test-SSID', 6, 'My house', '2024-01-01T00:00:00')"
+    )
+    surviving_job_id, removed_job_id = str(uuid.uuid4()), str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO jobs (job_id, kind, target_id) VALUES (?, 'capture_deauth', 1)", (surviving_job_id,)
+    )
+    # target_id=2 deliberately has NO matching row in targets -- same shape as
+    # a real Target removed (Allowlist.remove()'s hard delete) before this
+    # migration ever ran.
+    conn.execute(
+        "INSERT INTO jobs (job_id, kind, target_id) VALUES (?, 'capture_deauth', 2)", (removed_job_id,)
+    )
+    conn.execute(
+        "INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count) "
+        "VALUES (1, ?, NULL, '2024-01-01T00:00:00', 5)", (surviving_job_id,)
+    )
+    conn.execute(
+        "INSERT INTO audit_log (target_id, capture_job_id, client_mac, fired_at, frame_count) "
+        "VALUES (2, ?, NULL, '2024-01-01T00:00:00', 3)", (removed_job_id,)
+    )
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    db = Database(str(db_path))
+
+    columns = {row[1] for row in db._conn.execute("PRAGMA table_info(audit_log)")}
+    assert "bssid" in columns
+
+    entries = {entry.frame_count: entry for entry in db.audit_log.for_target(None)}
+    assert entries[5].bssid == MacAddress(value="AA:BB:CC:DD:EE:01")  # Target still exists -- backfilled
+    assert entries[3].bssid is None  # Target already gone -- nothing to backfill from
+
+
 def test_network_upsert_returns_true_for_new_bssid():
     db = Database(":memory:")
 
