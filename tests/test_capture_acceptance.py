@@ -336,16 +336,30 @@ def test_capture_releases_rf_reservation_even_if_new_connection_scope_raises(tmp
 
     # No except clause in Capture._drive -- the raise above propagates out of
     # the (daemon) thread uncaught, same as any other unexpected exception
-    # there. Suppress the default excepthook's traceback spam for this
-    # expected-and-scripted case, same pattern test_enumerate_acceptance.py's
-    # own failure test already uses.
+    # there. Collector + poll, not a bare `lambda args: None`: wait_for_test()
+    # unblocks on mark_terminal() inside _drive's finally, BEFORE the RuntimeError
+    # reaches threading.excepthook, so restoring the hook on that signal alone
+    # raced and could leak the exception into an unrelated later test's
+    # PytestUnhandledThreadExceptionWarning -- identical race and identical fix
+    # to this file's own
+    # test_handshake_not_reported_completed_if_insert_raises_after_detection, and
+    # to test_crack_acceptance.py / test_enumerate_acceptance.py's stress tests.
+    thread_exceptions = []
     original_hook = threading.excepthook
-    threading.excepthook = lambda args: None
+    threading.excepthook = thread_exceptions.append
     try:
         first_handle = engine.capture.start_passive(target)
         first_handle.wait_for_test(timeout=2.0)  # must not hang
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         threading.excepthook = original_hook
+
+    # The scripted raise really propagated out of the (daemon) thread, now
+    # contained here rather than leaking into an unrelated test's warning output.
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
 
     # The real assertion: RadioController's reservation from the first (failed)
     # job was released -- a second start_passive() right after succeeds rather
@@ -877,12 +891,32 @@ def test_handshake_not_reported_completed_if_insert_raises_after_detection(tmp_p
     # No except clause in Capture._drive -- the raise above propagates out of
     # the (daemon) thread uncaught, same pattern
     # test_capture_releases_rf_reservation_even_if_new_connection_scope_raises
-    # above already uses for an expected-and-scripted uncaught raise.
+    # above already uses for an expected-and-scripted uncaught raise. Swap
+    # threading.excepthook to a COLLECTOR and poll until it actually fires
+    # before restoring the outer hook -- NOT a bare `lambda args: None` with a
+    # plain try/finally. wait_for_test() unblocks the instant mark_terminal()
+    # sets its event inside _drive's own finally, which completes BEFORE the
+    # RuntimeError finishes unwinding out of the thread and reaches
+    # threading.excepthook (the exact ordering test_crack_acceptance.py's and
+    # test_enumerate_acceptance.py's own stress tests already document). The old
+    # `lambda args: None` + plain try/finally here restored the outer hook on
+    # the mark_terminal signal alone, so it raced: whenever the thread lost that
+    # race the re-exposed outer hook (pytest's own _pytest/threadexception
+    # collector) caught the leak and reported it as a
+    # PytestUnhandledThreadExceptionWarning against whatever UNRELATED later test
+    # was in its runtest phase then -- reproduced landing on
+    # test_capture_real_subprocess.py here, ~1 run in 6. Collector + poll keeps
+    # the by-design raise contained to this test and lets us positively assert
+    # it propagated rather than merely swallowing it.
+    thread_exceptions = []
     original_hook = threading.excepthook
-    threading.excepthook = lambda args: None
+    threading.excepthook = thread_exceptions.append
     try:
         handle = engine.capture.start_passive(target)
         handle.wait_for_test(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while not thread_exceptions and time.monotonic() < deadline:
+            time.sleep(0.01)
     finally:
         threading.excepthook = original_hook
 
@@ -891,3 +925,8 @@ def test_handshake_not_reported_completed_if_insert_raises_after_detection(tmp_p
     assert len(stopped) == 1
     assert stopped[0].reason == StopReason.ERROR
     assert engine.capture.list_handshakes(target) == []
+    # The raise really propagated out of the (daemon) thread uncaught -- the
+    # by-design outcome (Capture._drive has no except clause), now contained to
+    # THIS test instead of leaking into an unrelated one's warning output.
+    assert len(thread_exceptions) == 1
+    assert thread_exceptions[0].exc_type is RuntimeError
