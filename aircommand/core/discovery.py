@@ -43,6 +43,19 @@ DEFAULT_DISCOVERY_POLL_INTERVAL = timedelta(seconds=2)
 # period to stay fast, not the real multi-second production value.
 DEFAULT_CANCEL_GRACE_PERIOD = timedelta(seconds=3)
 
+# If airodump-ng's <prefix>-01.csv still hasn't appeared after this many
+# consecutive _poll_csv misses, _drive logs ONE diagnostic warning (then stays
+# quiet until the file shows up). ~10s at the default 2s poll interval
+# (DEFAULT_DISCOVERY_POLL_INTERVAL): airodump-ng writes its CSV every ~5s per its
+# docs, so 10s is a 2x margin before a still-missing file is worth a log line.
+# Logging only -- deliberately NOT a DiscoveryStopped/new Event (that would be a
+# larger design call); it exists so a CSV that silently never appears (the
+# FileNotFoundError path _poll_csv returns False on) leaves a trail instead of an
+# empty table with no explanation anywhere. A count, not a wall-clock duration,
+# on purpose: it's driven off poll ticks so a test can cross it deterministically
+# with a zero poll interval and no real sleep (see test_discovery_acceptance.py).
+DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS = 5
+
 
 def _airodump_band_flag(bands: frozenset[Band]) -> str:
     """The value for airodump-ng's `--band <abg>` (confirmed against `airodump-ng
@@ -175,23 +188,37 @@ class Discovery:
             # .kismet.netxml/.log.csv, none of which anything in this codebase
             # ever consumes. Confirmed directly on this machine: a work dir
             # with 41 Discovery sessions held 209 files, only the 41 .csv ones
-            # ever read. "--output-format csv" pins airodump-ng to writing only
-            # the one file this driver actually uses.
+            # ever read.
+            #
+            # CLUTTER FIX, NOT THE EMPTY-TABLE FIX: the first cut at this pinned
+            # "--output-format csv" (csv alone), which shipped the SAME DAY
+            # Discovery's table started coming up empty on real hardware -- so it
+            # was the prime suspect for a while. It was a red herring: the user's
+            # re-test under "pcap,csv" STILL showed zero rows, which ruled the
+            # format flag out entirely. The real empty-table regression was in
+            # _poll_csv (a blank-line `break` added in the same commit, 424aae2),
+            # not here -- see _poll_csv's own comment. "pcap,csv" is kept purely
+            # on its own merits as a clutter fix: it still drops the
+            # .kismet.csv/.kismet.netxml/.log.csv files nothing in this codebase
+            # reads, while staying one token off the default format set that was
+            # confirmed working across 41 real sessions (which included pcap).
+            # The csv _poll_csv reads is requested; the pcap .cap this codebase
+            # ignores is accepted as the cost of staying close to known-good.
             # --band is always passed, even for the 2.4GHz default (where it matches
             # airodump-ng's own default), so there is one code path. See
             # _airodump_band_flag for the value.
-            handle = self._proc.spawn(
-                ["airodump-ng", "--band", _airodump_band_flag(options.bands),
-                 "--output-format", "csv", "--write", str(csv_prefix), adapter],
-                privileged=True,
-            )
+            airodump_argv = [
+                "airodump-ng", "--band", _airodump_band_flag(options.bands),
+                "--output-format", "pcap,csv", "--write", str(csv_prefix), adapter,
+            ]
+            handle = self._proc.spawn(airodump_argv, privileged=True)
             # Fingerprint is the bare csv_prefix, deliberately -- it's the one
             # argv token guaranteed to appear verbatim in this process's real
             # /proc/pid/cmdline (see is_process_group_alive). The old
             # f"airodump-ng {adapter}" form never matched: real argv is
-            # ["airodump-ng", "--band", <band>, "--output-format", "csv",
+            # ["airodump-ng", "--band", <band>, "--output-format", "pcap,csv",
             # "--write", <csv_prefix>, <adapter>], so "--band <band>
-            # --output-format csv --write" sits between the tool name and
+            # --output-format pcap,csv --write" sits between the tool name and
             # anything else -- confirmed against a real spawned process, same
             # mismatch shape ADR-0015 found and fixed for crack.py's own
             # fingerprints. csv_prefix is also job_id-derived,
@@ -220,6 +247,22 @@ class Discovery:
             # the process died on its own. stdout is still drained in the
             # background either way (procutil.py's _RealProcHandle), so this
             # isn't at risk of the classic two-pipe write-side deadlock.
+            #
+            # csv_missing_polls / csv_missing_warned make a persistent "CSV never
+            # appears" failure visible. _poll_csv swallows FileNotFoundError every
+            # tick by design (the normal "first refresh cycle hasn't been written
+            # yet" case), so without this a CSV that NEVER shows up -- the shape
+            # the --output-format regression above is suspected to cause -- would
+            # leave the table empty forever with nothing logged. Count consecutive
+            # polls that find no file; warn ONCE when the streak crosses
+            # DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS (~10s at the default poll
+            # interval), not every tick past it; reset both the instant the file
+            # is finally seen. Stack locals only -- _poll_csv is a pure per-tick
+            # function with no state of its own, so the streak is threaded through
+            # here off its return value (True once the file exists, False while
+            # not). Logging only: no new Event, no GUI surface (out of scope).
+            csv_missing_polls = 0
+            csv_missing_warned = False
             while True:
                 if token.is_cancelled():
                     # GAP FOUND: a bare handle.terminate() here is only SIGTERM,
@@ -246,7 +289,19 @@ class Discovery:
                 if handle.poll() is not None:
                     break  # process exited on its own -- nothing left to poll for
                 if pacer.due():
-                    self._poll_csv(csv_path, db_scope.networks)
+                    if self._poll_csv(csv_path, db_scope.networks):
+                        csv_missing_polls = 0
+                        csv_missing_warned = False
+                    else:
+                        csv_missing_polls += 1
+                        if (csv_missing_polls >= DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS
+                                and not csv_missing_warned):
+                            logger.warning(
+                                "Discovery: airodump-ng's CSV file %s still absent after "
+                                "%d consecutive polls on adapter %s -- spawned argv: %r",
+                                csv_path, csv_missing_polls, adapter, airodump_argv,
+                            )
+                            csv_missing_warned = True
                 time.sleep(self._tick_interval_s)
         finally:
             # Must run even if a poll crashes the loop (e.g. a malformed-but-
@@ -312,7 +367,13 @@ class Discovery:
             if db_scope is not None:
                 db_scope.close()
 
-    def _poll_csv(self, csv_path: Path, networks: NetworkRepository) -> None:
+    def _poll_csv(self, csv_path: Path, networks: NetworkRepository) -> bool:
+        """Read one airodump-ng CSV refresh cycle and publish a sighting per
+        network row. Returns whether the file existed this tick: True once
+        airodump-ng has written <prefix>-01.csv (even if it held no network
+        rows), False while it still hasn't. _drive counts a run of False returns
+        to surface a CSV that NEVER appears (see its csv_missing_polls counter)
+        instead of swallowing that failure silently forever."""
         try:
             # BUG FOUND (not hardware-triggered -- a real SSID can be an
             # arbitrary byte string, not guaranteed valid UTF-8): read_text()'s
@@ -327,14 +388,45 @@ class Discovery:
             # unreadable is strictly better than killing the job over it.
             content = csv_path.read_text(errors="replace")
         except FileNotFoundError:
-            return  # airodump-ng hasn't written its first refresh cycle yet --
-            # not an error, just nothing to report this tick.
+            return False  # airodump-ng hasn't written its first refresh cycle
+            # yet -- not an error on its own, just nothing to report this tick.
+            # _drive counts consecutive False returns so a file that NEVER
+            # appears (vs. merely "not yet") stops being silent.
         for line in content.splitlines():
-            if line.strip() == "" or line.startswith("Station MAC"):
-                # Blank separator line, then the station-list section (a
-                # different schema entirely, e.g. a station MAC's identical
-                # 6-octet-hex shape colliding with field 0's BSSID check below)
-                # -- nothing after this point in the file is ever a network row.
+            if line.startswith("Station MAC"):
+                # The station-list section starts at this header: a different
+                # schema entirely (a station MAC's identical 6-octet-hex shape
+                # would collide with field 0's BSSID check below), and nothing
+                # from this line on is ever a network row -- so stop before it.
+                #
+                # REGRESSION FOUND -- the empty-table bug. This used to also
+                # break on `line.strip() == ""` (ANY blank line). That was added
+                # in 424aae2 to stop before the blank SEPARATOR line that
+                # precedes the station header -- but real airodump-ng opens its
+                # CSV with a LEADING blank line as the very first line of the
+                # file (it writes "\r\n" before the "BSSID, ..." AP header).
+                # splitlines() turns that leading newline into an empty first
+                # element, so the old blank-line break fired on line 0 and the
+                # loop exited before parsing a single AP row: an empty Discovery
+                # table on every band, with no error, no DiscoveryStopped, and --
+                # because the file DID exist and WAS read -- not even the "still
+                # absent" warning below (every poll returned True, resetting the
+                # miss streak). Exactly the reported symptom, band-independent,
+                # introduced the same day 424aae2 shipped. The fake CSV fixture
+                # in test_discovery_acceptance.py omitted that leading blank
+                # line, so the fake-based suite never exercised it. This is the
+                # deeper cause the --output-format change above only looked like
+                # it might be (it wasn't: pcap,csv is a legitimate clutter fix,
+                # but the file was never missing -- the parse loop was bailing on
+                # its first line). Fix: break only at the station header, the
+                # real section boundary. Blank lines now fall through to
+                # parse_airodump_csv_line, which already returns None for them
+                # (fewer than 14 comma fields -- test_parse.py's
+                # test_blank_line_returns_none), so BOTH the leading blank line
+                # and the pre-station separator are simply skipped. The station
+                # rows a real file puts after this header are still never reached
+                # (defense in depth unchanged), and the try/except ValueError
+                # below remains the backstop for any row that slips past anyway.
                 break
             try:
                 network = parse_airodump_csv_line(line)
@@ -365,3 +457,5 @@ class Discovery:
         # rather than appending, so this tick's full file content IS this
         # tick's complete network set -- no separate dedup/diffing needed
         # beyond what upsert_returns_is_new already does per BSSID.
+        return True  # the file existed and was read this tick -- resets _drive's
+        # missing-CSV miss streak even when it held zero network rows.

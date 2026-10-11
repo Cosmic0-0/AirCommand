@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from aircommand.core.discovery import DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS
 from aircommand.core.domain import Band, DiscoveryOptions, MacAddress, StopReason
 from aircommand.core.engine import Engine
 from aircommand.core.events import DiscoveryStopped, NetworkDiscovered, NetworkSightingUpdated
@@ -41,9 +42,19 @@ STATION_HEADER = "Station MAC, First time seen, Last time seen, Power, # packets
 # What airodump-ng actually writes to <prefix>-01.csv -- the on-disk artifact
 # _poll_csv reads, rewritten in place each refresh cycle. Two networks, same row
 # shape real airodump-ng --write output uses.
+#
+# The leading "" is airodump-ng's own leading blank line: it opens the CSV by
+# writing a newline BEFORE the "BSSID, ..." AP header (real output starts with
+# "\r\n"). This fixture used to omit it, which hid the empty-table regression:
+# _poll_csv's `break` on the first blank line fired on this line and parsed zero
+# AP rows on real hardware, while the suite (reading a fixture with no leading
+# blank line) stayed green. Kept here so every test that uses CSV_CONTENT now
+# runs against the real file shape; see test_poll_csv_parses_the_ap_section_
+# despite_airodumps_leading_blank_line for the dedicated regression test.
 CSV_CONTENT = (
     "\n".join(
         [
+            "",
             AP_HEADER,
             f"{BSSID_1}, 2024-01-01 10:00:00, 2024-01-01 10:00:05, 6, 54, WPA2, CCMP, PSK, -40, 10, 0, 0.0.0.0, 4, Net1, ",
             f"{BSSID_2}, 2024-01-01 10:00:00, 2024-01-01 10:00:06, 11, 54, OPN, , , -55, 8, 0, 0.0.0.0, 4, Net2, ",
@@ -147,6 +158,109 @@ def test_discovery_survives_csv_file_never_appearing(tmp_path):
     handle.wait_for_test(timeout=2.0)  # must return well inside the timeout, not hang
 
     assert engine.discovery.list_networks() == []
+
+
+class _CsvAppearsAfterNPolls:
+    """Wraps airodump-ng's FakeProcHandle so the on-disk <prefix>-01.csv only
+    materializes once poll() has been called `after_polls` times -- the
+    deterministic, no-real-sleep way to simulate airodump-ng's CSV genuinely not
+    showing up until well past _drive's missing-CSV warn threshold, then finally
+    catching up. poll() is called once per _drive tick, BEFORE that tick's
+    _poll_csv, so writing on the Nth poll makes exactly that tick the one the
+    file first appears on. Every other attribute (pid/pgid/terminate/kill/
+    stderr_tail -- all _drive touches) delegates to the wrapped handle."""
+
+    def __init__(self, inner, csv_path, after_polls):
+        self._inner = inner
+        self._csv_path = csv_path
+        self._after_polls = after_polls
+        self._polls = 0
+
+    def poll(self):
+        self._polls += 1
+        if self._polls >= self._after_polls:
+            self._csv_path.write_text(CSV_CONTENT)
+        return self._inner.poll()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _CsvCatchUpProcRunner:
+    """Delegates every spawn to a real FakeProcRunner, but wraps the airodump-ng
+    handle in _CsvAppearsAfterNPolls so its CSV file appears only after
+    `after_polls` poll ticks -- same injection-seam idiom as
+    _InterceptingProcRunner further down this file."""
+
+    def __init__(self, fake, after_polls):
+        self._fake = fake
+        self._after_polls = after_polls
+
+    def spawn(self, argv, *, privileged):
+        handle = self._fake.spawn(argv, privileged=privileged)
+        if argv[0] != "airodump-ng":
+            return handle
+        csv_path = Path(f"{argv[argv.index('--write') + 1]}-01.csv")
+        return _CsvAppearsAfterNPolls(handle, csv_path, self._after_polls)
+
+
+def test_discovery_warns_once_when_csv_is_missing_then_goes_quiet_when_it_appears(tmp_path, caplog):
+    """Change 2: a CSV that never appears used to be completely silent --
+    _poll_csv swallows FileNotFoundError every tick (by design, for the normal
+    "first refresh cycle not written yet" case), so a file that NEVER shows up
+    left the table empty forever with no log line, no event, nothing. _drive now
+    counts consecutive missing-file polls and logs ONE warning once the streak
+    crosses DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS -- not once per tick past it.
+
+    The file is withheld a couple of ticks past the threshold (so the warning
+    fires), then made to "catch up"; the single-warning assertion plus the
+    networks-discovered assertion together confirm the reset-on-success half of
+    the contract, not just the initial firing -- once the file appears the streak
+    resets, the rows are read, and no further warning is logged.
+
+    Tick/poll counts (not real time) drive the clock here, same idiom as every
+    other fast-interval test in this file: poll_interval=0 fires the Pacer every
+    tick, running_polls controls how many ticks happen."""
+    threshold = DISCOVERY_CSV_MISSING_WARN_AFTER_POLLS
+    appears_after = threshold + 2   # withheld two ticks past the warn point
+    total_ticks = threshold + 5     # then several more ticks with the file present
+
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=_CsvCatchUpProcRunner(
+            FakeProcRunner(
+                script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+                running_polls={"airodump-ng": total_ticks},
+            ),
+            after_polls=appears_after,
+        ),
+        discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
+    discovered = []
+    engine.subscribe(discovered.append, NetworkDiscovered)
+
+    with caplog.at_level(logging.WARNING, logger="aircommand.core.discovery"):
+        handle = engine.discovery.start()
+        handle.wait_for_test(timeout=2.0)
+
+    expected_csv = tmp_path / f"aircommand-discovery-{handle.job_id}-01.csv"
+    missing_csv_warnings = [
+        r for r in caplog.records
+        if "still absent" in r.getMessage() and str(expected_csv) in r.getMessage()
+    ]
+    # Exactly one warning: fired when the miss streak crossed the threshold, NOT
+    # once per tick for every miss past it (the whole point of the warned flag),
+    # and NOT again after the file caught up (the streak reset on success).
+    assert len(missing_csv_warnings) == 1, [r.getMessage() for r in caplog.records]
+
+    # ...and once the file caught up it was genuinely read: both rows discovered.
+    # Together with the single-warning count above, this is the reset-on-success
+    # half of the contract -- the recovery path is clean, not just the firing.
+    expected_bssids = {MacAddress.parse(BSSID_1), MacAddress.parse(BSSID_2)}
+    assert {e.network.bssid for e in discovered} == expected_bssids
 
 
 def test_discovery_publishes_stopped_with_error_reason_when_airodump_dies_unexpectedly(tmp_path):
@@ -313,14 +427,20 @@ def test_discovery_releases_rf_reservation_if_new_job_raises(tmp_path):
     second_handle.wait_for_test(timeout=2.0)
 
 
-# --- Fix 1: airodump-ng must be pinned to --output-format csv ------------------------
+# --- Fix 1: airodump-ng's --output-format is pinned to "pcap,csv" ---------------------
 # With no --output-format at all, airodump-ng's own default writes far more than
 # the one .csv file _poll_csv ever reads (a .cap -- every raw frame heard, from
 # ANY network, not just one a Target gates -- plus .kismet.csv/.kismet.netxml/
 # .log.csv). Confirmed directly on this machine: a work dir with 41 Discovery
-# sessions held 209 files, only the 41 .csv ones ever read.
+# sessions held 209 files, only the 41 .csv ones ever read. The first cut at that
+# clutter fix pinned "csv" alone -- which became the prime suspect for a same-day
+# empty-table regression on real hardware (zero rows on 2.4/5/2.4+5GHz alike; see
+# discovery.py's own comment above the spawn call). "pcap,csv" keeps the
+# kismet-set clutter dropped while staying one token off the default format set
+# those 41 sessions confirmed working (which included pcap), so this pins that
+# corrected value rather than the untested csv-alone combination.
 
-def test_airodump_is_started_with_output_format_csv_and_nothing_else(tmp_path):
+def test_airodump_is_started_with_output_format_pcap_csv_and_no_kismet_formats(tmp_path):
     spawned = []
     engine = Engine(
         db_path=":memory:",
@@ -339,14 +459,15 @@ def test_airodump_is_started_with_output_format_csv_and_nothing_else(tmp_path):
     handle.wait_for_test(timeout=2.0)
 
     (argv,) = [a for a in spawned if a[0] == "airodump-ng"]
-    # "--output-format" and "csv" must be ADJACENT argv tokens, not just both
-    # present somewhere.
-    assert argv[argv.index("--output-format") + 1] == "csv"
-    # No other real airodump-ng output-format name appears anywhere in argv --
-    # these are exact-token checks (argv is a list), not substring checks, so
-    # an unrelated token (the adapter name, a work-dir-derived path) that
-    # happens to CONTAIN one of these strings would not false-positive here.
-    assert not any(fmt in argv for fmt in ("cap", "kismet", "pcap", "netxml"))
+    # "--output-format" and "pcap,csv" must be ADJACENT argv tokens, not just
+    # both present somewhere.
+    assert argv[argv.index("--output-format") + 1] == "pcap,csv"
+    # The kismet-family output-format names must still be absent -- these are
+    # exact-token checks (argv is a list), not substring checks, so an unrelated
+    # token (the adapter name, a work-dir-derived path) that happens to CONTAIN
+    # one of these strings would not false-positive here. "pcap"/"cap" are no
+    # longer rejected: pcap is now intentionally part of the format set.
+    assert not any(fmt in argv for fmt in ("kismet", "netxml"))
 
 
 # --- Fix 2: one bad CSV row must not end the whole Discovery job ---------------------
@@ -481,6 +602,7 @@ def test_poll_csv_skips_a_malformed_14_plus_field_row_and_logs_a_warning(tmp_pat
 CSV_WITH_STATION_SECTION = (
     "\n".join(
         [
+            "",  # airodump-ng's leading blank line (the file opens with "\r\n")
             AP_HEADER,
             f"{BSSID_1}, 2024-01-01 10:00:00, 2024-01-01 10:00:05, 6, 54, WPA2, CCMP, PSK, -40, 10, 0, 0.0.0.0, 4, Net1, ",
             f"{BSSID_2}, 2024-01-01 10:00:00, 2024-01-01 10:00:06, 11, 54, OPN, , , -55, 8, 0, 0.0.0.0, 4, Net2, ",
@@ -525,6 +647,59 @@ def test_poll_csv_ignores_the_station_section_without_crashing(tmp_path):
     expected_bssids = {MacAddress.parse(BSSID_1), MacAddress.parse(BSSID_2)}
     assert {e.network.bssid for e in discovered} == expected_bssids
     assert len(discovered) == 2  # exactly the 2 AP rows -- the station row never added a 3rd
+
+
+# --- Empty-table regression: airodump-ng's leading blank line -------------------------
+# Real airodump-ng opens its CSV with a leading blank line (the file starts with
+# "\r\n" before the "BSSID, ..." AP header) and uses CRLF line endings. The
+# empty-table bug was a `break` in _poll_csv on the FIRST blank line: that
+# leading line terminated the parse loop before any AP row, so the table stayed
+# empty on every band with no error and no "still absent" warning (the file
+# existed and was read). The fixtures above previously omitted the leading blank
+# line, so the fake-based suite never hit it. This fixture restores the real byte
+# shape -- CRLF endings AND the leading blank line -- as a dedicated guard.
+CSV_WITH_LEADING_BLANK_LINE = (
+    "\r\n"
+    + "\r\n".join(
+        [
+            AP_HEADER,
+            f"{BSSID_1}, 2024-01-01 10:00:00, 2024-01-01 10:00:05, 6, 54, WPA2, CCMP, PSK, -40, 10, 0, 0.0.0.0, 4, Net1, ",
+            f"{BSSID_2}, 2024-01-01 10:00:00, 2024-01-01 10:00:06, 11, 54, OPN, , , -55, 8, 0, 0.0.0.0, 4, Net2, ",
+        ]
+    )
+    + "\r\n"
+)
+
+
+def test_poll_csv_parses_the_ap_section_despite_airodumps_leading_blank_line(tmp_path):
+    """Regression test for the empty-table bug. Real airodump-ng writes a leading
+    blank line as the first line of the CSV (the file opens with "\\r\\n"); the
+    old `break` on the first blank line fired on that line and discovered ZERO
+    networks on real hardware while every fake-based test -- reading a fixture
+    with no leading blank line -- stayed green. With the fix (break only at the
+    "Station MAC" header), the leading blank line is skipped and both AP rows are
+    discovered. Against the buggy code this asserts 2 where 0 would be produced."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            on_spawn=_write_text_on_spawn(CSV_WITH_LEADING_BLANK_LINE),
+            running_polls={"airodump-ng": DISCOVERY_TICK_COUNT},
+        ),
+        discovery_poll_interval=timedelta(seconds=0),
+        drive_tick_interval=timedelta(seconds=0),
+    )
+    discovered = []
+    engine.subscribe(discovered.append, NetworkDiscovered)
+
+    handle = engine.discovery.start()
+    handle.wait_for_test(timeout=2.0)
+
+    expected_bssids = {MacAddress.parse(BSSID_1), MacAddress.parse(BSSID_2)}
+    assert {e.network.bssid for e in discovered} == expected_bssids
+    assert len(discovered) == 2  # both AP rows -- the leading blank line no longer stops parsing
 
 
 # --- Fix 3: Cancel, and a crash in the loop, must escalate and confirm termination ----
