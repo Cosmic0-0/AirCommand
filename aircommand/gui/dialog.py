@@ -46,10 +46,21 @@ def apply_chrome(
     dialog.resizable(False, False)
     try:
         # transient() wants a real top-level as its argument; dialog.master may
-        # be an inner frame (e.g. a view), so resolve up to its window. Guarded
-        # because it is pure WM polish -- a failure here must never stop the
-        # dialog opening.
-        dialog.transient(dialog.master.winfo_toplevel())
+        # be an inner frame (e.g. a view), so resolve up to its window.
+        parent = dialog.master.winfo_toplevel()
+        # Only mark the dialog transient-for a parent that is actually on
+        # screen. A transient window whose master is withdrawn/unmapped is never
+        # mapped by the X window manager at all -- it just never appears -- so a
+        # modal wait_window() on it (App._ask_sudo_password_dialog) then blocks
+        # forever with nothing shown. The launch-time sudo prompt is exactly
+        # this case: App.__init__ withdraw()s the main window *before* opening
+        # it. The other three dialogs (Add-as-Target / Add-manually / deauth
+        # confirm) open over the already-deiconified main window, so they still
+        # get the transient hint and stay grouped above their parent. Guarded
+        # besides because this is pure WM polish -- a failure here must never
+        # stop the dialog opening.
+        if parent.winfo_ismapped():
+            dialog.transient(parent)
     except Exception:
         pass
 
