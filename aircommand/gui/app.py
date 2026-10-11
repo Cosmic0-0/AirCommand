@@ -70,6 +70,20 @@ class App(ctk.CTk):
         super().__init__()
         self.title("AirCommand")
         self.configure(fg_color=PALETTE["bg"])
+        # Open at a usable size. CTk otherwise auto-fits the window to its content
+        # at construction, which (confirmed by the user on real hardware) maps a
+        # tiny window the operator has to drag larger on every launch. Sized to the
+        # widest page, Discovery & Targets: its "Networks seen" table is 690px of
+        # fixed columns (discovery_view.py NetworksView._COLUMNS) + ~70px of
+        # inter-column padding + a ~140px "Add as Target" action button, and with
+        # the Cell/page padding, the scrollbar and the 196px sidebar
+        # (sidebar.py _WIDTH_EXPANDED) that page needs ~1150px wide to show in
+        # full -- so 1200 leaves a little slack while still fitting a 1366x768
+        # laptop. minsize keeps the sidebar and the narrower pages fully usable and
+        # blocks a shrink back to the unusable auto-fit size; past it the window is
+        # freely resizable and every page scrolls vertically as one unit (§4).
+        self.geometry("1200x720")
+        self.minsize(1040, 640)
         self.withdraw()   # hide the (still empty) main window until the sudo prompt
         # below succeeds -- otherwise it maps on top of the password dialog, and the
         # user sees two windows at launch. Re-shown by self.deiconify() below.
