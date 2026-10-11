@@ -6,6 +6,7 @@ normal user.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -25,7 +26,9 @@ from aircommand.core.jobs import (
 )
 from aircommand.core.parse import filter_hc22000_lines_by_bssid, parse_hashcat_status_line
 from aircommand.core.persistence.db import ConnectionScope, CrackResultRepository
-from aircommand.core.procutil import ProcHandle, ProcRunner
+from aircommand.core.procutil import ProcHandle, ProcRunner, terminate_with_escalation
+
+logger = logging.getLogger(__name__)
 
 # hashcat's default --outfile-format includes the hash alongside the plaintext
 # (e.g. "hash:plain"), which would make a naive whole-file read return the hash
@@ -49,6 +52,14 @@ HASHCAT_OUTFILE_FORMAT_PLAIN_ONLY = "2"
 # second against a ~200KB real capture) -- a safety net for an unattended
 # hang, not a tuned-tight budget.
 DEFAULT_CONVERSION_TIMEOUT = timedelta(seconds=30)
+
+# SIGTERM, then this long (polled, not a blind sleep) before escalating to
+# SIGKILL -- same policy discovery.py's/capture.py's own DEFAULT_CANCEL_GRACE_
+# PERIOD / terminate_with_escalation already use for a live Cancel click
+# (docs/adr/0011). Injectable for the same reason: a test that scripts a
+# handle to "ignore terminate() forever" needs a short grace period to stay
+# fast, not the real multi-second production value.
+DEFAULT_CANCEL_GRACE_PERIOD = timedelta(seconds=3)
 
 # ADR-0015, found while verifying the conversion step end to end against a
 # real crack: hashcat caches a cracked hash:plaintext pair in its own
@@ -76,6 +87,7 @@ class Crack:
         new_connection_scope: Callable[..., ConnectionScope],
         conversion_timeout: timedelta = DEFAULT_CONVERSION_TIMEOUT,
         tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
+        cancel_grace_period: timedelta = DEFAULT_CANCEL_GRACE_PERIOD,
     ) -> None:
         self._repo = repo  # main-connection repo -- list_results() (main-thread read) only
         self._bus = bus
@@ -84,6 +96,7 @@ class Crack:
         self._new_connection_scope = new_connection_scope  # Database.new_connection_scope, injected
         self._conversion_timeout_s = conversion_timeout.total_seconds()
         self._tick_interval_s = tick_interval.total_seconds()
+        self._cancel_grace_period_s = cancel_grace_period.total_seconds()
 
     def start(self, handshake: Handshake, wordlist_path: Path) -> JobHandle:
         # No allowlist re-check — handshake.target_id is the proof (see module docstring).
@@ -187,7 +200,13 @@ class Crack:
 
             if converted and not token.is_cancelled():
                 handle = self._proc.spawn(
-                    ["hashcat", "-m", "22000", str(hash_file_path), str(wordlist_path),
+                    # wordlist_path.resolve(), not the possibly-relative path as
+                    # given: a relative path starting with "-" would otherwise be
+                    # parsed by hashcat's own argv parser as an option rather than
+                    # the wordlist argument. Resolved here, at the point of use --
+                    # the wordlist_path parameter itself stays whatever shape the
+                    # caller gave it (used as-is below for the DB row).
+                    ["hashcat", "-m", "22000", str(hash_file_path), str(wordlist_path.resolve()),
                      "--status", "--status-json", "--potfile-disable",
                      "--outfile", str(outfile_path), "--outfile-format", HASHCAT_OUTFILE_FORMAT_PLAIN_ONLY],
                     privileged=False)
@@ -196,15 +215,45 @@ class Crack:
                 # see that comment for the real-cmdline mismatch this replaces.
                 self._jobs.record_process(job_id, handle.pid, handle.pgid,
                     str(hash_file_path), repo=db_scope.jobs)
-                for line in handle.lines():
+                # ADR-0008 (2026-10-10 update): idle_timeout=self._tick_interval_s
+                # makes this yield None on a schedule instead of blocking on
+                # queue.get() forever -- so a Cancel click between two
+                # --status-json ticks (hashcat going quiet for any reason, not
+                # just the pty stall that ADR covers) is still noticed within one
+                # tick, not only when hashcat next prints a line. Content reading
+                # itself (status, below) is unchanged.
+                for line in handle.lines(idle_timeout=self._tick_interval_s):
                     if token.is_cancelled():
-                        handle.terminate()
+                        # Confirmed, escalating stop -- not a bare, unescalated
+                        # terminate() that's never checked: aircrack-ng-suite
+                        # tools don't always honor SIGTERM (ProcHandle.kill()'s
+                        # own docstring), and a Cancel click deserves the same
+                        # "actually ends up dead" guarantee as every other
+                        # StopReason path. grace_period_s/tick_s are this
+                        # driver's OWN configurable knobs, not procutil's
+                        # hardcoded defaults -- same reasoning as discovery.py's
+                        # equivalent call this hardening pass: a test (or a
+                        # future caller) that configures a fast tick_interval
+                        # expects escalation polling to keep pace with it too.
+                        terminate_with_escalation(
+                            handle, grace_period_s=self._cancel_grace_period_s, tick_s=self._tick_interval_s)
                         break
+                    if line is None:
+                        continue  # idle tick, nothing new -- loop back around to the cancel check
                     status = parse_hashcat_status_line(line)
                     if status is not None:
                         self._bus.publish(CrackProgress(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                             job_id=job_id, hashrate=status.hashrate, eta=status.eta, percent=status.percent))
         finally:
+            # The loop's own cancel branch above already confirms hashcat dead
+            # via terminate_with_escalation before it breaks. This is the safety
+            # net for the loop ending some OTHER way -- an unexpected exception
+            # that never signaled hashcat at all -- without it, the
+            # handle.wait() line right below blocks on a process nothing ever
+            # told to stop, for however long the wordlist takes.
+            if handle is not None and handle.poll() is None:
+                terminate_with_escalation(
+                    handle, grace_period_s=self._cancel_grace_period_s, tick_s=self._tick_interval_s)
             # ADR-0009: hashcat's real exit code, read once the stream loop above
             # has ended (cancelled or exhausted) -- None if spawn() itself never
             # even ran, which now also covers "conversion produced nothing
@@ -215,7 +264,15 @@ class Crack:
             # on hashcat's numeric --status-json status field (unconfirmed meaning).
             plaintext = ""
             if outfile_path.exists():
-                content = outfile_path.read_text()
+                # errors="replace", not a strict decode: a found password can
+                # plausibly contain a byte that isn't valid UTF-8 (ADR-0014's
+                # same reasoning, applied to this artifact too) -- a strict
+                # read_text() raising UnicodeDecodeError HERE, inside finally,
+                # would propagate out of the whole method, skipping
+                # mark_terminal() below and leaving the job stuck RUNNING
+                # forever (wait_for_test() hangs). Losing fidelity on an
+                # already-unreadable byte is strictly better than that.
+                content = outfile_path.read_text(errors="replace")
                 lines_found = [l for l in content.splitlines() if l.strip()]
                 plaintext = lines_found[0] if lines_found else ""
             outcome = (Found(key=plaintext) if plaintext
@@ -229,16 +286,54 @@ class Crack:
             # stop_reason is the only new signal, same precedent as Capture's own
             # StopReason.ERROR usage. A conversion that never got as far as spawning
             # hashcat at all (ADR-0015) falls into this same ERROR bucket too --
-            # returncode stays None (not 0), so there's no new branch to add here.
+            # returncode stays None (not 0 or 1), so there's no new branch to add here.
+            # D3 (confirmed against real hashcat 6.2.6, not assumed): exit 0 means
+            # found, exit 1 means the wordlist was exhausted cleanly without
+            # finding it -- both are a normal, complete run, not a crash. Only
+            # some OTHER nonzero code (bad args, no GPU driver, an unreadable
+            # .cap file, etc.) is a real failure.
             stop_reason = (StopReason.CANCELLED if token.is_cancelled()
-                           else StopReason.COMPLETED if (plaintext or returncode == 0)
+                           else StopReason.COMPLETED if (plaintext or returncode in (0, 1))
                            else StopReason.ERROR)
             if db_scope is not None:
-                row = db_scope.crack_results.insert(handshake_id=handshake.id, outcome=outcome,
-                    wordlist_path=wordlist_path, started_at=started_at, finished_at=datetime.now(),
-                    stop_reason=stop_reason)  # sync write
-                self._bus.publish(CrackResult(event_id=uuid.uuid4(), occurred_at=datetime.now(),
-                                               job_id=job_id, result=row))   # DurableEvent
+                # Each step below is wrapped independently, not one shared
+                # try/except: a failure anywhere here used to propagate
+                # straight out of finally, skipping mark_terminal()/
+                # db_scope.close() below it the same way the old strict
+                # outfile decode did -- the job stuck RUNNING forever, with no
+                # trace of why. GAP FOUND re-reading this after that fix: a
+                # single shared try/except around insert+publish+unlink meant
+                # publish() raising (e.g. a buggy GUI subscriber) skipped the
+                # unlink too, even though insert() had already succeeded --
+                # leaving the cracked plaintext passphrase sitting on disk
+                # indefinitely (nothing else in this codebase ever cleans up
+                # this artifact). Each step is now independent: the unlink
+                # only ever needs insert() to have succeeded, never publish().
+                row = None
+                try:
+                    row = db_scope.crack_results.insert(handshake_id=handshake.id, outcome=outcome,
+                        wordlist_path=wordlist_path, started_at=started_at, finished_at=datetime.now(),
+                        stop_reason=stop_reason)  # sync write
+                except Exception:
+                    logger.exception("Crack: failed to record the result for job %s", job_id)
+                if row is not None:
+                    # Unlink only after the key is safely committed above --
+                    # unlinking first would mean a DB failure loses the only
+                    # on-disk record of the found key, with nothing left to
+                    # recover it from. This is this module's own --outfile
+                    # artifact only -- never hashcat's potfile (see the module
+                    # docstring's --potfile-disable note; --potfile-disable
+                    # itself is untouched by this).
+                    if outfile_path.exists():
+                        try:
+                            outfile_path.unlink()
+                        except OSError:
+                            logger.exception("Crack: failed to unlink the outfile for job %s", job_id)
+                    try:
+                        self._bus.publish(CrackResult(event_id=uuid.uuid4(), occurred_at=datetime.now(),
+                                                       job_id=job_id, result=row))   # DurableEvent
+                    except Exception:
+                        logger.exception("Crack: failed to publish the result for job %s", job_id)
             # mark_terminal LAST, deliberately, same reason as capture.py's _drive: it's
             # what unblocks JobHandle.wait_for_test(), so publish CrackResult first -- a
             # caller that wakes on mark_terminal should be able to trust the event already
