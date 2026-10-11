@@ -40,7 +40,7 @@ from aircommand.core.jobs import (
 )
 from aircommand.core.parse import parse_aircrack_handshake_check
 from aircommand.core.persistence.db import AuditLogRepository, ConnectionScope, HandshakeRepository
-from aircommand.core.procutil import ProcHandle, ProcRunner, summarize_stderr
+from aircommand.core.procutil import ProcHandle, ProcRunner, summarize_stderr, terminate_with_escalation
 from aircommand.core.rf import AdapterMode, AdapterReservation, RadioController
 
 # How often _drive spawns a one-shot `aircrack-ng -w /dev/null <cap_path>`
@@ -77,6 +77,16 @@ DEFAULT_HANDSHAKE_CHECK_TIMEOUT = timedelta(seconds=30)
 # doesn't always honor SIGTERM cleanly. See docs/adr/0011.
 DEFAULT_CANCEL_GRACE_PERIOD = timedelta(seconds=3)
 
+# Safety net for the aireplay-ng deauth burst, same reasoning as
+# DEFAULT_HANDSHAKE_CHECK_TIMEOUT above: unlike the main airodump-ng handle
+# (bounded Cancel via _drive's own loop) and the aircrack-ng handshake check
+# (_collect_bounded), the deauth burst used to be a blind, unbounded
+# deauth_handle.wait() -- a stuck driver or a lost monitor-mode lock could
+# hang it indefinitely, and nothing (not even Cancel) could interrupt it.
+# This bounds an UNATTENDED hang; Cancel itself is still caught within one
+# tick regardless of this value, same as the handshake check's own timeout.
+DEFAULT_DEAUTH_BURST_TIMEOUT = timedelta(seconds=30)
+
 
 class Capture:
     def __init__(
@@ -94,6 +104,7 @@ class Capture:
         tick_interval: timedelta = DEFAULT_DRIVE_TICK_INTERVAL,
         handshake_check_timeout: timedelta = DEFAULT_HANDSHAKE_CHECK_TIMEOUT,
         cancel_grace_period: timedelta = DEFAULT_CANCEL_GRACE_PERIOD,
+        deauth_burst_timeout: timedelta = DEFAULT_DEAUTH_BURST_TIMEOUT,
     ) -> None:
         self._allowlist = allowlist
         self._handshakes = handshakes  # main-connection repo -- list_handshakes() (main-thread read) only
@@ -108,6 +119,7 @@ class Capture:
         self._tick_interval_s = tick_interval.total_seconds()
         self._handshake_check_timeout = handshake_check_timeout
         self._cancel_grace_period = cancel_grace_period
+        self._deauth_burst_timeout = deauth_burst_timeout
 
     def start_passive(self, target: Target) -> JobHandle:
         return self._start(target, deauth=None)
@@ -125,28 +137,40 @@ class Capture:
         fresh = self._allowlist.require_target(target.bssid)   # the real gate — re-verify, don't trust `target`
         kind = JobKind.CAPTURE_DEAUTH if deauth else JobKind.CAPTURE_PASSIVE
         reservation = self._rf.reserve(AdapterMode.MONITOR_LOCKED, kind)   # raises AdapterBusy; propagate, don't catch
-        job_id, token = self._jobs.new_job(kind, target_id=fresh.id)   # the sync write CaptureStarted describes
+        job_id = None
+        try:
+            # GAP FOUND (same shape as discovery.py's start()/enumerate.py's
+            # start_scan() in this hardening pass, just missed here originally):
+            # if new_job() or Thread.start() raises, the RF reservation above
+            # leaks for the rest of the live session -- every later
+            # start_passive()/start_deauth_assisted()/start_scan()/discovery.
+            # start() call then raises AdapterBusy against a reservation nothing
+            # is using. If new_job() itself succeeded first, its own registry
+            # entry (tokens/terminal_events) also leaks unless explicitly marked
+            # terminal here. CaptureStarted is published only AFTER
+            # Thread.start() succeeds now (moved from before it) -- publishing
+            # it earlier left subscribers believing a capture had started even
+            # when the thread that would actually run it was never created.
+            job_id, token = self._jobs.new_job(kind, target_id=fresh.id)   # the sync write CaptureStarted describes
+            threading.Thread(target=self._drive, args=(job_id, token, reservation, fresh, deauth), daemon=True).start()
+        except Exception:
+            if job_id is not None:
+                self._jobs.mark_terminal(job_id)
+            self._rf.release(reservation)
+            raise
         self._bus.publish(CaptureStarted(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                           job_id=job_id, target_id=fresh.id))
-        threading.Thread(target=self._drive, args=(job_id, token, reservation, fresh, deauth), daemon=True).start()
         return JobHandle(job_id, kind, self._jobs)
 
-    def _terminate_with_escalation(self, handle: ProcHandle) -> None:
-        """SIGTERM, then poll (never a blind time.sleep -- stays on this
-        loop's own tick cadence) for up to _cancel_grace_period before
-        escalating to SIGKILL. See docs/adr/0011: ProcHandle.kill()'s own
-        docstring already warns the aircrack-ng suite doesn't always honor
-        SIGTERM, and procutil.py's terminate_process_group() already uses
-        this exact policy for startup orphan cleanup (ADR-0004) -- this is
-        the same policy applied to a live Cancel click, so a Target's
-        airodump-ng process can't survive it just because the first signal
-        was ignored."""
-        handle.terminate()
-        deadline = time.monotonic() + self._cancel_grace_period.total_seconds()
-        while handle.poll() is None and time.monotonic() < deadline:
-            time.sleep(self._tick_interval_s)
-        if handle.poll() is None:
-            handle.kill()
+    def _terminate_with_escalation(self, handle: ProcHandle) -> bool:
+        """Delegates to procutil.terminate_with_escalation using this Capture's
+        own configured grace period and tick cadence (same policy, no behavior
+        change from before -- see docs/adr/0011). Now returns whether the
+        process was actually confirmed dead, so a caller that needs to know
+        (the main airodump-ng handle's own stop path, _drive's finally below)
+        can report ERROR rather than silently assuming a kill succeeded."""
+        return terminate_with_escalation(
+            handle, grace_period_s=self._cancel_grace_period.total_seconds(), tick_s=self._tick_interval_s)
 
     def _collect_bounded(self, handle: ProcHandle, token: CancellationToken) -> Optional[str]:
         """Waits for the one-shot aircrack-ng handshake-check ProcHandle to
@@ -168,6 +192,31 @@ class Capture:
                 return None
             time.sleep(self._tick_interval_s)
         return "\n".join(handle.lines())  # process already exited -- draining is instant, never blocks
+
+    def _await_deauth_burst(self, handle: ProcHandle, token: CancellationToken) -> tuple[Optional[int], bool, bool]:
+        """Bounded, cancellable wait for one aireplay-ng deauth burst -- same
+        ProcHandle.poll()-based idiom _collect_bounded (above) uses for the
+        aircrack-ng handshake check, and the same reasoning docs/adr/0011
+        already established: an unattended hang must not block this loop's own
+        cancellation/liveness checks. Returns (exit_code, was_stopped_early,
+        confirmed_stopped): exit_code is None if cancelled or timed out
+        (killed either way, not waited for a real exit), otherwise the real
+        exit code; was_stopped_early is True iff this function killed the
+        process itself (cancel or timeout), so the caller can audit-log the
+        burst as a failed/incomplete one rather than silently dropping it.
+        confirmed_stopped carries terminate_with_escalation's own result when
+        was_stopped_early is True (True, meaninglessly, otherwise) -- a
+        transmission tool that outlives even SIGKILL deserves the same
+        "we couldn't confirm it actually died" signal _drive's main handle
+        already gets, not a silent "we tried" with no record of the attempt
+        possibly having failed."""
+        deadline = time.monotonic() + self._deauth_burst_timeout.total_seconds()
+        while handle.poll() is None:
+            if token.is_cancelled() or time.monotonic() >= deadline:
+                confirmed = self._terminate_with_escalation(handle)
+                return None, True, confirmed
+            time.sleep(self._tick_interval_s)
+        return handle.poll(), False, True
 
     def _drive(
         self,
@@ -202,6 +251,15 @@ class Capture:
         # without this, the RF reservation leaks for the rest of the live session.
         db_scope = None
         handle = None
+        # Assumed stopped until a call site below proves otherwise -- this is
+        # the "nothing needed stopping" default (e.g. an early raise before
+        # handle is even assigned), not an optimistic guess about a live
+        # process. Every branch that actually calls _terminate_with_escalation
+        # on the main airodump-ng handle (the token.is_cancelled() branch and
+        # the handshake-found branch below, plus the finally-block safety net
+        # for an unexpected exception) overwrites this with that call's real
+        # result -- see docs/adr/0011.
+        main_handle_stopped = True
         try:
             # This thread's own connection -- never self._audit/self._handshakes (the
             # main connection) from in here. See persistence/db.py's Database/
@@ -248,7 +306,7 @@ class Capture:
             # _collect_bounded's own docstring.)
             while True:
                 if token.is_cancelled():
-                    self._terminate_with_escalation(handle)
+                    main_handle_stopped = self._terminate_with_escalation(handle)
                     break
                 if handle.poll() is not None:
                     break  # process died unexpectedly -- ERROR, inferred below
@@ -283,14 +341,34 @@ class Capture:
                     deauth_handle = self._proc.spawn(
                         ["aireplay-ng", "--deauth", str(deauth.burst_size), "-a", str(target.bssid), adapter],
                         privileged=True)
-                    exit_code = deauth_handle.wait()
+                    # Bounded, cancel-aware wait -- see _await_deauth_burst's own
+                    # docstring. Unlike the main airodump-ng handle (bounded via
+                    # this loop) and the aircrack-ng handshake check
+                    # (_collect_bounded), this used to be a blind, unbounded
+                    # deauth_handle.wait(): a stuck driver or lost monitor-mode
+                    # lock could hang it forever, with Cancel unable to interrupt
+                    # it. Still logged either way (ADR-0001's "every firing, no
+                    # exceptions" covers an attempted firing, cancelled/timed-out
+                    # included, not only a confirmed-successful one).
+                    exit_code, stopped_early, burst_confirmed_stopped = self._await_deauth_burst(deauth_handle, token)
                     burst_count += 1
                     succeeded = exit_code == 0
-                    error_detail = None if succeeded else summarize_stderr(deauth_handle.stderr_tail())
+                    if stopped_early:
+                        error_detail = "cancelled" if token.is_cancelled() else "timed out"
+                        if not burst_confirmed_stopped:
+                            # SIGKILL itself failed to confirm-kill this
+                            # transmission tool -- the same "we couldn't
+                            # confirm it died" signal the main airodump-ng
+                            # handle gets below, recorded here instead of
+                            # silently discarded.
+                            error_detail += "; aireplay-ng could not be stopped"
+                    else:
+                        error_detail = None if succeeded else summarize_stderr(deauth_handle.stderr_tail())
                     audit_row = db_scope.audit_log.record(target_id=target.id, capture_job_id=job_id,
                                                      client_mac=None, frame_count=deauth.burst_size,
-                                                     succeeded=succeeded, error_detail=error_detail)  # sync
-                                                     # write BEFORE the event — ADR-0001, no exceptions
+                                                     succeeded=succeeded, error_detail=error_detail,
+                                                     bssid=target.bssid)  # sync write BEFORE the
+                                                     # event — ADR-0001, no exceptions
                     self._bus.publish(DeauthFired(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                         job_id=job_id, target_id=target.id, bssid=target.bssid, client_mac=None,
                         fired_at=audit_row.fired_at, frame_count=deauth.burst_size,
@@ -324,18 +402,38 @@ class Capture:
                             privileged=False)
                         output = self._collect_bounded(check_handle, token)
                         if output is not None and parse_aircrack_handshake_check(output):
-                            handshake_seen = True
+                            # handshake_seen is set ONLY after both the insert and
+                            # the publish below succeed -- previously it was set
+                            # BEFORE either, so a raise from db_scope.handshakes.
+                            # insert() (or the publish) still left it True, and
+                            # this loop's own exception propagation into `finally`
+                            # would report CaptureStopped(COMPLETED) even though no
+                            # Handshake was ever actually persisted and
+                            # HandshakeCaptured never fired.
                             sha256 = hashlib.sha256(cap_path.read_bytes()).hexdigest()
                             handshake = db_scope.handshakes.insert(   # repository mints — see its own docstring
                                 target_id=target.id, bssid=target.bssid, capture_job_id=job_id,
                                 cap_file_path=cap_path, cap_file_sha256=sha256, kind=HandshakeKind.WPA2_EAPOL)
                             self._bus.publish(HandshakeCaptured(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                                                  handshake=handshake))
-                            self._terminate_with_escalation(handle)
+                            handshake_seen = True
+                            main_handle_stopped = self._terminate_with_escalation(handle)  # see fix 1
                             break
                 time.sleep(self._tick_interval_s)
         finally:
             self._rf.release(reservation)
+            # Safety net, same reasoning as discovery.py/enumerate.py's own
+            # equivalent fix in this hardening pass: if the loop above exited
+            # via an unexpected exception that never reached either
+            # _terminate_with_escalation call site (the token.is_cancelled()
+            # branch or the handshake-found branch), the airodump-ng handle
+            # could still be alive with nothing having signaled it. Only runs
+            # if the loop didn't already handle it -- if handle.poll() is not
+            # None, the process already ended on its own or one of the loop's
+            # own branches already stopped it, and main_handle_stopped already
+            # holds that branch's real result.
+            if handle is not None and handle.poll() is None:
+                main_handle_stopped = self._terminate_with_escalation(handle)
             # Precedence matters: a cancel racing with a just-seen handshake still reports
             # CANCELLED (what the user asked for); absent either, the loop only ends this
             # way if the underlying process died unexpectedly (airodump-ng has no natural
@@ -343,6 +441,14 @@ class Capture:
             reason = (StopReason.CANCELLED if token.is_cancelled()
                       else StopReason.COMPLETED if handshake_seen
                       else StopReason.ERROR)
+            # Escalates toward ERROR only, never away from it: a confirmed-dead
+            # process is necessary for CANCELLED/COMPLETED to actually mean what
+            # they say, but its absence doesn't override a cancel/handshake
+            # outcome that already happened -- it just means this driver can no
+            # longer vouch for the process itself, which is exactly what ERROR
+            # (plus the error_detail note below) is for.
+            if not main_handle_stopped:
+                reason = StopReason.ERROR
             # Best-effort diagnostic hint for the ERROR case -- see
             # procutil.py's summarize_stderr() and DiscoveryStopped's
             # docstring (events.py) for why this exists at all.
@@ -350,6 +456,9 @@ class Capture:
                 summarize_stderr(handle.stderr_tail()) if reason == StopReason.ERROR and handle is not None
                 else None
             )
+            if not main_handle_stopped:
+                note = "airodump-ng could not be stopped"
+                error_detail = f"{error_detail}; {note}" if error_detail else note
             self._bus.publish(CaptureStopped(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                               job_id=job_id, target_id=target.id, reason=reason,
                                               error_detail=error_detail))

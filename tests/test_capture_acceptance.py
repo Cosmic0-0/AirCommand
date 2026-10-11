@@ -45,7 +45,7 @@ import pytest
 from aircommand.core.allowlist import NotATargetError
 from aircommand.core.domain import DeauthOptions, HandshakeKind, MacAddress, StopReason
 from aircommand.core.engine import Engine
-from aircommand.core.events import CaptureStopped, DeauthFired, HandshakeCaptured
+from aircommand.core.events import CaptureStarted, CaptureStopped, DeauthFired, HandshakeCaptured
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.core.rf import AdapterBusy
 
@@ -355,6 +355,49 @@ def test_capture_releases_rf_reservation_even_if_new_connection_scope_raises(tmp
     second_handle.wait_for_test(timeout=2.0)
 
 
+def test_capture_releases_rf_reservation_and_job_row_if_new_job_raises(tmp_path):
+    """Same gap discovery.py's start()/enumerate.py's start_scan() were fixed
+    for in this same hardening pass, originally missed here: _start() used to
+    reserve the radio and call self._jobs.new_job() with nothing guarding it --
+    a raise there (new_job already re-raises after its own internal rollback,
+    see jobs.py) skipped releasing the reservation entirely, leaking it for the
+    rest of the live session. Exception fires SYNCHRONOUSLY inside _start()
+    itself (new_job() runs before the driver thread is ever spawned) -- no
+    thread/excepthook dance needed."""
+    engine = _make_engine(
+        tmp_path,
+        script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": [], "aircrack-ng": NO_HANDSHAKE_OUTPUT},
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    real_new_job = engine.capture._jobs.new_job
+    calls = {"n": 0}
+
+    def raise_on_first_call(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("new_job failed")
+        return real_new_job(*args, **kwargs)
+
+    engine.capture._jobs.new_job = raise_on_first_call
+
+    started = []
+    engine.subscribe(started.append, CaptureStarted)
+
+    with pytest.raises(RuntimeError, match="new_job failed"):
+        engine.capture.start_passive(target)
+
+    # CaptureStarted must not fire for a capture whose driver thread never ran.
+    assert started == []
+
+    # The real assertion: the RF reservation from the failed start was
+    # released -- a second start_passive() right after succeeds rather than
+    # raising AdapterBusy.
+    second_handle = engine.capture.start_passive(target)
+    second_handle.cancel()
+    second_handle.wait_for_test(timeout=2.0)
+
+
 def test_handshake_check_skipped_until_cap_file_has_a_full_header(tmp_path):
     """docs/adr/0011: real aircrack-ng hangs indefinitely when given a missing
     or under-24-byte (pcap global header size) capture file. The very first
@@ -475,3 +518,376 @@ def test_not_a_target_error_when_target_removed_after_fetch(tmp_path):
 
     with pytest.raises(NotATargetError):
         engine.capture.start_passive(stale_target)
+
+
+# --- Wave 2, fix group G4 -----------------------------------------------------------
+#
+# Fix 1: _terminate_with_escalation now delegates to procutil.terminate_with_
+# escalation and RETURNS whether the process was actually confirmed dead, so a
+# caller (_drive's own finally) can report ERROR instead of silently assuming a
+# kill succeeded. The two tests below pin both outcomes of that return value.
+
+
+class _NeverDiesHandle:
+    """ProcHandle-shaped stand-in for the one case _FakeProcHandle's own
+    ignore_terminate= can't express: a process that survives even SIGKILL
+    (e.g. a lapsed cached sudo credential between spawn and kill -- see
+    procutil.py's _RealProcHandle._signal's own logged-WARNING note).
+    ignore_terminate= only withholds "exited" until kill() is actually
+    called; this withholds it forever. Same idiom test_procutil.py's own
+    _NeverDiesHandle already established for terminate_with_escalation's
+    False-returning case, reproduced here (not imported -- that one is
+    test_procutil.py-local) because Capture._drive needs the FULL ProcHandle
+    shape (pid/pgid for record_process, stderr_tail for the ERROR-path hint),
+    not just terminate/kill/poll."""
+
+    def __init__(self) -> None:
+        self.pid = 424242
+        self.pgid = 424242
+
+    def lines(self, idle_timeout=None):
+        return iter(())
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self) -> int:
+        return 0
+
+    def poll(self):
+        return None
+
+    def stderr_tail(self) -> list[str]:
+        return []
+
+
+class _NeverDiesAirodumpRunner:
+    """Wraps a real FakeProcRunner, substituting _NeverDiesHandle for
+    airodump-ng's own spawn only -- every other spawn (airmon-ng) is
+    delegated to the real fake unchanged."""
+
+    def __init__(self, fake: FakeProcRunner) -> None:
+        self._fake = fake
+
+    def spawn(self, argv: list[str], *, privileged: bool):
+        if argv[0] == "airodump-ng":
+            return _NeverDiesHandle()
+        return self._fake.spawn(argv, privileged=privileged)
+
+
+class _NeverDiesAireplayRunner:
+    """Same substitution as _NeverDiesAirodumpRunner above, for aireplay-ng's
+    own spawn instead -- airodump-ng/airmon-ng/aircrack-ng all run as the real
+    fake unchanged, so a deauth burst actually gets attempted against a
+    genuinely RUNNING capture, not one that's already failed for an
+    unrelated reason."""
+
+    def __init__(self, fake: FakeProcRunner) -> None:
+        self._fake = fake
+
+    def spawn(self, argv: list[str], *, privileged: bool):
+        if argv[0] == "aireplay-ng":
+            return _NeverDiesHandle()
+        return self._fake.spawn(argv, privileged=privileged)
+
+
+def test_cancel_still_reports_cancelled_when_airodump_only_dies_via_kill_escalation(tmp_path):
+    """Proves the TRUE branch of _terminate_with_escalation's new return value
+    flows through correctly: a Cancel that only succeeds via SIGKILL
+    escalation (airodump-ng ignoring SIGTERM, same ignore_terminate= idiom
+    test_cancel_escalates_to_kill_when_airodump_ignores_sigterm above already
+    uses) must still report StopReason.CANCELLED -- not accidentally ERROR
+    just because the kill needed escalation to land."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []},
+            ignore_terminate={"airodump-ng"},
+        ),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    engine.capture._cancel_grace_period = timedelta(seconds=0.05)  # see
+    # test_cancel_escalates_to_kill_when_airodump_ignores_sigterm's identical note
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    stopped = []
+    engine.subscribe(stopped.append, CaptureStopped)
+
+    handle = engine.capture.start_passive(target)
+    time.sleep(PRE_CANCEL_SETTLE_S)
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(stopped) == 1
+    assert stopped[0].reason == StopReason.CANCELLED
+    assert stopped[0].error_detail is None
+
+
+def test_cancel_reports_error_when_airodump_cannot_be_stopped_even_by_kill(tmp_path):
+    """The actual Fix 1 bug: before this fix, _terminate_with_escalation's
+    result was discarded entirely, so a Cancel against a process that
+    survives even SIGKILL still reported StopReason.CANCELLED, as if the
+    kill had worked. Uses _NeverDiesHandle (see above) since _FakeProcHandle
+    itself can't express "never dies at all"."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=_NeverDiesAirodumpRunner(FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT})),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    engine.capture._cancel_grace_period = timedelta(seconds=0.02)  # keep both
+    # escalation windows (SIGTERM grace + SIGKILL grace) short -- this test
+    # doesn't care how long they are, only that both are exhausted and the
+    # process is STILL reported alive at the end.
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    stopped = []
+    engine.subscribe(stopped.append, CaptureStopped)
+
+    handle = engine.capture.start_passive(target)
+    time.sleep(PRE_CANCEL_SETTLE_S)
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(stopped) == 1
+    assert stopped[0].reason == StopReason.ERROR
+    assert stopped[0].error_detail is not None and "could not be stopped" in stopped[0].error_detail
+
+
+# --- Fix 2: the aireplay-ng deauth burst must be bounded and cancel-aware ----------
+
+
+def test_deauth_burst_times_out_when_aireplay_hangs(tmp_path):
+    """Fix 2's actual bug: a hung aireplay-ng used to block this loop
+    indefinitely (a blind .wait()). ignore_terminate= simulates that hang
+    (poll() reports "still running" until kill() lands); a short
+    deauth_burst_timeout proves the bound actually fires rather than waiting
+    out the hang for real."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": [],  # content unused -- see module docstring point 1
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "aireplay-ng": [],
+            },
+            ignore_terminate={"aireplay-ng"},
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    engine.capture._deauth_burst_timeout = timedelta(seconds=0.02)  # short,
+    # deliberately -- the bound firing is what's under test, not realism
+    # _await_deauth_burst's own termination of the hung handle (ignore_terminate=
+    # withholds "exited" until kill() lands) escalates through SIGTERM-grace +
+    # SIGKILL-grace using this SAME knob -- short it too, or that escalation
+    # alone would take up to 2 * DEFAULT_CANCEL_GRACE_PERIOD (6s), blowing past
+    # this test's own wait_for_test timeout below.
+    engine.capture._cancel_grace_period = timedelta(seconds=0.02)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    deauths_fired = []
+    engine.subscribe(deauths_fired.append, DeauthFired)
+
+    handle = engine.capture.start_deauth_assisted(
+        target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=1)
+    )
+    # Not an unbounded block -- see module docstring point 1 for why
+    # airodump-ng's own running_polls budget is what ends this job's loop
+    # (same shape test_deauth_burst_failure_is_distinguished_from_a_real_burst
+    # above already relies on with max_bursts=1 and no explicit cancel).
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(deauths_fired) == 1
+    assert deauths_fired[0].succeeded is False
+    assert deauths_fired[0].error_detail == "timed out"
+
+    audit_entries = engine.capture.list_audit_log(target)
+    assert len(audit_entries) == 1
+    assert audit_entries[0].succeeded is False
+    assert audit_entries[0].error_detail == "timed out"
+
+
+def test_deauth_burst_timeout_notes_when_aireplay_survives_even_kill(tmp_path):
+    """_await_deauth_burst's own escalation can itself fail to confirm the
+    kill (e.g. a lapsed cached sudo credential between spawn and kill -- see
+    procutil.py's own logged-WARNING note) -- that must be recorded on the
+    audit row/DeauthFired, same as the main airodump-ng handle's equivalent
+    "could not be stopped" note in _drive's own finally block, not silently
+    discarded. Uses _NeverDiesHandle (via _NeverDiesAireplayRunner) since
+    _FakeProcHandle itself can't express "never dies even after kill()"."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=_NeverDiesAireplayRunner(
+            FakeProcRunner(
+                script={
+                    "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                    "airodump-ng": [],
+                    "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                },
+                running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+            )
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    engine.capture._deauth_burst_timeout = timedelta(seconds=0.02)  # short --
+    # see test_deauth_burst_times_out_when_aireplay_hangs's identical note.
+    engine.capture._cancel_grace_period = timedelta(seconds=0.02)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    deauths_fired = []
+    engine.subscribe(deauths_fired.append, DeauthFired)
+
+    handle = engine.capture.start_deauth_assisted(
+        target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=1)
+    )
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(deauths_fired) == 1
+    assert deauths_fired[0].succeeded is False
+    assert deauths_fired[0].error_detail == "timed out; aireplay-ng could not be stopped"
+
+    audit_entries = engine.capture.list_audit_log(target)
+    assert len(audit_entries) == 1
+    assert audit_entries[0].error_detail == "timed out; aireplay-ng could not be stopped"
+
+
+def test_deauth_burst_cancelled_mid_flight_reports_cancelled(tmp_path):
+    """Same hang, but Cancel (not the timeout) is what ends it -- proving
+    _await_deauth_burst's token.is_cancelled() check, not just its deadline,
+    actually bounds this wait."""
+    engine = Engine(
+        db_path=":memory:",
+        work_dir=tmp_path,
+        adapter="wlan0",
+        proc=FakeProcRunner(
+            script={
+                "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+                "airodump-ng": [],  # content unused -- see module docstring point 1
+                "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+                "aireplay-ng": [],
+            },
+            ignore_terminate={"aireplay-ng"},
+            running_polls={"airodump-ng": AIRODUMP_RUNNING_POLLS},
+        ),
+        capture_handshake_check_interval=timedelta(seconds=0),
+        drive_tick_interval=DRIVE_TICK_INTERVAL,
+    )
+    engine.capture._cancel_grace_period = timedelta(seconds=0.02)  # see the
+    # identical note in test_deauth_burst_times_out_when_aireplay_hangs above --
+    # _await_deauth_burst's own termination of the hung handle escalates using
+    # this same knob, not deauth_burst_timeout
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    deauths_fired = []
+    engine.subscribe(deauths_fired.append, DeauthFired)
+
+    handle = engine.capture.start_deauth_assisted(
+        target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=None)
+    )
+    time.sleep(PRE_CANCEL_SETTLE_S)  # let the burst actually start hanging first
+    handle.cancel()
+    handle.wait_for_test(timeout=2.0)
+
+    assert len(deauths_fired) == 1
+    assert deauths_fired[0].succeeded is False
+    assert deauths_fired[0].error_detail == "cancelled"
+
+    audit_entries = engine.capture.list_audit_log(target)
+    assert len(audit_entries) == 1
+    assert audit_entries[0].error_detail == "cancelled"
+
+
+# --- Fix 3: the audit log's bssid snapshot must carry the real Target bssid -------
+
+
+def test_audit_log_entry_records_the_target_bssid(tmp_path):
+    engine = _make_engine(
+        tmp_path,
+        script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+            "airodump-ng": [],  # content unused -- see module docstring point 1
+            "aircrack-ng": NO_HANDSHAKE_OUTPUT,
+            "aireplay-ng": [],
+        },
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    handle = engine.capture.start_deauth_assisted(
+        target, DeauthOptions(interval=timedelta(seconds=0), burst_size=5, max_bursts=1)
+    )
+    handle.wait_for_test(timeout=2.0)
+
+    audit_entries = engine.capture.list_audit_log(target)
+    assert len(audit_entries) == 1
+    assert audit_entries[0].bssid == target.bssid
+
+
+# --- Fix 4: handshake_seen must not flip True until persistence actually succeeds -
+
+
+def test_handshake_not_reported_completed_if_insert_raises_after_detection(tmp_path):
+    """Before this fix, handshake_seen = True was set BEFORE
+    db_scope.handshakes.insert(...) -- a raise there (or from the publish
+    right after) still left handshake_seen True, so finally's reason
+    computation reported CaptureStopped(COMPLETED) even though no Handshake
+    was ever actually persisted and HandshakeCaptured never fired."""
+    engine = _make_engine(
+        tmp_path,
+        script={
+            "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+            "airodump-ng": [],  # content unused -- see module docstring point 1
+            "aircrack-ng": ["   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"],
+        },
+    )
+    engine.capture._cancel_grace_period = timedelta(seconds=0.02)  # keep Fix 1's
+    # own safety net (which this exception path also exercises, since the
+    # airodump-ng handle is still alive when the exception unwinds) fast.
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    real_new_connection_scope = engine.capture._new_connection_scope
+
+    def scope_with_raising_insert(*args, **kwargs):
+        scope = real_new_connection_scope(*args, **kwargs)
+        scope.handshakes.insert = lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("simulated insert failure")
+        )
+        return scope
+
+    engine.capture._new_connection_scope = scope_with_raising_insert
+
+    handshakes_captured = []
+    stopped = []
+    engine.subscribe(handshakes_captured.append, HandshakeCaptured)
+    engine.subscribe(stopped.append, CaptureStopped)
+
+    # No except clause in Capture._drive -- the raise above propagates out of
+    # the (daemon) thread uncaught, same pattern
+    # test_capture_releases_rf_reservation_even_if_new_connection_scope_raises
+    # above already uses for an expected-and-scripted uncaught raise.
+    original_hook = threading.excepthook
+    threading.excepthook = lambda args: None
+    try:
+        handle = engine.capture.start_passive(target)
+        handle.wait_for_test(timeout=2.0)
+    finally:
+        threading.excepthook = original_hook
+
+    assert handshakes_captured == []
+    assert stopped[0].reason != StopReason.COMPLETED
+    assert len(stopped) == 1
+    assert stopped[0].reason == StopReason.ERROR
+    assert engine.capture.list_handshakes(target) == []
