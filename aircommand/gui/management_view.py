@@ -91,8 +91,14 @@ class ManagementView(ctk.CTkFrame):
         self._start_button = ctk.CTkButton(
             button_row, text="Start Airmon-ng", command=self._on_start_clicked,
             fg_color=PALETTE["accent"], hover_color=PALETTE["accent"], border_color=PALETTE["accent"],
-            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["bg"], text_color_disabled=PALETTE["muted"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # text_color_disabled is set to a PALETTE token on purpose: left unset,
+        # CTkButton falls back to its own library default ("gray74"/"gray60"), a
+        # washed-out light gray that's unreadable on the bright accent fill (the
+        # user's report). _update_button_states() below also dims the fill to a
+        # dark token when disabled so that muted text actually reads, and so the
+        # disabled state looks disabled -- see that method's comment.
         self._start_button.pack(side="left", padx=(0, 6))
         self._stop_button = self._make_outline_button(button_row, "Stop Airmon-ng", self._on_stop_clicked)
         self._stop_button.pack(side="left")
@@ -209,9 +215,20 @@ class ManagementView(ctk.CTkFrame):
         # already takes for CapturePanel/EnumeratePanel's Start buttons.
         self._check_button.configure(state="normal" if has_adapter else "disabled")
         self._kill_button.configure(state="normal" if has_adapter else "disabled")
+        start_enabled = has_adapter and not is_live
+        # CTkButton never dims its own fill on disable (it only swaps the text to
+        # text_color_disabled), so a disabled accent button would otherwise stay
+        # bright lime with faint text on it. Dim the fill/border to dark tokens
+        # when disabled -- the button then reads like the app's own inactive
+        # (outline) controls, i.e. clearly not clickable, while the muted text on
+        # the dark panel fill stays legible. This mirrors the design spec's "a
+        # disabled control just dims" rule (§3) using only existing PALETTE tokens.
         self._start_button.configure(
-            state="disabled" if (not has_adapter or is_live) else "normal",
+            state="normal" if start_enabled else "disabled",
             text="Airmon-ng Running" if is_live else "Start Airmon-ng",
+            fg_color=PALETTE["accent"] if start_enabled else PALETTE["panel"],
+            hover_color=PALETTE["accent"] if start_enabled else PALETTE["panel"],
+            border_color=PALETTE["accent"] if start_enabled else PALETTE["border"],
         )
         self._stop_button.configure(state="normal" if is_live else "disabled")
 

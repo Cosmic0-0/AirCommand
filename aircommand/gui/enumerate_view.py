@@ -52,8 +52,11 @@ class EnumeratePanel(ctk.CTkFrame):
         self._start_button = ctk.CTkButton(
             cell.body, text="Start Enumerate", command=self.on_start_clicked,
             fg_color=PALETTE["accent"], hover_color=PALETTE["accent"], border_color=PALETTE["accent"],
-            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["bg"], text_color_disabled=PALETTE["muted"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # disabled-state styling: see management_view.py's Start button comment --
+        # text_color_disabled + the fill-dim in _update_button_state() below keep the
+        # disabled accent button legible and clearly inactive.
         self._start_button.pack(side="top", anchor="w", pady=(0, 8))
 
         self._status_label = ctk.CTkLabel(
@@ -82,7 +85,14 @@ class EnumeratePanel(ctk.CTkFrame):
 
     def _update_button_state(self) -> None:
         can_start = self.target is not None and self.active_handle is None
-        self._start_button.configure(state="normal" if can_start else "disabled")
+        # Dim the fill/border when disabled so the muted text reads and the button
+        # looks inactive -- CTkButton won't dim its own fill (see management_view.py).
+        self._start_button.configure(
+            state="normal" if can_start else "disabled",
+            fg_color=PALETTE["accent"] if can_start else PALETTE["panel"],
+            hover_color=PALETTE["accent"] if can_start else PALETTE["panel"],
+            border_color=PALETTE["accent"] if can_start else PALETTE["border"],
+        )
 
     def _clear_results(self) -> None:
         for child in self._results_body.winfo_children():

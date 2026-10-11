@@ -61,8 +61,11 @@ class CapturePanel(ctk.CTkFrame):
         self._start_passive_button = ctk.CTkButton(
             capture_button_row, text="Start Passive Capture", command=self.on_start_passive_clicked,
             fg_color=PALETTE["accent"], hover_color=PALETTE["accent"], border_color=PALETTE["accent"],
-            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["bg"], text_color_disabled=PALETTE["muted"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # disabled-state styling: see management_view.py's Start button comment --
+        # text_color_disabled + the fill-dim in _update_button_states() below keep the
+        # disabled accent button legible and clearly inactive.
         self._start_passive_button.pack(side="left", padx=(0, 6))
         self._cancel_button = self._make_outline_button(capture_button_row, "Cancel", self.on_cancel_clicked)
         self._cancel_button.pack(side="left")
@@ -99,8 +102,11 @@ class CapturePanel(ctk.CTkFrame):
         self._start_deauth_button = ctk.CTkButton(
             deauth_cell.body, text="Fire Deauth", command=self.on_start_deauth_clicked,
             fg_color=PALETTE["danger"], hover_color=PALETTE["danger"], border_color=PALETTE["danger"],
-            text_color=PALETTE["bg"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["bg"], text_color_disabled=PALETTE["muted"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # disabled-state styling: same as the accent Start buttons (see
+        # management_view.py), with danger as the enabled fill instead of accent --
+        # the disabled dim-to-dark treatment is identical.
         self._start_deauth_button.pack(side="top", anchor="w", pady=(0, 8))
         self._deauth_status_label = ctk.CTkLabel(
             deauth_cell.body, text="", font=ui_font(11), text_color=PALETTE["muted"], anchor="w",
@@ -142,8 +148,25 @@ class CapturePanel(ctk.CTkFrame):
 
     def _update_button_states(self) -> None:
         can_start = self.target is not None and self.active_handle is None
-        self._start_passive_button.configure(state="normal" if can_start else "disabled")
-        self._start_deauth_button.configure(state="normal" if can_start else "disabled")
+        # Dim each bright-fill button's fill/border when disabled so the muted text
+        # reads and the button looks inactive -- CTkButton won't dim its own fill
+        # (see management_view.py). The passive button's enabled fill is accent, the
+        # deauth button's is danger; both dim to the same dark tokens.
+        self._start_passive_button.configure(
+            state="normal" if can_start else "disabled",
+            fg_color=PALETTE["accent"] if can_start else PALETTE["panel"],
+            hover_color=PALETTE["accent"] if can_start else PALETTE["panel"],
+            border_color=PALETTE["accent"] if can_start else PALETTE["border"],
+        )
+        self._start_deauth_button.configure(
+            state="normal" if can_start else "disabled",
+            fg_color=PALETTE["danger"] if can_start else PALETTE["panel"],
+            hover_color=PALETTE["danger"] if can_start else PALETTE["panel"],
+            border_color=PALETTE["danger"] if can_start else PALETTE["border"],
+        )
+        # _cancel_button is an outline button (transparent fill) -- CTk's default
+        # disabled text on a transparent/dark background already reads as inactive,
+        # so it needs no fill-dim; left as a plain state toggle.
         self._cancel_button.configure(state="normal" if self.active_handle is not None else "disabled")
 
     def on_start_passive_clicked(self) -> None:
