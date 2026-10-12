@@ -44,7 +44,7 @@ from aircommand.gui.sidebar import Sidebar
 from aircommand.gui.status_bar import StatusBar
 from aircommand.gui.sudo_dialog import SudoPasswordDialog
 from aircommand.gui.target_actions_view import TargetActionsView
-from aircommand.gui.theme import PALETTE, ui_font
+from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
 
 # ADR-0018: sentinel label for the band menu's "nothing picked yet" placeholder.
 # Deliberately never added as a key in self._band_choices -- looking it up
@@ -243,17 +243,50 @@ class App(ctk.CTk):
         self._pause_resume_button = ctk.CTkButton(
             button_row, text="Start Discovery", state="disabled",
             command=self._on_pause_resume_discovery_clicked,
+            # Primary accent-fill action, same recipe/role as management_view's
+            # "Start Airmon-ng" (and Capture/Crack/Enumerate's Start buttons):
+            # without these it fell back to CTk's default-Light stock blue
+            # (nothing calls set_appearance_mode) -- the "blue buttons" report.
+            # Constructed in the dimmed (disabled) look because it starts
+            # state="disabled"; _update_discovery_gating flips fill<->accent with
+            # enabled-ness, mirroring management_view._update_button_states, so a
+            # disabled accent button dims rather than staying bright lime with
+            # faint (text_color_disabled) text on it.
+            fg_color=PALETTE["panel"], hover_color=PALETTE["panel"],
+            border_color=PALETTE["border"], text_color=PALETTE["bg"],
+            text_color_disabled=PALETTE["muted"], corner_radius=CORNER_RADIUS,
+            font=ui_font(12, "bold"),
         )  # disabled until a real band is picked -- the menu below reads the
         # placeholder at construction, so there's nothing to start yet (ADR-0018).
         self._pause_resume_button.pack(side="left")
         self._new_session_button = ctk.CTkButton(
-            button_row, text="New Session", state="disabled", command=self._on_new_session_clicked
+            button_row, text="New Session", state="disabled", command=self._on_new_session_clicked,
+            # Secondary action -> the app's flat outline recipe (see
+            # dialog.outline_button), including hover_color=panel so hover isn't
+            # CTk's default-Light stock blue. Outline buttons don't dim their
+            # fill on disable (they're already transparent) -- consistent with
+            # every other outline control in the app.
+            fg_color="transparent", border_width=1, border_color=PALETTE["border"],
+            text_color=PALETTE["text"], hover_color=PALETTE["panel"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
         )
         self._new_session_button.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(button_row, text="Band:").pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            button_row, text="Band:", font=ui_font(11), text_color=PALETTE["muted"],
+        ).pack(side="left", padx=(10, 0))   # matches target_selector's "Target:"
+        # label -- left unthemed it fell back to CTk's default-Light label color
+        # (near-black), unreadable on the dark button_row.
         self._band_menu = ctk.CTkOptionMenu(
             button_row,
             values=[_BAND_UNCHOSEN, *list(self._band_choices)],
+            # Themed identically to target_selector.py's CTkOptionMenu -- left
+            # bare it fell back to CTk's default-Light stock blue (the option
+            # menu is a different widget class from CTkButton, with its own
+            # button_color / dropdown_* color kwargs).
+            font=mono_font(11), text_color=PALETTE["text"], fg_color=PALETTE["bg"],
+            button_color=PALETTE["panel"], button_hover_color=PALETTE["border"],
+            dropdown_fg_color=PALETTE["panel"], dropdown_text_color=PALETTE["text"],
+            corner_radius=CORNER_RADIUS,
             # Enabled whenever there's at least one real choice -- even a single-
             # choice adapter still needs one explicit click off the placeholder to
             # satisfy the Start/New Session gate below (ADR-0018 point 5, amending
@@ -367,7 +400,16 @@ class App(ctk.CTk):
             pause_resume_enabled = band_chosen   # Idle or Paused: this click starts/resumes
         new_session_enabled = self._discovery_paused and band_chosen
 
-        self._pause_resume_button.configure(state="normal" if pause_resume_enabled else "disabled")
+        # Dim the accent fill when disabled (mirrors
+        # management_view._update_button_states): CTkButton never dims its own
+        # fill on disable, so a disabled accent button would otherwise stay
+        # bright lime with faint text on it.
+        self._pause_resume_button.configure(
+            state="normal" if pause_resume_enabled else "disabled",
+            fg_color=PALETTE["accent"] if pause_resume_enabled else PALETTE["panel"],
+            hover_color=PALETTE["accent"] if pause_resume_enabled else PALETTE["panel"],
+            border_color=PALETTE["accent"] if pause_resume_enabled else PALETTE["border"],
+        )
         self._new_session_button.configure(state="normal" if new_session_enabled else "disabled")
 
     def _on_pause_resume_discovery_clicked(self) -> None:
@@ -382,7 +424,13 @@ class App(ctk.CTk):
             # this click can't flip to Resume yet, or a fast Resume click would
             # hit AdapterBusy. _on_discovery_stopped finishes the transition.
             self._discovery_stopping = True
-            self._pause_resume_button.configure(text="Pausing…", state="disabled")
+            self._pause_resume_button.configure(
+                text="Pausing…", state="disabled",
+                # Dim the fill too -- this disable bypasses _update_discovery_gating,
+                # so without it the button stays bright accent while disabled.
+                fg_color=PALETTE["panel"], hover_color=PALETTE["panel"],
+                border_color=PALETTE["border"],
+            )
             self._discovery_handle.cancel()
 
     def _on_new_session_clicked(self) -> None:

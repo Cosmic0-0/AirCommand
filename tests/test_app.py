@@ -31,6 +31,7 @@ from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.app import _BAND_UNCHOSEN, App
 from aircommand.gui.discovery_view import NetworksView, TargetPicker
 from aircommand.gui.status_bar import StatusBar
+from aircommand.gui.theme import PALETTE
 from tests.test_discovery_view import AP_HEADER, BSSID_1, BSSID_2, make_network, make_network_discovered
 from tests.test_rf import IW_2_4_ONLY, IW_DUAL_BAND
 
@@ -514,6 +515,81 @@ def test_start_is_disabled_until_a_band_is_chosen(mock_run, make_live_app):
 
         _pick_band(app, "2.4 + 5 GHz")
         assert _state(app._pause_resume_button) == "normal"
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_discovery_controls_use_grid_watch_colors_not_ctk_default_blue(mock_run, make_live_app):
+    """Regression for the reported "blue buttons" on Discovery & Targets:
+    these three controls were constructed with zero color kwargs, so (nothing
+    calls set_appearance_mode) CTkButton/CTkOptionMenu fell back to their
+    Light-theme stock blue (#3B8ED0). They now read from PALETTE like every
+    other control. _pause_resume_button is an accent-fill primary that dims
+    its fill when disabled (CTkButton never dims its own fill), so its launch
+    (disabled) look is the dark/dimmed recipe, not a bright accent with faint
+    text; _new_session_button is the flat outline recipe; _band_menu mirrors
+    target_selector.py's themed option menu exactly."""
+    mock_run.return_value = _completed(0)
+    app = make_live_app(start=False)
+    try:
+        pr = app._pause_resume_button
+        # Launch = disabled (nothing picked yet): the dimmed/dark recipe, with
+        # legible muted text on the dark panel fill -- never CTk's stock blue.
+        assert _state(pr) == "disabled"
+        assert pr.cget("fg_color") == PALETTE["panel"]
+        assert pr.cget("hover_color") == PALETTE["panel"]
+        assert pr.cget("border_color") == PALETTE["border"]
+        assert pr.cget("text_color") == PALETTE["bg"]
+        assert pr.cget("text_color_disabled") == PALETTE["muted"]
+
+        ns = app._new_session_button
+        assert ns.cget("fg_color") == "transparent"
+        assert ns.cget("hover_color") == PALETTE["panel"]
+        assert ns.cget("border_color") == PALETTE["border"]
+
+        bm = app._band_menu
+        assert bm.cget("fg_color") == PALETTE["bg"]
+        assert bm.cget("button_color") == PALETTE["panel"]
+        assert bm.cget("button_hover_color") == PALETTE["border"]
+        assert bm.cget("dropdown_fg_color") == PALETTE["panel"]
+        assert bm.cget("dropdown_text_color") == PALETTE["text"]
+        assert bm.cget("text_color") == PALETTE["text"]
+
+        # Picking a real band enables Start -> the accent-fill look flips on.
+        _pick_band(app, "2.4 + 5 GHz")
+        assert _state(pr) == "normal"
+        assert pr.cget("fg_color") == PALETTE["accent"]
+        assert pr.cget("hover_color") == PALETTE["accent"]
+        assert pr.cget("border_color") == PALETTE["accent"]
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_pause_resume_button_dims_its_accent_fill_through_the_pausing_state(mock_run, make_live_app):
+    """The Pause click disables the button directly (text "Pausing…"), bypassing
+    _update_discovery_gating -- so it must dim its own accent fill there too, or
+    it stays bright lime while disabled. Scanning: accent. Pausing: dimmed.
+    Paused (re-gated, band still chosen): accent again."""
+    mock_run.return_value = _completed(0)
+    app = make_live_app()   # scanning, band already chosen
+    try:
+        pr = app._pause_resume_button
+        assert pr.cget("fg_color") == PALETTE["accent"]   # scanning -> Pause enabled
+
+        old_handle = app._discovery_handle
+        pr.invoke()   # -> Pausing…
+        assert pr.cget("text") == "Pausing…"
+        assert _state(pr) == "disabled"
+        assert pr.cget("fg_color") == PALETTE["panel"]
+        assert pr.cget("hover_color") == PALETTE["panel"]
+        assert pr.cget("border_color") == PALETTE["border"]
+
+        old_handle.wait_for_test(timeout=2.0)
+        app.pump._tick()
+        _assert_paused_state(app)
+        assert pr.cget("fg_color") == PALETTE["accent"]   # Resume re-enabled
     finally:
         app.on_close()
 

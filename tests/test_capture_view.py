@@ -283,6 +283,13 @@ def test_deauth_cell_is_danger_styled_and_cancel_appears_only_once(tmp_path):
         assert panel._capture_cell.cget("border_color") != PALETTE["danger"]
         assert panel._capture_cell._title_label.cget("text_color") != PALETTE["danger"]
 
+        # The outline Cancel uses the app's flat recipe with an explicit
+        # non-blue hover (PALETTE["panel"]) -- left unset, CTkButton's
+        # transparent-fill hover falls back to its Light-theme stock blue
+        # (#3B8ED0), the reported "blue button highlights".
+        assert panel._cancel_button.cget("fg_color") == "transparent"
+        assert panel._cancel_button.cget("hover_color") == PALETTE["panel"]
+
         all_buttons = _find_all_buttons(panel)
         cancel_buttons = [b for b in all_buttons if b.cget("text") == "Cancel"]
         assert len(cancel_buttons) == 1
