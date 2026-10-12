@@ -174,6 +174,59 @@ monitor-mode-capable USB wifi adapter through to the VM and select that
 adapter in AirCommand. VirtualBox, VMware, and virt-manager all expose USB
 passthrough.
 
+### AppImage
+
+The AppImage is one executable that carries CPython 3.12, Tcl/Tk,
+CustomTkinter, and the `aircommand` package. It does not carry the native
+tools: the aircrack-ng suite, `nmap`, `hashcat`, `hcxpcapngtool`, and `iw`.
+Those stay on the host. The AppImage removes the Python setup, the virtual
+environment and the pip install above. It does not remove the native-tool
+install. See [ADR-0020](docs/adr/0020-appimage-packaging.md) for why the
+native tools stay on the host.
+
+Build it once on a Linux x86_64 machine that has `curl` or `wget` and network
+access the first time. The base image and build tool it downloads are pinned
+and checksum-verified, and cached outside the repo, so later builds reuse them
+instead of fetching again:
+
+```bash
+packaging/appimage/build.sh
+```
+
+That writes `dist/AirCommand-x86_64.AppImage`.
+
+Copy that one file to the VM with `scp`, a shared folder, or whatever the VM
+offers. It is x86_64 only, so it will not run on an ARM VM.
+
+On the VM, install the native tools once. This is the step 1 install without
+the Python packages the AppImage already carries, so
+[1. System packages](#1-system-packages) explains each one:
+
+```bash
+sudo apt install aircrack-ng iw nmap hashcat hcxtools
+```
+
+Run it as your normal user, never with sudo. The app asks for your sudo
+password in a dialog and elevates each privileged tool call itself (see
+[ADR-0002](docs/adr/0002-privilege-elevation.md)):
+
+```bash
+./AirCommand-x86_64.AppImage
+```
+
+If the host has no FUSE 2 (recent Ubuntu, Mint, and Kali ship FUSE 3 only),
+run without FUSE instead:
+
+```bash
+./AirCommand-x86_64.AppImage --appimage-extract-and-run
+```
+
+Or install FUSE 2 once, with `sudo apt install libfuse2t64` on 24.04-based
+releases or `sudo apt install libfuse2` on older ones.
+
+The AppImage is verified on the author's Linux Mint machine, not yet on a
+fresh VM or against real monitor-mode hardware.
+
 ## Architecture
 
 AirCommand splits into two layers. A GUI-agnostic core package handles
