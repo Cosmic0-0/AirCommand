@@ -108,32 +108,71 @@ verified and what's still open.
 
 ## Install & run
 
-Create a virtual environment and install AirCommand into it:
+AirCommand runs on Linux Mint or Kali (both apt based). The steps below take
+a fresh machine or VM from nothing to a running app.
+
+### 1. System packages
+
+AirCommand shells out to the aircrack-ng suite, hashcat, nmap, and
+`hcxpcapngtool`, and the GUI needs Tkinter. Install them with apt:
 
 ```bash
-python -m venv .venv
+sudo apt install aircrack-ng hashcat nmap hcxtools iw python3-tk python3-venv python3-pip
+```
+
+- `aircrack-ng` provides airodump-ng, aireplay-ng, airmon-ng, and aircrack-ng, which cover Discovery, Capture, deauth, and monitor-mode control.
+- `hashcat` runs the offline crack. `hcxtools` provides `hcxpcapngtool`, which converts a capture into the format hashcat reads.
+- `nmap` runs Enumerate's host and port scan.
+- `iw` reads which bands your adapter supports. Without it, Discovery offers 2.4 GHz only.
+- `python3-tk` is Tkinter, which CustomTkinter builds on. `python3-venv` and `python3-pip` create and populate the virtual environment.
+
+The same line works on Kali. apt skips anything already installed.
+
+Or run [`scripts/install-deps.sh`](scripts/install-deps.sh), which does this
+apt install and the venv setup below in one step. It uses sudo for apt and
+prints the command before it runs.
+
+### 2. Virtual environment
+
+From the repo root:
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Run it, optionally pre-selecting your wifi interface name (check `ip link`
-if you don't know it):
+### 3. Run it
+
+Run AirCommand as your normal user, not with sudo. It asks for your sudo
+password in a dialog at launch and elevates each privileged tool call itself
+(see [ADR-0002](docs/adr/0002-privilege-elevation.md)). Launching the whole
+GUI under `sudo` is wrong, because ADR-0002 runs the GUI unprivileged on
+purpose.
 
 ```bash
 aircommand --adapter wlan0
 ```
 
-`--adapter` is optional. If you omit it, pick or switch the adapter later on
-the Management page. `--db-path` and `--work-dir` default to
-`~/.aircommand/aircommand.db` and `~/.aircommand/work`. AirCommand creates
-both on first run if they don't exist. Run `aircommand --help` for the full
-option list.
+`--adapter` is optional. Find the interface name with `ip link`, or omit the
+flag and pick the adapter on the Management page instead. `--db-path` and
+`--work-dir` default to `~/.aircommand/aircommand.db` and
+`~/.aircommand/work`, both created on first run. Run `aircommand --help` for
+all options.
 
-Before your first launch, read
-[Prerequisites in `docs/usage.md`](docs/usage.md#prerequisites).
-AirCommand runs `airmon-ng check kill` the first time you click Start
-Discovery. This command stops NetworkManager system-wide, not just on the
-audited adapter, until the adapter returns to managed mode.
+The first time you click Start Discovery, AirCommand runs `airmon-ng check
+kill`. That stops NetworkManager system-wide until the adapter returns to
+managed mode, not just on the audited adapter. Read
+[Prerequisites in `docs/usage.md`](docs/usage.md#prerequisites) before that
+first launch.
+
+### On a VM
+
+The audited adapter must support monitor mode. A host's built-in wifi usually
+can't do monitor mode and can't be handed to a guest, so pass a
+monitor-mode-capable USB wifi adapter through to the VM and select that
+adapter in AirCommand. VirtualBox, VMware, and virt-manager all expose USB
+passthrough.
 
 ## Architecture
 
@@ -165,3 +204,7 @@ Install the dev dependencies and run the test suite:
 pip install -e '.[dev]'
 pytest
 ```
+
+For editing in VS Code, including interpreter selection and running with the
+sudo prompt, see
+[Developing in VS Code](docs/usage.md#developing-in-vs-code).
