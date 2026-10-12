@@ -1,7 +1,7 @@
 # Final touches — what's left before v1 is actually finished
 
 Phase 1 (core engine), Phase 2 (real subprocess/hardware code), and Phase 3
-(GUI) are all complete per `docs/roadmap.md`: 201 tests pass (194 headless via
+(GUI) are all complete: 201 tests pass (194 headless via
 `FakeProcRunner` as of Phase 3's own completion, plus 7 added since while
 fixing the real-hardware bugs item 2 below found — see its own entry), and an
 independent review pass (2026-09-20) re-verified the Phase 3 GUI commits
@@ -46,11 +46,12 @@ as expected, rather than crashing.
 
 ## 1. Re-check Capture's handshake-detection assumption against real output
 
-`docs/roadmap.md` Phase 2 item 5. The `aircrack-ng -b <bssid> -w /dev/null
+Flagged early as a real-hardware gap, before real `aircrack-ng` and hardware
+were available. The `aircrack-ng -b <bssid> -w /dev/null
 <cap_path>` invocation `capture.py` uses to detect a completed handshake was
 researched against the aircrack-ng manual and community docs, but never run
 against a real `.cap` file. Needs: real `aircrack-ng` installed (it already
-is, per the roadmap), a real capture file with and without a genuine
+is), a real capture file with and without a genuine
 handshake in it, run by hand in a real terminal.
 
 What to check: does `"handshake)"` really appear in stdout exactly the way
@@ -145,7 +146,7 @@ not a suggestion). Concretely:
       the user on real hardware 2026-10-08: both passive and deauth-assisted
       Capture worked.** Three real blockers had to be found and fixed first:
       `capture.py` reading its own `.cap` file at the wrong path (fixed
-      2026-10-07, see `docs/roadmap.md`'s entry that day — every real
+      2026-10-07 — every real
       handshake capture would have raised `FileNotFoundError` mid-loop and
       silently reported plain `COMPLETED` with no Handshake recorded);
       handshake detection never actually working against real
@@ -201,7 +202,7 @@ not a suggestion). Concretely:
       leaving the panel stuck on "Enumerating…".
       **A real, reported failure here (`OSError: [Errno 99] Cannot assign
       requested address`) turned out to be neither of the two things above —
-      see [ADR-0016](docs/adr/0016-radio-mode-desync-after-a-crash.md):
+      see [ADR-0016](adr/0016-radio-mode-desync-after-a-crash.md):
       `RadioController`'s in-memory radio-mode tracking had desynced from
       the real adapter (confirmed stuck in monitor mode from a prior
       crashed/force-killed AirCommand process, on the reporting user's own
@@ -237,7 +238,7 @@ not a suggestion). Concretely:
 If any of these surface a real bug, that's expected — this is exactly what
 "validated only headlessly" means. Fix it the normal way (debugging a
 non-obvious issue stays with the strongest model per CLAUDE.md, not a
-subagent dispatch), then record what changed in `docs/roadmap.md` or a new
+subagent dispatch), then record what changed in `docs/status.md` or a new
 ADR if it was a real design tradeoff, matching this project's own convention
 ("a decision that only exists in one session's chat transcript doesn't exist
 for the next one").
@@ -276,7 +277,7 @@ Same ground rule as item 2: your own network, and only listening
 ## 4. Verify the Gridwatch redesign's new flows on real hardware
 
 Built 2026-10-09 on branch `feat/gridwatch-gui-redesign` (`docs/adr/0017` +
-`docs/adr/0018`; see `docs/roadmap.md`'s own entry for the full writeup).
+`docs/adr/0018` have the full writeup).
 384 tests pass, against `FakeProcRunner` and a real Tk window — none of the
 boxes below have been run on real hardware yet. Both ADRs' own Consequences
 sections flag this explicitly as open.

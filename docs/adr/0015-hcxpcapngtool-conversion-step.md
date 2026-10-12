@@ -15,15 +15,19 @@ conversion step.
   not bundled with `hashcat` or the `aircrack-ng` suite.
 - Ran real `hcxpcapngtool -o <out> <real .cap>` against the user's actual
   handshake capture: exits 0, extracts exactly one hash, and that hash's own
-  AP-MAC field (`623761a16f51`) matches the Target's BSSID
-  (`62:37:61:A1:6F:51`) exactly — confirming `capture.py`'s existing
+  AP-MAC field (`aabbccddeeff`) matches the Target's BSSID
+  (`aa:bb:cc:dd:ee:ff`) exactly — confirming `capture.py`'s existing
   assumption ("airodump-ng's own --bssid filter... guarantees this .cap file
   holds exactly one network") holds for a real sample, not just by reading
   the comment.
 - Fed that converted file + the real `wordlist.txt` to real `hashcat`: found
-  the real password (**`IDFK2021`**) on the first try. Confirmed this is
+  the real password (**`<passphrase>`**) on the first try. Confirmed this is
   genuinely the end-to-end fix the original bug report asked for ("confirm a
   run actually completes and reports the correct found key").
+- **Deliberately not recorded here**: the real BSSID and passphrase. The
+  `aa:bb:cc:dd:ee:ff` and `<passphrase>` placeholders above stand in for
+  them, the same convention ADR-0012 states: real, identifying values stay
+  on the user's own machine, not in permanent git history.
 - Re-ran the exact same hash a second time: hashcat printed `All hashes
   found as potfile and/or empty entries!` and exited **without writing
   `--outfile` at all** — a second, independent, real bug (see below).
