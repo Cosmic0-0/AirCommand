@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AirCommand
+Comment=Wifi-auditing orchestrator wrapping aircrack-ng, hashcat, and nmap
+Exec=AppRun
+Icon=aircommand
+Categories=Network;
+Terminal=false
