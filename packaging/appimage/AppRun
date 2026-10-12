@@ -1,0 +1,23 @@
+#!/bin/bash
+# AirCommand AppImage launcher. See docs/adr/0020-appimage-packaging.md.
+#
+# Runs as the normal user, never via sudo. The app elevates individual host
+# tools itself through `sudo -n` (ADR-0002), so this file is never re-executed
+# as root and no root process ever reads the read-only FUSE mount.
+set -e
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+
+# Host tools the app shells out to. Privileged ones (airodump-ng, aireplay-ng,
+# aircrack-ng, airmon-ng, nmap, systemctl) resolve through sudo's own
+# secure_path. The unprivileged ones (iw, hashcat, hcxpcapngtool)
+# resolve on this PATH, so keep the sbin dirs on it for VMs that omit them.
+export PATH="${PATH}:/usr/sbin:/sbin:/usr/bin:/bin"
+
+# Stop the current working directory from shadowing the bundled aircommand
+# package. Python puts CWD on sys.path for -m.
+export PYTHONSAFEPATH=1
+
+# usr/bin/python3.12 is the base image's wrapper. It sets APPDIR, TCL_LIBRARY,
+# TK_LIBRARY, and SSL_CERT_FILE, then execs the real interpreter.
+exec "${HERE}/usr/bin/python3.12" -m aircommand "$@"
