@@ -49,9 +49,18 @@ The core engine and GUI are complete. They pass an automated test suite
 that runs against a fake process runner, not real hardware.
 
 Real-hardware testing is still partial. Discovery is confirmed end to
-end. Two real bugs were found and fixed in Capture through targeted
-real-subprocess testing: a wrong handshake file path, and a hang in the
-Cancel button. Neither fix has been confirmed through the real GUI yet.
+end. Capture had three real bugs: a wrong handshake file path, handshake
+detection that never matched real `aircrack-ng` output, and a deauth burst
+failure that looked identical to a real one in both the Audit Log and the
+GUI. All three are fixed. The user confirmed a real passive Capture and a
+real deauth-assisted Capture against a real Target through the actual GUI
+on 2026-10-08. See
+[ADR-0012](docs/adr/0012-capture-handshake-detection-and-deauth-failure-visibility.md).
+
+Capture's Cancel button also hung against real `aircrack-ng`, a separate
+bug. It's fixed and confirmed with a real-subprocess test, but not yet
+confirmed through the real GUI's Cancel button itself. See
+[ADR-0011](docs/adr/0011-capture-cancel-hang-on-real-aircrack-ng.md).
 
 Crack found and fixed two more real bugs the same way. One was a silent
 hang on one non-UTF-8 byte in hashcat's own output. The other was a
@@ -144,8 +153,8 @@ why, not `setcap` and not a root GUI.
 
 - [`docs/usage.md`](docs/usage.md): how to run AirCommand once it's launched.
 - [`CONTEXT.md`](CONTEXT.md): domain vocabulary, such as Network vs. Target, Action, and Discovery session.
-- [`docs/adr/`](docs/adr/): architectural decision records.
-- [`docs/roadmap.md`](docs/roadmap.md): build history and what's done.
+- [`docs/adr/README.md`](docs/adr/README.md): index of architectural decision records.
+- [`docs/status.md`](docs/status.md): current state and what's still open.
 - [`docs/final-touches.md`](docs/final-touches.md): what's left before v1 is considered finished.
 
 ## Development

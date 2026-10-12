@@ -12,7 +12,7 @@ machine logic (per the redesign doc's own §1: "this redesign changes the
 visual style and page layout only"). Read the "Layout" section below as
 history of the original shell, not a description of the shipped one.
 
-Scoped per `docs/roadmap.md` Phase 3: what views exist, how they're laid out, how
+Scoped to the GUI build's Phase 3 effort: what views exist, how they're laid out, how
 each subscribes to `GuiEventPump`, and what each seeds itself from at startup.
 `docs/design/core-gui-boundary.md` (the core/GUI boundary) is **not** redesigned
 here — every decision below is grounded against it as fixed input, the same way
@@ -46,8 +46,8 @@ independent of tab), and a `ctk.CTkTabview` above it with four tabs:
 3. **Crack** — `HandshakePicker` + `WordlistPicker` + progress/result display
 4. **Audit Log** — `AuditLogView`
 
-`docs/roadmap.md`'s Phase 3 paragraph names "networks table, target picker,
-capture panel, audit log view, crack progress + wordlist picker" but doesn't
+The original Phase 3 plan named "networks table, target picker,
+capture panel, audit log view, crack progress + wordlist picker" but didn't
 name Enumerate. Included it anyway: `Engine` fully wires `self.enumerate`, and
 CONTEXT.md's own "Action" entry lists Enumerate as a first-class gated Action
 alongside Capture — leaving it out would ship a GUI that can't drive a
@@ -593,9 +593,8 @@ it *is* an ADR: see `docs/adr/0010-discovery-table-is-session-scoped.md`.)
 
 ## Open questions / deferred (not blocking implementation)
 
-- **`DiscoveryStopped` now exists** (added for an unrelated reason — see
-  `docs/roadmap.md` Phase 1 item 0's latest "Revisited" note: Discovery dying
-  unexpectedly used to publish nothing at all, unlike Capture's
+- **`DiscoveryStopped` now exists** (added for an unrelated reason: Discovery
+  dying unexpectedly used to publish nothing at all, unlike Capture's
   `CaptureStopped(reason=ERROR)`). `app.py` consumes it for two purposes
   (status-bar error + flipping its own Pause/Resume button on `ERROR`, and,
   per ADR-0010, finishing a Pause on `CANCELLED` so Resume/New Session only
@@ -645,4 +644,4 @@ it) → `SudoPasswordDialog` + `StatusBar` + startup sequencing in `app.py` →
 `CapturePanel` + `EnumeratePanel` (Target Actions tab, needs the two core fixes
 landed first) → `HandshakePicker`/`WordlistPicker`/`CrackPanel` → `AuditLogView`.
 Not scoped further here per this session's own checkpoint boundary — that's a
-follow-up session's job, same as `docs/roadmap.md`'s existing Phase 3 note says.
+follow-up session's job.

@@ -59,6 +59,43 @@ The user runs the command(s) themselves and reports back when done — treat the
 - This falls under the commit/push rule above same as any other change: don't
   commit or push it yourself.
 
+## Code conventions
+
+These hold across the core engine; keep following them in new code.
+
+- **SQLite serialization.** `MacAddress`/`BSSID` store as `str(x)`, load back via
+  `BSSID(value=row["..."])`. Enums store as `x.value`, load via `EnumType(row["..."])`.
+  `datetime` stores as `x.isoformat()`, loads via `datetime.fromisoformat(row["..."])`.
+  `JobId`/UUIDs store as `str(x)`, load via `uuid.UUID(row["..."])`. `conn.row_factory`
+  is `sqlite3.Row`.
+- **Mint-restricted types.** The repository mints (`_*_MINT` sentinel, direct
+  frozen-dataclass construction); the facade stays a thin delegation. `Target` and
+  `Handshake` both follow this.
+- **Preserve the original value on upsert.** `Network.first_seen` and
+  `Target.date_added` mean "the first time this became true," so both are excluded
+  from their `UPDATE` SET list on purpose.
+- **A `DurableEvent` fires only for a real write.** A no-op call (e.g.
+  `Allowlist.remove()` on a bssid that was never a Target) publishes nothing.
+- **Exception safety in driver threads.** Every `_drive` (Discovery, Capture, Crack,
+  Enumerator) wraps spawn-through-loop in `try/finally` so `rf.release()` and
+  `jobs.mark_terminal()` always run, even if something raises mid-loop.
+- **Terminal ordering.** Publish the terminal `DurableEvent`, then call
+  `mark_terminal()` last. A caller waking on `wait_for_test()` must be able to trust
+  that both the event and the underlying DB write already happened.
+- **Thin facade, fat repository.** Facade methods are short delegations; the
+  repository holds the SQL and constructs the domain object. Don't let SQL creep
+  into `capture.py`/`crack.py`/etc.
+- **Poll a clean on-disk artifact, not a live stdout stream, for a
+  correctness-critical fact.** Discovery reads the CSV file `airodump-ng` writes,
+  not its stdout; Capture checks the `.cap` file via a separate `aircrack-ng`
+  invocation, not airodump's live display line; Crack checks hashcat's `--outfile`
+  after it exits, not a live `--status-json` tick.
+- **Record real decisions where the project already records them.** A genuine
+  architectural tradeoff gets its own ADR in `docs/adr/`; anything smaller updates
+  `docs/status.md` or `docs/design/core-gui-boundary.md` in place. Either way,
+  commit it: a decision that only exists in a chat transcript doesn't exist for
+  the next session.
+
 ## Repository hygiene
 
 - Preserve unrelated work in a dirty worktree.
