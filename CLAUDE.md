@@ -18,7 +18,8 @@ Discovery (passive beacon listening) is open to any network. Any Action — capt
 
 This repo deliberately splits work across model strength:
 
-- **Planning, architecture, and review** — module boundaries, interface/type design, debugging non-obvious issues, and reviewing/fixing implementation output — stay with the strongest available model (Opus, or Plan mode). Don't delegate these.
+- **Start with a dispatcher.** The top-level session is Sonnet 5 or 5.5 and acts only as a dispatcher. For any work, it spawns Opus 5.5 subagents via the Agent tool, giving each a self-contained prompt (the user's request, relevant file paths, and any constraints from this file). Each Opus subagent works as a normal chat session would and follows everything below, including the tiering for its own implementation work.
+- **Planning, architecture, and review** — module boundaries, interface/type design, debugging non-obvious issues, and reviewing/fixing implementation output — stay with the strongest available model (the Opus 5.5 subagents, or Plan mode). Don't delegate these any further down to Sonnet or Haiku.
 - **Routine implementation** — writing a function/class to an already-decided interface, boilerplate, straightforward tests — gets dispatched to a cheaper subagent (Sonnet or Haiku via the Agent tool) once the interface and scope are already pinned down. Give it a self-contained prompt: exact file paths, the signatures/types decided during planning, and what's explicitly out of scope.
 - **Every dispatched implementation gets reviewed before being called done.** Read the actual diff, not just the subagent's summary — check it against the interface that was planned, fix or redo anything that drifted.
 
