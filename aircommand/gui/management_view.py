@@ -123,9 +123,11 @@ class ManagementView(ctk.CTkFrame):
     def _make_outline_button(master, text: str, command) -> ctk.CTkButton:
         return ctk.CTkButton(
             master, text=text, command=command, fg_color="transparent", border_width=1,
-            border_color=PALETTE["border"], text_color=PALETTE["text"], corner_radius=CORNER_RADIUS,
+            border_color=PALETTE["border"], text_color=PALETTE["text"],
+            hover_color=PALETTE["panel"], corner_radius=CORNER_RADIUS,
             font=ui_font(12, "bold"),
-        )
+        )  # hover_color=panel, not left unset -> no CTk default-blue hover; see
+        # dialog.outline_button for the full rationale (same bug, same fix).
 
     def refresh(self) -> None:
         """Re-reads engine.radio's current state and rebuilds the adapter

@@ -303,6 +303,9 @@ def test_add_as_target_dialog_uses_grid_watch_tokens(tmp_path):
         assert dialog._add_button.cget("fg_color") == PALETTE["accent"]
         assert dialog._add_button.cget("text_color") == PALETTE["bg"]
         assert dialog._cancel_button.cget("fg_color") == "transparent"
+        # Outline Cancel hovers to panel, not CTk's stock blue (#3B8ED0) -- the
+        # transparent-fill default-hover fallback was the "blue highlights" bug.
+        assert dialog._cancel_button.cget("hover_color") == PALETTE["panel"]
         assert dialog._label_entry.cget("fg_color") == PALETTE["bg"]
     finally:
         root.destroy()

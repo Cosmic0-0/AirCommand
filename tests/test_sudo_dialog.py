@@ -26,6 +26,13 @@ def test_dialog_background_and_buttons_use_grid_watch_tokens():
             assert dialog._ok_button.cget("fg_color") == PALETTE["accent"]
             assert dialog._ok_button.cget("text_color") == PALETTE["bg"]
             assert dialog._cancel_button.cget("fg_color") == "transparent"
+            # The outline Cancel's hover is PALETTE["panel"], not CTk's stock
+            # blue: with a transparent fill and no explicit hover_color CTkButton
+            # falls back to its Light-theme hover (#3B8ED0) -- the "button
+            # highlights are blue" half of the report. All four dialogs route
+            # their Cancel through dialog.outline_button, so this one assert
+            # locks the shared helper's fix.
+            assert dialog._cancel_button.cget("hover_color") == PALETTE["panel"]
             assert dialog._entry.cget("fg_color") == PALETTE["bg"]
         finally:
             dialog.destroy()

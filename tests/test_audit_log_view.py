@@ -315,6 +315,13 @@ def test_refresh_button_repopulates_identically(tmp_path):
     root = ctk.CTk()
     try:
         view = AuditLogView(root, fake_app, [])
+        # The Refresh control is the app's flat outline recipe with an explicit
+        # non-blue hover (PALETTE["panel"]): a transparent-fill CTkButton with no
+        # hover_color falls back to its Light-theme stock blue (#3B8ED0) -- the
+        # reported "blue button highlights".
+        assert view._refresh_button.cget("fg_color") == "transparent"
+        assert view._refresh_button.cget("hover_color") == PALETTE["panel"]
+
         texts_before = sorted(c.cget("text") for c in view._body.winfo_children())
         assert texts_before
 

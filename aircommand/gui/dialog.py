@@ -130,9 +130,20 @@ def primary_button(master, text: str, command, *, danger: bool = False) -> ctk.C
 
 def outline_button(master, text: str, command) -> ctk.CTkButton:
     """The pages' flat-bordered outline recipe (management_view.py's
-    _make_outline_button) -- used for every dialog's Cancel."""
+    _make_outline_button) -- used for every dialog's Cancel.
+
+    hover_color is set to PALETTE['panel'] rather than left unset: with a
+    transparent fill and no explicit hover_color, CTkButton falls back to its
+    own default-Light-theme hover (stock blue #3B8ED0 -- nothing calls
+    set_appearance_mode), which was the "button highlights are blue" half of
+    the report. The mockup's own rule (.btn-outline:hover -> border-color:
+    --muted) tints the border, but CTkButton 6.0.0 has no hover-border kwarg
+    (only hover_color, which fills), so a subtle dark panel fill is the closest
+    deliberate, non-blue hover available -- 'panel' is one step up from 'bg',
+    already the app's raised-surface token."""
     return ctk.CTkButton(
         master, text=text, command=command, fg_color="transparent", border_width=1,
-        border_color=PALETTE["border"], text_color=PALETTE["text"], corner_radius=CORNER_RADIUS,
+        border_color=PALETTE["border"], text_color=PALETTE["text"],
+        hover_color=PALETTE["panel"], corner_radius=CORNER_RADIUS,
         font=ui_font(12, "bold"),
     )

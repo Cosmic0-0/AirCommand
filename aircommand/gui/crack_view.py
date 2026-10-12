@@ -65,8 +65,9 @@ class HandshakePicker(ctk.CTkFrame):
         button = ctk.CTkButton(
             row, text="Select", width=80, command=lambda h=handshake: self._select(h),
             fg_color="transparent", border_width=1, border_color=PALETTE["border"],
-            text_color=PALETTE["text"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["text"], hover_color=PALETTE["panel"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # hover_color=panel -> no CTk default-blue hover; see dialog.outline_button.
         button.pack(side="right", padx=6, pady=4)
 
         self._rows[handshake.id] = {"row": row, "button": button}
@@ -105,8 +106,9 @@ class WordlistPicker(ctk.CTkFrame):
         self._browse_button = ctk.CTkButton(
             cell.body, text="Choose Wordlist…", command=self._on_browse_clicked,
             fg_color="transparent", border_width=1, border_color=PALETTE["border"],
-            text_color=PALETTE["text"], corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
-        )
+            text_color=PALETTE["text"], hover_color=PALETTE["panel"],
+            corner_radius=CORNER_RADIUS, font=ui_font(12, "bold"),
+        )  # hover_color=panel -> no CTk default-blue hover; see dialog.outline_button.
         self._browse_button.pack(side="left")
 
     def _on_browse_clicked(self) -> None:
