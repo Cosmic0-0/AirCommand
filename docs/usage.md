@@ -13,7 +13,11 @@ a hard boundary, not just a suggestion.
 - Linux (Mint or Kali — this project doesn't support Windows/macOS execution).
 - `aircrack-ng`, `hashcat`, `nmap`, and `hcxpcapngtool` (from the `hcxtools`
   package) installed and on `PATH`.
-- A wifi adapter that supports monitor mode.
+- A wifi adapter that supports monitor mode. On a VM, a host's built-in wifi
+  usually can't do monitor mode and can't be passed to the guest, so pass a
+  monitor-mode-capable USB adapter through to the VM and select that one. See
+  the README's [Install & run](../README.md#install--run) for the one-line
+  apt install of every system package AirCommand needs.
 - Normal sudo rights on your account — **not** a passwordless (`NOPASSWD`)
   sudoers entry. AirCommand asks for your password once at launch and keeps
   the credential cache warm itself (ADR-0002); a `NOPASSWD` entry defeats the
@@ -215,3 +219,27 @@ Use the window's close button — this stops the sudo keepalive, cancels any
 still-running jobs, and closes the database cleanly. Don't force-kill the
 process if you can avoid it; that's exactly the crash path ADR-0004's startup
 reconciliation exists to clean up after, not something to rely on routinely.
+
+## Developing in VS Code
+
+These steps assume you already created `.venv` and ran `pip install -e .` as
+in the README's [Install & run](../README.md#install--run).
+
+1. Install the Python extension (`ms-python.python`) from the Extensions
+   view.
+2. If VS Code hasn't already picked the venv, point it there by hand. Press
+   Ctrl+Shift+P, run "Python: Select Interpreter", and choose
+   `./.venv/bin/python`. The repo ships a `.vscode/settings.json` that sets
+   this as the default interpreter path, so a reopened window usually has it
+   selected for you.
+3. Run AirCommand from the integrated terminal with the venv active:
+   ```
+   aircommand --adapter wlan0
+   ```
+   The sudo password prompt is AirCommand's own GUI dialog, not a terminal
+   prompt, so the integrated terminal and the debugger both work without any
+   terminal interaction. Run VS Code as your normal user, never with sudo
+   (ADR-0002); the app elevates each tool call on its own.
+4. To debug, add a "Python Debugger: Module" configuration with module set to
+   `aircommand`, and put any flags such as `--adapter wlan0` in its `args`.
+   Running `aircommand/__main__.py` as the current file works too.
