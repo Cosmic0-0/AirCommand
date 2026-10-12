@@ -19,6 +19,7 @@ from aircommand.core.events import NmapScanCompleted
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.enumerate_view import EnumeratePanel
 from aircommand.gui.event_pump import GuiEventPump
+from aircommand.gui.theme import PALETTE
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
@@ -226,4 +227,125 @@ def test_enumeration_failed_on_a_nonexistent_adapter_updates_status_and_reenable
         assert thread_exceptions[0].exc_type is OSError
     finally:
         threading.excepthook = original_hook
+        root.destroy()
+
+
+def _assert_blocked(panel: EnumeratePanel, hint: str) -> None:
+    assert panel._start_button.cget("state") == "disabled"
+    assert panel._hint_label.cget("text") == hint
+    assert panel._hint_label.cget("text_color") == PALETTE["warn"]
+
+
+def _assert_startable(panel: EnumeratePanel) -> None:
+    assert panel._start_button.cget("state") == "normal"
+    assert panel._hint_label.cget("text") == EnumeratePanel._HINT_TEXT
+    assert panel._hint_label.cget("text_color") == PALETTE["muted"]
+
+
+def test_start_disabled_with_monitor_mode_hint_while_adapter_is_in_monitor_mode(tmp_path):
+    # Monitor mode entered through the public Management-page entry point,
+    # before the panel even exists -- the guard must hold from construction,
+    # not only after a poll tick.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
+        proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT}),
+    )
+    engine.radio.start_monitor_mode()
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = EnumeratePanel(root, fake_app)
+        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
+        panel.set_target(target)   # a Target alone must not re-enable it
+        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
+    finally:
+        root.destroy()
+
+
+def test_guard_follows_monitor_mode_changes_made_outside_the_panel(tmp_path):
+    # Mode flips here go through RadioController directly, exactly like the
+    # Management page's Start/Stop Airmon-ng buttons, which publish nothing on
+    # the bus -- so only _poll_radio_state can notice them. No mainloop runs
+    # in these tests, so the panel's own after() reschedule never fires and
+    # each tick is driven by hand.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
+        proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "systemctl": []}),
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = EnumeratePanel(root, fake_app)
+        panel.set_target(target)
+        _assert_startable(panel)
+
+        engine.radio.start_monitor_mode()
+        panel._poll_radio_state()
+        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
+
+        engine.radio.stop_monitor_mode()
+        panel._poll_radio_state()
+        _assert_startable(panel)
+    finally:
+        root.destroy()
+
+
+def test_no_adapter_selected_disables_start_and_a_direct_click_shows_an_error(tmp_path):
+    # NoAdapterSelected used to escape on_start_clicked uncaught (straight into
+    # Tk's callback handler, nothing on screen). Calling on_start_clicked
+    # directly bypasses the disabled button on purpose, to prove the backstop.
+    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter=None, proc=FakeProcRunner(script={}))
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = EnumeratePanel(root, fake_app)
+        panel.set_target(target)
+        _assert_blocked(panel, EnumeratePanel._NO_ADAPTER_HINT_TEXT)
+
+        panel.on_start_clicked()
+
+        assert fake_app.status_bar.errors == ["No adapter selected: pick one on the Management page first"]
+        assert panel.active_handle is None
+    finally:
+        root.destroy()
+
+
+def test_radio_command_failed_message_describes_leaving_monitor_mode(tmp_path):
+    # ADR-0016's desync: RadioController believes the adapter is managed (so
+    # the guard leaves Start enabled -- it reads in-memory state only), but
+    # `iw dev wlan0 info` says monitor. reserve(MANAGED) then really runs
+    # airmon-ng stop + `systemctl restart NetworkManager`, and the scripted
+    # systemctl failure is what raises RadioCommandFailed.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
+        proc=FakeProcRunner(
+            script={"iw": ["\ttype monitor"], "airmon-ng": [], "systemctl": []},
+            returncodes={"systemctl": 1},
+            stderr={"systemctl": ["Job for NetworkManager.service failed."]},
+        ),
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    root = ctk.CTk()
+    try:
+        panel = EnumeratePanel(root, fake_app)
+        panel.set_target(target)
+        _assert_startable(panel)
+
+        panel.on_start_clicked()
+
+        assert len(fake_app.status_bar.errors) == 1
+        error = fake_app.status_bar.errors[0]
+        assert error.startswith("Couldn't switch the adapter out of monitor mode back to normal wifi:")
+        assert "into monitor mode" not in error
+        assert "systemctl restart NetworkManager" in error
+        assert panel.active_handle is None
+    finally:
         root.destroy()
