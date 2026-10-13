@@ -1,5 +1,7 @@
 # Core / GUI module boundary
 
+**Superseded for the Qt GUI side by `docs/design/gui-port/05-boundary-design.md` (2026-10-13).** The PySide6 port replaces `GuiEventPump`'s queue and `after` poll with a queued Qt signal; this doc stays authoritative for the core shape, the event tiers, and the allowlist gate.
+
 Synthesized from two independently-designed candidates (`architect` Phase B, adapted — see [Synthesis decision](#synthesis-decision)). Decision recorded at `docs/adr/0003-core-architecture-event-driven.md`.
 
 This doc's own sketches below (e.g. `Engine(..., adapter="wlan0")`) predate `docs/adr/0017-manual-radio-control-for-management-page.md`, which made `adapter` an `Optional[str]` reassignable at runtime via `RadioController.select_adapter()` rather than a fixed required constructor argument. Left as written, as fixed historical input — not updated in place, per this doc's own role as already-settled architecture.
