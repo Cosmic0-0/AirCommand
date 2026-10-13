@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AirCommand — Grid Watch × Wireframe A</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap">
+<style>
+body{margin:0}
+:root{
+  --bg:#0a0b0d;
+  --rail:#0d0f12;
+  --panel:#121418;
+  --border:#262b30;
+  --text:#dde2e6;
+  --muted:#7d868f;
+  --accent:#b4d94a;
+  --danger:#c1544a;
+  --success:#49ab7a;
+  --warn:#d99a3f;
+}
+*{box-sizing:border-box;}
+a{color:var(--accent);}
+
+.sidebar{display:flex;flex-direction:column;width:196px;flex:0 0 196px;background:var(--rail);border-right:1px solid var(--border);transition:width .14s ease, flex-basis .14s ease;overflow:hidden;}
+.sidebar.collapsed{width:54px;flex-basis:54px;}
+.sidebar-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:13px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.sidebar.collapsed .sidebar-header{flex-direction:column;gap:10px;}
+.logo{display:flex;align-items:center;gap:8px;min-width:0;}
+.logo-mark{flex-shrink:0;color:var(--accent);display:flex;}
+.logo-word{font-weight:700;font-size:12px;letter-spacing:.02em;white-space:nowrap;overflow:hidden;}
+.collapse-btn{display:flex;align-items:center;justify-content:center;width:21px;height:21px;border-radius:2px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;flex-shrink:0;padding:0;}
+.collapse-btn:hover{color:var(--text);border-color:var(--muted);}
+.collapse-btn svg{transition:transform .14s ease;}
+.sidebar.collapsed .collapse-btn svg{transform:rotate(180deg);}
+.nav-list{list-style:none;margin:0;padding:6px;display:flex;flex-direction:column;gap:1px;flex:1 1 auto;}
+.nav-item{display:flex;align-items:center;gap:9px;width:100%;padding:8px 9px;border:none;border-radius:2px;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:500;cursor:pointer;text-align:left;}
+.nav-item:hover{background:var(--panel);color:var(--text);}
+.nav-item.active{background:var(--panel);color:var(--text);font-weight:600;}
+.nav-item .nav-dot{width:6px;height:6px;flex-shrink:0;background:var(--border);}
+.nav-item.active .nav-dot{background:var(--accent);}
+.nav-item .nav-icon{flex-shrink:0;display:flex;color:var(--muted);}
+.nav-item .nav-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.sidebar.collapsed .nav-item{justify-content:center;padding:9px 0;gap:0;}
+.sidebar.collapsed .nav-item .nav-dot{display:none;}
+.sidebar.collapsed .nav-label{display:none;}
+.sidebar-footer{margin-top:auto;padding:6px;border-top:1px solid var(--border);flex-shrink:0;}
+
+.main-col{flex:999 1 560px;min-width:0;display:flex;flex-direction:column;}
+
+.content{flex:1 1 auto;min-height:0;overflow:auto;padding:22px 26px;font-family:'Hanken Grotesk',system-ui,sans-serif;}
+.page-title{margin:0 0 3px;font-size:18px;font-weight:700;}
+.page-sub{margin:0 0 16px;color:var(--muted);font-size:12.5px;max-width:680px;line-height:1.5;}
+
+.dash-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:8px;}
+.span-4{grid-column:span 4;}
+.span-6{grid-column:span 6;}
+.span-8{grid-column:span 8;}
+.span-12{grid-column:span 12;}
+.cell{background:var(--panel);border:1px solid var(--border);border-radius:2px;display:flex;flex-direction:column;min-width:0;}
+.cell-head{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:7px 10px;border-bottom:1px solid var(--border);}
+.cell-title{font-size:11.5px;font-weight:600;color:var(--text);}
+.cell-menu{color:var(--muted);display:flex;flex-shrink:0;}
+.cell-body{padding:12px 14px;flex:1 1 auto;}
+.cell-sub{margin:0 0 10px;color:var(--muted);font-size:11.5px;line-height:1.5;}
+
+.stat-value{font-family:'Fira Code',monospace;font-size:19px;font-weight:600;}
+.stat-value.ok{color:var(--success);}
+.stat-value.off{color:var(--muted);}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:2px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text);}
+.btn:disabled{opacity:.35;cursor:not-allowed;}
+.btn-outline:hover:not(:disabled){border-color:var(--muted);}
+.btn-danger{border-color:var(--danger);color:var(--danger);}
+.btn-danger:hover:not(:disabled){background:var(--danger);color:#0a0b0d;}
+.field{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted);}
+.field select,.field input{font:inherit;font-size:12.5px;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:2px;padding:6px 8px;}
+.status-pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted);padding:3px 8px;border:1px solid var(--border);border-radius:2px;font-family:'Fira Code',monospace;}
+.status-pill.active{color:var(--success);border-color:var(--success);}
+.adapter-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:2px;cursor:pointer;background:var(--bg);margin-bottom:6px;}
+.adapter-row:hover{border-color:var(--muted);}
+.adapter-name{font-family:'Fira Code',monospace;font-size:12.5px;font-weight:600;}
+.adapter-desc{font-size:11px;color:var(--muted);margin-top:1px;}
+.sig-bar{width:14px;height:14px;flex-shrink:0;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;}
+.sig-bar .dot{width:6px;height:6px;}
+.last-action{margin-top:10px;font-size:11.5px;color:var(--muted);padding-top:10px;border-top:1px solid var(--border);}
+.last-action .mono{color:var(--text);font-family:'Fira Code',monospace;}
+.mono{font-family:'Fira Code',monospace;}
+.table{width:100%;border-collapse:collapse;font-size:12px;}
+.table th{text-align:left;color:var(--muted);font-weight:600;font-size:10.5px;padding:6px 8px;border-bottom:1px solid var(--border);}
+.table td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:top;font-family:'Fira Code',monospace;font-size:11.5px;}
+.table tr:last-child td{border-bottom:none;}
+.tag{display:inline-block;font-size:10.5px;padding:1px 6px;border:1px solid var(--border);color:var(--muted);font-family:'Hanken Grotesk',sans-serif;}
+.tag-warn{color:var(--warn);border-color:var(--warn);}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--border);font-size:11.5px;margin:0 6px 6px 0;font-family:'Fira Code',monospace;}
+.chip button{border:none;background:transparent;color:var(--muted);cursor:pointer;display:flex;padding:0;}
+.chip button:hover{color:var(--danger);}
+
+.statusbar{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:6px 18px;border-top:1px solid var(--border);background:var(--rail);font-size:11px;color:var(--muted);font-family:'Fira Code',monospace;}
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font-family:'Hanken Grotesk',system-ui,sans-serif;">
+  <div style="display:flex;flex:1 1 auto;flex-wrap:wrap;min-height:0;">
+
+    <nav className="{{shell.sidebarClassName}}">
+      <div class="sidebar-header">
+        <div class="logo"><span class="logo-mark"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="18" r="1.4" fill="currentColor" stroke="none"/><path d="M8 14.5a5.5 5.5 0 0 1 8 0"/><path d="M5 11a10 10 0 0 1 14 0"/></svg></span><span class="logo-word">AIRCOMMAND</span></div>
+        <button class="collapse-btn" type="button" onClick="{{shell.toggleCollapsed}}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg></button>
+      </div>
+      <ul class="nav-list">
+        <li><button type="button" className="{{nav.management.className}}" onClick="{{nav.management.onClick}}"><span class="nav-dot"></span><span class="nav-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="4" x2="5" y2="20"/><circle cx="5" cy="9" r="2"/><line x1="12" y1="4" x2="12" y2="20"/><circle cx="12" cy="15" r="2"/><line x1="19" y1="4" x2="19" y2="20"/><circle cx="19" cy="7" r="2"/></svg></span><span class="nav-label">Management</span></button></li>
+        <li><button type="button" className="{{nav.discovery.className}}" onClick="{{nav.discovery.onClick}}"><span class="nav-dot"></span><span class="nav-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></span><span class="nav-label">Discovery &amp; Targets</span></button></li>
+        <li><button type="button" className="{{nav.capture.className}}" onClick="{{nav.capture.onClick}}"><span class="nav-dot"></span><span class="nav-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="6"/><line x1="12" y1="1" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="1" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="23" y2="12"/></svg></span><span class="nav-label">Capture &amp; Attack</span></button></li>
+        <li><button type="button" className="{{nav.cracking.className}}" onClick="{{nav.cracking.onClick}}"><span class="nav-dot"></span><span class="nav-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="12" r="4"/><line x1="11" y1="12" x2="21" y2="12"/><line x1="17" y1="12" x2="17" y2="16"/><line x1="21" y1="12" x2="21" y2="16"/></svg></span><span class="nav-label">Cracking</span></button></li>
+      </ul>
+      <div class="sidebar-footer"><button type="button" className="{{nav.logs.className}}" onClick="{{nav.logs.onClick}}"><span class="nav-dot"></span><span class="nav-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="3" width="16" height="18" rx="1"/><line x1="7.5" y1="8" x2="16.5" y2="8"/><line x1="7.5" y1="12" x2="16.5" y2="12"/><line x1="7.5" y1="16" x2="13" y2="16"/></svg></span><span class="nav-label">Logs</span></button></div>
+    </nav>
+
+    <div class="main-col">
+      <main class="content">
+        <sc-if value="{{page.isManagement}}" hint-placeholder-val="{{true}}">
+          <h1 class="page-title">Management</h1>
+          <p class="page-sub">Select the adapter, then step its monitor-mode cycle by hand. The console lands here right after the sudo prompt, before Discovery or Capture starts.</p>
+          <div class="dash-grid" style="margin-bottom:8px;">
+            <div class="cell span-4"><div class="cell-head"><span class="cell-title">Adapter</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="stat-value {{management.statFillClass}}">{{management.statAdapter}}</div></div></div>
+            <div class="cell span-4"><div class="cell-head"><span class="cell-title">Monitor mode</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="stat-value {{management.statFillClass}}">{{management.statMonitor}}</div></div></div>
+            <div class="cell span-4"><div class="cell-head"><span class="cell-title">Session time</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="stat-value">00:00</div></div></div>
+          </div>
+          <div class="dash-grid">
+            <div class="cell span-6">
+              <div class="cell-head"><span class="cell-title">Adapter select</span><span class="cell-menu">&#8942;</span></div>
+              <div class="cell-body">
+                <p class="cell-sub">Switching here stops monitor mode if it was running.</p>
+                <sc-for list="{{management.adapters}}" as="a" hint-placeholder-count="2">
+                  <div class="adapter-row" style="{{a.rowStyle}}" onClick="{{a.select}}">
+                    <div class="row"><span class="sig-bar" style="{{a.sigStyle}}"><span class="dot" style="{{a.dotStyle}}"></span></span><div><div class="adapter-name">{{a.name}}</div><div class="adapter-desc">{{a.desc}}</div></div></div>
+                    <span class="status-pill {{a.liveClass}}">{{a.liveLabel}}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div class="cell span-6">
+              <div class="cell-head"><span class="cell-title">Monitor-mode controls</span><span class="cell-menu">&#8942;</span></div>
+              <div class="cell-body">
+                <p class="cell-sub">Buttons stay disabled until an adapter is selected. Stop only enables once monitor mode is actually running.</p>
+                <div class="row">
+                  <button type="button" class="btn btn-outline" disabled="{{management.checkBtn.disabled}}" onClick="{{management.checkBtn.onClick}}">Check</button>
+                  <button type="button" class="btn btn-outline" disabled="{{management.killBtn.disabled}}" onClick="{{management.killBtn.onClick}}">Kill Conflicting Process</button>
+                  <button type="button" class="btn" style="{{management.startBtn.style}}" disabled="{{management.startBtn.disabled}}" onClick="{{management.startBtn.onClick}}">{{management.startBtn.label}}</button>
+                  <button type="button" class="btn btn-outline" disabled="{{management.stopBtn.disabled}}" onClick="{{management.stopBtn.onClick}}">Stop Airmon-ng</button>
+                </div>
+                <div class="last-action">Last action: <span class="mono">{{management.lastAction}}</span></div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{page.isDiscovery}}" hint-placeholder-val="{{false}}">
+          <h1 class="page-title">Discovery &amp; Targets</h1>
+          <p class="page-sub">Passive beacon listening, open to any network. A network must join the Target allowlist before Capture or Action can run against it.</p>
+          <div class="dash-grid" style="margin-bottom:8px;">
+            <div class="cell span-12"><div class="cell-head"><span class="cell-title">Session</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="row" style="justify-content:space-between;"><div class="row"><button type="button" class="btn" style="{{discovery.startBtn.style}}" disabled="{{discovery.startBtn.disabled}}" onClick="{{discovery.startBtn.onClick}}">Start Discovery</button><button type="button" class="btn btn-outline" disabled>New Session</button></div><label class="field">Band<select onChange="{{discovery.selectBand}}"><option value="" selected="{{discovery.bandUnchosen}}" disabled>Choose a band&hellip;</option><option value="both">2.4 + 5 GHz</option><option value="2.4">2.4 GHz</option><option value="5">5 GHz</option></select></label></div></div></div>
+          </div>
+          <div class="dash-grid">
+            <div class="cell span-8"><div class="cell-head"><span class="cell-title">Networks seen</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><table class="table"><thead><tr><th>SSID</th><th>BSSID</th><th>Ch</th><th>Signal</th><th>Band</th></tr></thead><tbody><tr><td>HomeNet-5G</td><td>A4:2B:8C:11:9F:02</td><td>44</td><td>-41 dBm</td><td>5 GHz</td></tr><tr><td>CoffeeShop_Guest</td><td>D8:0D:17:6A:C3:90</td><td>6</td><td>-63 dBm</td><td>2.4 GHz</td></tr><tr><td>NETGEAR72</td><td>F0:9F:C2:55:1B:4E</td><td>11</td><td>-71 dBm</td><td>2.4 GHz</td></tr></tbody></table></div></div>
+            <div class="cell span-4"><div class="cell-head"><span class="cell-title">Target allowlist</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><p class="cell-sub">Only these networks are eligible for Capture or Action.</p><div class="chip">HomeNet-5G <button type="button">x</button></div><div class="chip">CoffeeShop_Guest <button type="button">x</button></div></div></div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{page.isCapture}}" hint-placeholder-val="{{false}}">
+          <h1 class="page-title">Capture &amp; Attack</h1>
+          <p class="page-sub">Capture and transmission are gated to Targets. Every deauth firing is logged.</p>
+          <label class="field" style="margin-bottom:12px;max-width:320px;">Target<select><option>HomeNet-5G (A4:2B:8C:11:9F:02)</option></select></label>
+
+          <div class="dash-grid" style="margin-bottom:8px;">
+            <div class="cell span-12"><div class="cell-head"><span class="cell-title">Capture</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><p class="cell-sub">Handshake: not captured yet.</p><div class="row"><button type="button" class="btn" style="{{shell.primaryBtnStyle}}">Start Capture</button><button type="button" class="btn btn-outline" disabled>Cancel</button></div></div></div>
+          </div>
+          <div class="dash-grid" style="margin-bottom:20px;">
+            <div class="cell span-12" style="border-color:var(--danger);"><div class="cell-head" style="border-bottom-color:var(--danger);"><span class="cell-title" style="color:var(--danger);">Deauth</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><p class="cell-sub">Actively transmits deauthentication frames to force a handshake. Every firing is logged.</p><button type="button" class="btn btn-danger">Fire Deauth</button></div></div>
+          </div>
+
+          <div class="dash-grid">
+            <div class="cell span-12"><div class="cell-head"><span class="cell-title">Enumerate</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><p class="cell-sub">Requires this adapter already associated via your OS's wifi settings. Runs independently of Capture/Deauth above.</p><button type="button" class="btn btn-outline">Start Enumerate</button></div></div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{page.isCracking}}" hint-placeholder-val="{{false}}">
+          <h1 class="page-title">Cracking</h1>
+          <p class="page-sub">Run a captured handshake against a wordlist with hashcat.</p>
+          <div class="dash-grid" style="margin-bottom:8px;">
+            <div class="cell span-12"><div class="cell-head"><span class="cell-title">Handshake</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><table class="table"><thead><tr><th>File</th><th>Target</th><th>Captured</th></tr></thead><tbody><tr><td>homenet-5g.pcapng</td><td>HomeNet-5G</td><td>09:41</td></tr><tr><td>coffeeshop.pcapng</td><td>CoffeeShop_Guest</td><td>Yesterday</td></tr></tbody></table></div></div>
+          </div>
+          <div class="dash-grid">
+            <div class="cell span-6"><div class="cell-head"><span class="cell-title">Wordlist</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="row"><input type="text" readonly value="wordlist.txt" style="flex:1 1 180px;"><button type="button" class="btn btn-outline">Browse</button></div></div></div>
+            <div class="cell span-6"><div class="cell-head"><span class="cell-title">Crack</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><div class="row" style="justify-content:space-between;"><span class="cell-sub" style="margin:0;">42% complete, ~1.2M keys/sec.</span><button type="button" class="btn" style="{{shell.primaryBtnStyle}}">Start Crack</button></div></div></div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{page.isLogs}}" hint-placeholder-val="{{false}}">
+          <h1 class="page-title">Logs</h1>
+          <p class="page-sub">Every transmission AirCommand fires, recorded, including Actions interrupted by a crash.</p>
+          <div class="dash-grid">
+            <div class="cell span-12"><div class="cell-head"><span class="cell-title">Transmission log</span><span class="cell-menu">&#8942;</span></div><div class="cell-body"><table class="table"><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody><tr><td>09:52:14</td><td>Deauth</td><td>HomeNet-5G</td><td>5 frames, handshake captured</td></tr><tr><td>09:41:03</td><td>Capture start</td><td>HomeNet-5G</td><td>wlan0mon</td></tr><tr><td>Yesterday</td><td>Deauth</td><td>CoffeeShop_Guest</td><td><span class="tag tag-warn">Interrupted by crash</span></td></tr><tr><td>Yesterday</td><td>Enumerate</td><td>CoffeeShop_Guest</td><td>3 hosts found</td></tr></tbody></table></div></div>
+          </div>
+        </sc-if>
+      </main>
+
+      <div class="statusbar">
+        <span class="status-pill active">Sudo session active</span>
+        <span>{{management.activeAdapterLabel}}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      collapsed: false,
+      activePage: 'management',
+      selectedAdapter: null,
+      monitorActive: false,
+      lastAction: 'No actions yet this session.',
+      selectedBand: null,
+    };
+  }
+
+  selectAdapter(name) {
+    return () => {
+      const switching = this.state.selectedAdapter !== name;
+      this.setState({ selectedAdapter: name, monitorActive: switching ? false : this.state.monitorActive });
+    };
+  }
+
+  renderVals() {
+    const accent = '#b4d94a';
+    const primaryBtnStyle = `background:${accent};border-color:${accent};color:#0a0b0d;`;
+
+    const collapsed = this.state.collapsed;
+    const page = this.state.activePage;
+    const selected = this.state.selectedAdapter;
+    const hasAdapter = selected !== null;
+    const monitorActive = this.state.monitorActive;
+
+    const navItem = (id) => ({ className: 'nav-item' + (page === id ? ' active' : ''), onClick: () => this.setState({ activePage: id }) });
+
+    const adapterDefs = [
+      { name: 'wlan0', desc: 'Realtek RTL8812AU, USB', live: true },
+      { name: 'wlan1', desc: 'Intel AX200, internal', live: false },
+    ];
+    const adapters = adapterDefs.map((d) => {
+      const isSelected = selected === d.name;
+      return {
+        name: d.name, desc: d.desc,
+        rowStyle: isSelected ? `border-color:${accent}` : '',
+        sigStyle: isSelected ? `border-color:${accent}` : '',
+        dotStyle: isSelected ? `background:${accent}` : 'background:transparent',
+        liveClass: d.live ? 'active' : '', liveLabel: d.live ? 'LIVE' : 'OFF',
+        select: this.selectAdapter(d.name),
+      };
+    });
+
+    const gatedBtn = (onAction) => ({ disabled: !hasAdapter, onClick: () => { if (hasAdapter) onAction(); } });
+    const checkBtn = gatedBtn(() => this.setState({ lastAction: `Checked ${selected}. No conflicting process found.` }));
+    const killBtn = gatedBtn(() => this.setState({ lastAction: `Killed the process holding ${selected}.` }));
+    const startBtn = {
+      disabled: !hasAdapter || monitorActive,
+      label: monitorActive ? 'Airmon-ng Running' : 'Start Airmon-ng',
+      style: (!hasAdapter || monitorActive) ? '' : primaryBtnStyle,
+      onClick: () => { if (hasAdapter && !monitorActive) this.setState({ monitorActive: true, lastAction: `Started airmon-ng. ${selected}mon is up.` }); },
+    };
+    const stopBtn = { disabled: !monitorActive, onClick: () => { if (monitorActive) this.setState({ monitorActive: false, lastAction: `Stopped airmon-ng. ${selected} is restored.` }); } };
+
+    const selectedBand = this.state.selectedBand;
+    const hasBand = selectedBand !== null;
+    const discoveryStartBtn = {
+      disabled: !hasBand,
+      style: hasBand ? primaryBtnStyle : '',
+      onClick: () => {},
+    };
+
+    return {
+      shell: { sidebarClassName: 'sidebar' + (collapsed ? ' collapsed' : ''), primaryBtnStyle, toggleCollapsed: () => this.setState({ collapsed: !collapsed }) },
+      nav: { management: navItem('management'), discovery: navItem('discovery'), capture: navItem('capture'), cracking: navItem('cracking'), logs: navItem('logs') },
+      page: { isManagement: page === 'management', isDiscovery: page === 'discovery', isCapture: page === 'capture', isCracking: page === 'cracking', isLogs: page === 'logs' },
+      discovery: {
+        bandUnchosen: !hasBand,
+        selectBand: (e) => this.setState({ selectedBand: e.target.value || null }),
+        startBtn: discoveryStartBtn,
+      },
+      management: {
+        adapters, checkBtn, killBtn, startBtn, stopBtn,
+        statFillClass: hasAdapter ? 'ok' : 'off',
+        statAdapter: hasAdapter ? selected : '--',
+        statMonitor: monitorActive ? 'ON' : 'OFF',
+        lastAction: this.state.lastAction,
+        activeAdapterLabel: hasAdapter ? selected : 'No adapter selected',
+      },
+    };
+  }
+}
+</script>
+</body>
+</html>
