@@ -189,8 +189,8 @@ runs and this real-display run come from the same hardware, with the platform
 plugin as the only difference.
 
 The first launch aborted because `libxcb-cursor0` was missing. It ran after
-`sudo apt install libxcb-cursor0`. This is a confirmed fresh-Mint dependency: the
-real port's packaging and setup docs need to install `libxcb-cursor0`.
+`sudo apt install libxcb-cursor0`. `libxcb-cursor0` was missing on the user's
+Mint host, so the real port's packaging and setup docs need to install it.
 
 The metrics from `~/mint-live.txt`:
 
@@ -224,8 +224,8 @@ separate headless number from the Mint host, only the interactive run above.
 | Criterion | Target | Measured | Verdict |
 |---|---|---|---|
 | Sidebar collapse smooth | about 60fps, no visible stutter | 14.6ms mean tick, 0 dropped frames over 8+ collapses and under 8x stress; Mint real-display run 14.52ms mean, 0 dropped, user saw no problems | Pass, confirmed on the Mint real display |
-| Input responsive during refresh | under about 100ms | max event-loop drift 10.3ms, refresh update under 1ms | Pass |
-| Refresh does not peg a core | no core saturated | 0.14 of one core at spec, 0.27 at 8x stress | Pass |
+| Input responsive during refresh | under about 100ms | max event-loop drift 10.3ms, refresh update under 1ms; Mint real display: max event-loop drift 14.76ms, user saw no problems | Pass, confirmed on the Mint real display |
+| Refresh does not peg a core | no core saturated | 0.14 of one core at spec, 0.27 at 8x stress; Mint real display: 0.113 of one core | Pass, confirmed on the Mint real display |
 | Worker-to-model handoff via Qt signal, no poll | queued signal, no `after()` | static and dynamic checks pass | Pass |
 | AppImage builds and launches in-bundle | builds, launches, size recorded | builds; `import PySide6` + `QApplication` start from inside the bundle; delta 73.9 MiB | Pass |
 | No QML or GPU needed to hit the budget | stays on raster | 0 dropped frames on the offscreen raster engine, no GPU used | Pass |
@@ -301,7 +301,7 @@ What to report back from the Kali run:
 If the window fails to start with `xcb-cursor0 or libxcb-cursor0 is needed to
 load the Qt xcb platform plugin`, install it once: `sudo apt install
 libxcb-cursor0`. This is confirmed on both the build environment and the user's
-fresh Mint host, so the Kali VM likely needs it too. It is a one-line host
+Mint host, so the Kali VM likely needs it too. It is a one-line host
 dependency, not a PySide6 defect, but the real port's packaging and setup docs
 should account for it.
 
@@ -335,5 +335,6 @@ GPU to hit the frame budget. Whether to take the fallback in
 `03-framework-research.md`, a Python web UI with pywebview first, is then the
 user's call.
 
-To do: promote this decision into an ADR in `docs/adr/` so it survives the next
-session, per CLAUDE.md. That ADR is not written yet.
+This decision is recorded as ADR
+[`0021-gui-toolkit-pyside6-qt-widgets.md`](../../adr/0021-gui-toolkit-pyside6-qt-widgets.md),
+so it survives the next session per CLAUDE.md.

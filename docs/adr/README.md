@@ -33,6 +33,7 @@ so files here are never renumbered, merged, or renamed.
 | [0018](0018-discovery-band-gating-revised.md) | Discovery band-gating, revised | Live | Makes the band dropdown open unchosen and gates Start on an explicit band pick. |
 | [0019](0019-enumerate-binds-to-the-targets-bssid.md) | Enumerate binds to the Target's BSSID | Live | Makes Enumerate verify the adapter is actually joined to the Target's network before scanning. |
 | [0020](0020-appimage-packaging.md) | AppImage packaging | Live | Ships AirCommand as an AppImage that bundles Python, Tcl/Tk, and CustomTkinter, leaving the native tools (aircrack-ng suite, nmap, hashcat, hcxpcapngtool, iw) as host packages. |
+| [0021](0021-gui-toolkit-pyside6-qt-widgets.md) | GUI toolkit: PySide6 Qt Widgets | Live (conditional on the Kali VM run) | Ports the GUI from CustomTkinter to PySide6 Qt Widgets, rendering on the CPU raster engine so no GPU or QML is needed, with the event pump becoming a queued cross-thread Qt signal. |
 
 ## Chains
 
