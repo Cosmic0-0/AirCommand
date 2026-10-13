@@ -178,11 +178,52 @@ most useful correction this spike makes to the research: the size cost is real
 but much smaller than feared, and it is the trimmed Essentials set, not all of
 Qt.
 
+## Mint host results (user run)
+
+The user ran the interactive spike on their Mint host, a real display, with
+`spike.py --metrics-file ~/mint-live.txt`. The metrics JSON reports
+`"platform": "(default)"`, which here is xcb (the earlier abort named the xcb
+plugin). The machine is an IdeaPad Gaming 3 15ARH7, the same machine that
+produced the offscreen numbers above (the AMD Radeon 680M one). So the offscreen
+runs and this real-display run come from the same hardware, with the platform
+plugin as the only difference.
+
+The first launch aborted because `libxcb-cursor0` was missing. It ran after
+`sudo apt install libxcb-cursor0`. This is a confirmed fresh-Mint dependency: the
+real port's packaging and setup docs need to install `libxcb-cursor0`.
+
+The metrics from `~/mint-live.txt`:
+
+| Metric | Value |
+|---|---|
+| Animation tick mean | 14.52ms |
+| Animation tick p95 | 18.20ms |
+| Animation tick max | 20.27ms |
+| Frames / segments | 143 / 13 |
+| Dropped frames (over 32ms) | 0 |
+| Refresh model-update mean | 0.367ms |
+| Refresh model-update max | 0.54ms |
+| Event-loop max drift | 14.76ms |
+| Event-loop p95 drift | 1.18ms |
+| CPU (fraction of one core) | 0.113 |
+
+These track the offscreen spec-cadence runs: the animation mean (14.52ms) matches
+them and the dropped-frame count is again 0, which is expected on the same
+machine. On the real display the event-loop max drift is 14.76ms against the
+100ms limit, and CPU is 0.113 of one core. `checks.py` also printed ALL PASS on
+the user's machine: static checks pass, and the slot ran on the GUI thread while
+the worker emitted from another thread.
+
+The user's observation, in their words: "Its smooth and i saw no problems".
+
+The `--bench` run (`~/mint-bench.txt`) was not pasted back, so there is no
+separate headless number from the Mint host, only the interactive run above.
+
 ## Pass/fail verdict
 
 | Criterion | Target | Measured | Verdict |
 |---|---|---|---|
-| Sidebar collapse smooth | about 60fps, no visible stutter | 14.6ms mean tick, 0 dropped frames over 8+ collapses and under 8x stress | Pass (CPU side); visible smoothness needs the user's display |
+| Sidebar collapse smooth | about 60fps, no visible stutter | 14.6ms mean tick, 0 dropped frames over 8+ collapses and under 8x stress; Mint real-display run 14.52ms mean, 0 dropped, user saw no problems | Pass, confirmed on the Mint real display |
 | Input responsive during refresh | under about 100ms | max event-loop drift 10.3ms, refresh update under 1ms | Pass |
 | Refresh does not peg a core | no core saturated | 0.14 of one core at spec, 0.27 at 8x stress | Pass |
 | Worker-to-model handoff via Qt signal, no poll | queued signal, no `after()` | static and dynamic checks pass | Pass |
@@ -195,29 +236,35 @@ GPU.
 
 ## What I could not verify (needs the user's hardware)
 
-- Visible smoothness on a real display. Offscreen has no compositor, so the
-  final blit cost is unmeasured. This is the main gap.
-- Behavior under llvmpipe software rendering in the Kali VM. The dev host has a
-  real GPU, and I could not run under a real display plugin here anyway.
-- Input responsiveness felt by a human clicking and scrolling, as opposed to the
-  event-loop drift proxy.
-- Real-display frame times on Mint (real GPU) and Kali (llvmpipe). The user-run
-  steps below produce these.
+Mint real-display smoothness is now covered by the user's run above: real-display
+frame times on the Mint host (14.52ms mean, 0 dropped), the user's observation
+"Its smooth and i saw no problems", and ALL PASS from `checks.py` on their
+machine. What remains open:
+
+- Behavior under llvmpipe software rendering in the Kali VM. The user chose not
+  to run the Kali VM, so the fallback target's slower rendering case is
+  unverified. I could not run under a real display plugin in the build
+  environment either.
+- A `--bench` number from the Mint host. The user ran the interactive spike but
+  did not paste `~/mint-bench.txt`, so the only Mint numbers are the interactive
+  run above.
 
 ## User-run verification
 
-Run these on the Mint host first (primary target, real GPU), then in the Kali VM
-(fallback, llvmpipe software rendering). Qt Widgets renders on the CPU raster
-engine on both; the difference is the final compositing path.
+The Mint host run is done; see "Mint host results" above. The Kali VM run
+(fallback, llvmpipe software rendering) is the one still open. The user chose not
+to run it, so the commands below stay here for whenever it happens. Qt Widgets
+renders on the CPU raster engine on both Mint and Kali; the difference is the
+final compositing path.
 
-Setup (both machines), from the repo root:
+Setup, from the repo root:
 
 ```
 python3 -m venv /tmp/pyside-spike
 /tmp/pyside-spike/bin/pip install PySide6-Essentials==6.12.0
 ```
 
-Then, on each machine (still from the repo root, so the `spikes/gui-port/` paths
+Then, on the Kali VM (still from the repo root, so the `spikes/gui-port/` paths
 resolve):
 
 ```
@@ -239,7 +286,7 @@ resolve):
 /tmp/pyside-spike/bin/python spikes/gui-port/checks.py
 ```
 
-What to report back from each machine:
+What to report back from the Kali run:
 
 - Did the sidebar collapse look smooth to your eye, or did you see jank?
 - During the 2-second refresh, did clicking nav items and scrolling the table
@@ -253,15 +300,15 @@ What to report back from each machine:
 
 If the window fails to start with `xcb-cursor0 or libxcb-cursor0 is needed to
 load the Qt xcb platform plugin`, install it once: `sudo apt install
-libxcb-cursor0`. I hit exactly this in the build environment, and a fresh Mint or
-Kali may not ship it either. It is a one-line host dependency, not a PySide6
-defect, but the real port's packaging and setup docs should account for it.
+libxcb-cursor0`. This is confirmed on both the build environment and the user's
+fresh Mint host, so the Kali VM likely needs it too. It is a one-line host
+dependency, not a PySide6 defect, but the real port's packaging and setup docs
+should account for it.
 
-Note which machine each number came from. If the Kali VM shows visible jank on
-the collapse or a refresh that pegs a core under llvmpipe, that is a fail
-condition and the decision below should weigh the fallback in
-`03-framework-research.md` (a Python web UI, pywebview first). Taking the
-fallback is the user's call, not this spike's.
+If the Kali VM shows visible jank on the collapse or a refresh that pegs a core
+under llvmpipe, that is a fail condition and the decision below should weigh the
+fallback in `03-framework-research.md` (a Python web UI, pywebview first). Taking
+the fallback is the user's call, not this spike's.
 
 ## Decision
 
@@ -276,12 +323,17 @@ The user gave no reason beyond picking that option. The basis on record is the
 measured results above. Every criterion passed on the offscreen runs, the
 AppImage delta is 73.9 MiB, and no fail condition triggered.
 
-The go is conditional. Nobody has reported the Mint host run (real GPU) or the
-Kali VM run (llvmpipe) yet. If either one shows a fail condition, the decision
-reopens. The fail conditions are visible jank on the sidebar collapse, a refresh
-that blocks input or pegs a core, or needing QML or a GPU to hit the frame
-budget. Whether to take the fallback in `03-framework-research.md`, a Python web
-UI with pywebview first, is then the user's call.
+The Mint host run (real GPU) has since happened and backs the go: 14.52ms mean
+tick, 0 dropped frames, ALL PASS from `checks.py`, and the user's observation
+"Its smooth and i saw no problems". No fail condition showed on Mint.
+
+The go stays conditional on Kali. The user chose not to run the Kali VM
+(llvmpipe), so that fallback target is unverified. If a Kali run shows a fail
+condition, the decision reopens. The fail conditions are visible jank on the
+sidebar collapse, a refresh that blocks input or pegs a core, or needing QML or a
+GPU to hit the frame budget. Whether to take the fallback in
+`03-framework-research.md`, a Python web UI with pywebview first, is then the
+user's call.
 
 To do: promote this decision into an ADR in `docs/adr/` so it survives the next
 session, per CLAUDE.md. That ADR is not written yet.
