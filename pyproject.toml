@@ -9,6 +9,7 @@ description = "Wifi-auditing orchestrator wrapping aircrack-ng, hashcat, and nma
 requires-python = ">=3.12"
 dependencies = [
     "customtkinter>=5.2",
+    "PySide6-Essentials>=6.12",
 ]
 
 [project.scripts]
@@ -17,10 +18,15 @@ aircommand = "aircommand.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-qt>=4.5",
 ]
 
 [tool.setuptools.packages.find]
 include = ["aircommand*"]
 
+[tool.setuptools.package-data]
+"aircommand.gui" = ["fonts/*.ttf", "fonts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+qt_api = "pyside6"

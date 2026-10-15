@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
+import os
+
+# Qt tests run headless. Select the offscreen platform plugin before any PySide6
+# import (pytest-qt builds the QApplication through qtbot), so no display is
+# needed and Qt does not abort. spikes/gui-port/checks.py:61 does the same.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import gc
 
 import pytest
+
+# GUI test modules still written for Tk cannot share a pytest process with a
+# live QApplication, so each stays out of collection until its slice rewrites it
+# for Qt. collect_ignore never imports the module, which a module-level skip
+# marker would (discovery_view.py and enumerate_view.py import names table.py
+# only provides after F2, so a skip marker would still raise ImportError at
+# collection). The comment on each entry names the slice that re-enables it.
+collect_ignore = [
+    # test_app.py, test_status_bar.py, test_sudo_dialog.py re-enabled in F3 (Qt shell).
+    # test_discovery_view.py re-enabled in P2 (Qt Discovery and Targets page).
+    "test_capture_view.py",         # P3
+    "test_enumerate_view.py",       # P3
+    "test_target_actions_view.py",  # P3
+    "test_target_selector.py",      # P3
+    "test_crack_view.py",           # P4
+    "test_audit_log_view.py",       # P5
+]
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +55,9 @@ def _collect_garbage_on_the_main_thread_after_each_test():
     non-main thread waits on a main thread that is blocked in wait_for_test).
     But disabling the collector for the whole session did not reliably fix it
     (1 failure in 2 runs), so something else about accumulated Tk state also
-    matters. What is established is the effect of this fixture, not the cause."""
+    matters. What is established is the effect of this fixture, not the cause.
+
+    Inert from F1 of the Qt port onward, because no active test module creates
+    Tk widgets any more. The finalize slice (Z) removes it."""
     yield
     gc.collect()

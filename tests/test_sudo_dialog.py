@@ -1,147 +1,75 @@
-"""SudoPasswordDialog against a real ctk.CTk()/CTkToplevel — see
-docs/design/gui-structure.md 'Sudo password dialog'. Real Tk widgets, not
-mocks (this environment has a real X display); every window constructed here
-is destroyed in a finally so tests don't leak windows across the suite.
+"""SudoPasswordDialog for the Qt port. See
+docs/design/gui-port/05-boundary-design.md "Sudo dialog" and
+06-implementation-plan.md "Test strategy for Qt": App tests monkeypatch the
+dialog away, so these drive the widget directly with qtbot (no exec(), which
+would block) and assert on .result and the accepted/rejected state.
 """
 
 from __future__ import annotations
 
-import time
-
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLineEdit
 
 from aircommand.gui.sudo_dialog import SudoPasswordDialog
-from aircommand.gui.theme import PALETTE
 
 
-def test_dialog_background_and_buttons_use_grid_watch_tokens():
-    """Regression for the reported "pop-ups not done properly": the toplevel
-    background is PALETTE["bg"] (not CTk's light-theme near-white default) and
-    OK/Cancel use the accent-fill / outline recipes, not CTk's default blue."""
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root)
-        try:
-            assert dialog.cget("fg_color") == PALETTE["bg"]
-            assert dialog._ok_button.cget("fg_color") == PALETTE["accent"]
-            assert dialog._ok_button.cget("text_color") == PALETTE["bg"]
-            assert dialog._cancel_button.cget("fg_color") == "transparent"
-            # The outline Cancel's hover is PALETTE["panel"], not CTk's stock
-            # blue: with a transparent fill and no explicit hover_color CTkButton
-            # falls back to its Light-theme hover (#3B8ED0) -- the "button
-            # highlights are blue" half of the report. All four dialogs route
-            # their Cancel through dialog.outline_button, so this one assert
-            # locks the shared helper's fix.
-            assert dialog._cancel_button.cget("hover_color") == PALETTE["panel"]
-            assert dialog._entry.cget("fg_color") == PALETTE["bg"]
-        finally:
-            dialog.destroy()
-    finally:
-        root.destroy()
+def test_buttons_carry_the_grid_watch_classes(qtbot):
+    """Under the one app stylesheet, colors come from the class the QSS selects
+    on: OK is the accent primary, Cancel the flat outline."""
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+    assert dialog._ok_button.property("class") == "primary"
+    assert dialog._cancel_button.property("class") == "btn"
 
 
-def test_no_error_param_gives_an_empty_error_label():
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root)
-        try:
-            assert dialog._error_label.cget("text") == ""
-        finally:
-            dialog.destroy()
-    finally:
-        root.destroy()
+def test_the_password_field_masks_its_input(qtbot):
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+    assert dialog._entry.echoMode() == QLineEdit.EchoMode.Password
 
 
-def test_error_param_is_shown_in_the_error_label():
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root, error="Incorrect password")
-        try:
-            assert dialog._error_label.cget("text") == "Incorrect password"
-        finally:
-            dialog.destroy()
-    finally:
-        root.destroy()
+def test_no_error_param_gives_an_empty_error_label(qtbot):
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+    assert dialog._error_label.text() == ""
 
 
-def test_dialog_maps_even_when_the_parent_window_is_withdrawn():
-    """Launch-hang regression. App.__init__ withdraw()s the main window and then
-    opens this dialog *before* the main window is ever shown -- the sudo prompt
-    is the first UI at launch. apply_chrome() used to mark the dialog
-    transient-for its parent unconditionally; a transient window whose master is
-    withdrawn/unmapped is never mapped by the X window manager, so the prompt
-    never appeared and App._ask_sudo_password_dialog's wait_window() on it
-    blocked forever with zero output -- the exact silent deadlock reported. The
-    fix (dialog.apply_chrome) skips the transient hint while the parent is
-    unmapped, so the dialog maps normally and can be acted on (and closed,
-    unblocking wait_window).
-
-    This is the path no existing test covered: test_app.py monkeypatches
-    _ask_sudo_password_dialog away in every test, so the real dialog is never
-    built over App's withdrawn root; the other tests here build it over a root
-    that is never withdrawn and only read cget() attributes, which an unmapped
-    window still answers.
-
-    Asserts on visibility, NOT by driving wait_window(): a reintroduced bug must
-    FAIL this test, not hang the whole suite. update() pumps the WM's MapNotify
-    without blocking on input the way wait_window() would, and the loop is
-    bounded, so an unmappable dialog ends as a failed assertion within seconds,
-    never a hang. (An after()-scheduled destroy would not do: it fires regardless
-    of mapping, so wait_window() would return even with the bug present.)
-    """
-    root = ctk.CTk()
-    root.withdraw()   # exactly what App.__init__ does before the sudo prompt
-    try:
-        dialog = SudoPasswordDialog(root)
-        try:
-            deadline = time.monotonic() + 5.0
-            while not dialog.winfo_viewable() and time.monotonic() < deadline:
-                dialog.update()   # process pending WM events; returns at once
-                time.sleep(0.01)
-            assert dialog.winfo_ismapped(), "sudo dialog never mapped over a withdrawn parent"
-            assert dialog.winfo_viewable(), "sudo dialog never became viewable over a withdrawn parent"
-        finally:
-            dialog.destroy()
-    finally:
-        root.destroy()
+def test_error_param_is_shown_in_the_error_label(qtbot):
+    dialog = SudoPasswordDialog(error="Incorrect password")
+    qtbot.addWidget(dialog)
+    assert dialog._error_label.text() == "Incorrect password"
 
 
-def test_ok_button_sets_result_to_typed_password_and_destroys_dialog():
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root)
-        dialog._entry.insert(0, "hunter2")
+def test_ok_sets_result_to_the_typed_password_and_accepts(qtbot):
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+    accepted: list[bool] = []
+    dialog.accepted.connect(lambda: accepted.append(True))
 
-        dialog._ok_button.invoke()
+    qtbot.keyClicks(dialog._entry, "hunter2")
+    qtbot.mouseClick(dialog._ok_button, Qt.MouseButton.LeftButton)
 
-        assert dialog.result == "hunter2"
-        assert not dialog.winfo_exists()
-    finally:
-        root.destroy()
-
-
-def test_cancel_button_sets_result_to_none_and_destroys_dialog():
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root)
-        dialog._entry.insert(0, "hunter2")
-
-        dialog._cancel_button.invoke()
-
-        assert dialog.result is None
-        assert not dialog.winfo_exists()
-    finally:
-        root.destroy()
+    assert dialog.result == "hunter2"
+    assert accepted == [True]
 
 
-def test_window_close_sets_result_to_none_and_destroys_dialog():
-    root = ctk.CTk()
-    try:
-        dialog = SudoPasswordDialog(root)
+def test_cancel_sets_result_to_none_and_rejects(qtbot):
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+    rejected: list[bool] = []
+    dialog.rejected.connect(lambda: rejected.append(True))
 
-        dialog._on_cancel()  # what WM_DELETE_WINDOW is wired to
+    qtbot.keyClicks(dialog._entry, "hunter2")
+    qtbot.mouseClick(dialog._cancel_button, Qt.MouseButton.LeftButton)
 
-        assert dialog.result is None
-        assert not dialog.winfo_exists()
-    finally:
-        root.destroy()
+    assert dialog.result is None
+    assert rejected == [True]
+
+
+def test_closing_the_dialog_sets_result_to_none(qtbot):
+    dialog = SudoPasswordDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.reject()   # what the window close button and Escape route to
+
+    assert dialog.result is None

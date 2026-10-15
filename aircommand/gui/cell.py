@@ -1,174 +1,165 @@
-"""Shared Grid Watch component patterns: `Cell`, `DashGrid`, `StatusPill`,
-`Chip`, `Tag`. See docs/design/gui-redesign-gridwatch.md §3's "Core component
-patterns" table -- these are the CustomTkinter equivalents of `.cell`/
-`.dash-grid`/`.status-pill`/`.chip`/`.tag`, reused across every redesigned
-page rather than rebuilt per view, the same role table.py's Column/
-build_header/add_row already play for plain tables.
+"""Shared Grid Watch components for the PySide6 port: Cell, DashGrid,
+StatusPill, Chip, Tag. These are the Qt equivalents of the mockup's
+.cell / .dash-grid / .status-pill / .chip / .tag (docs/design/
+gui-redesign-gridwatch.md section 3), reused across every page.
 
-CustomTkinter has no CSS grid -- DashGrid approximates the design's 12-column,
-8px-gap, span-4/6/8/12 layout with Tk's own grid() geometry manager: 12 equal-
-weight columns, and place_cell() auto-wraps to the next row once a row's spans
-would exceed 12, so callers describe a layout as a flat sequence of
-(cell, span) pairs instead of tracking row/column indices themselves.
+The visual tokens live in theme.py's one QSS string; each widget here sets a
+`class` (and sometimes `danger`, `state`, `warn`) property the QSS selects on.
+A state change flips a property and calls theme.repolish so Qt restyles.
 """
 
 from __future__ import annotations
 
-import customtkinter as ctk
+from typing import Callable, Optional
 
-from aircommand.gui.theme import CORNER_RADIUS, PALETTE, mono_font, ui_font
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from aircommand.gui.theme import PALETTE, repolish
+
+# The hex-to-token reverse map lets StatusPill.set_state keep its old signature
+# (a caller passes PALETTE["danger"]) while the QSS selects on a named state.
+_STATE_BY_COLOR = {
+    PALETTE["success"]: "success",
+    PALETTE["danger"]: "danger",
+    PALETTE["warn"]: "warn",
+    PALETTE["muted"]: "muted",
+}
 
 
-class DashGrid(ctk.CTkFrame):
-    """A 12-column grid container (design spec: .dash-grid, gap 8px, span-4/
-    6/8/12 utility widths). place_cell(cell, span) grids `cell` into the next
-    available column slot, auto-wrapping to a new row once the current row's
-    spans would exceed 12 -- callers lay out a page top-to-bottom as a flat
-    sequence of cells without computing row/column indices by hand."""
+class DashGrid(QWidget):
+    """A 12-column grid (design spec: .dash-grid, gap 8px, span-4/6/8/12).
+    place_cell(widget, span) drops `widget` into the next free slot and wraps to
+    a new row once the current row's spans would exceed 12, so a page is laid out
+    as a flat sequence of (widget, span) pairs without row/column bookkeeping."""
 
     _COLUMNS = 12
-    _GAP = 4   # half of the design's 8px gap on each side (padx/pady split
-    # between adjacent cells, same convention table.py uses for its own padding)
 
-    def __init__(self, master, **kwargs) -> None:
-        kwargs.setdefault("fg_color", "transparent")
-        super().__init__(master, **kwargs)
-        for i in range(self._COLUMNS):
-            self.grid_columnconfigure(i, weight=1, uniform="dashcol")
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(8)   # the design's 8px gap
+        for column in range(self._COLUMNS):
+            self._grid.setColumnStretch(column, 1)
         self._row = 0
         self._col = 0
 
-    def place_cell(self, cell: ctk.CTkBaseClass, span: int) -> None:
+    def place_cell(self, widget: QWidget, span: int) -> None:
         if span < 1 or span > self._COLUMNS:
             raise ValueError(f"span must be between 1 and {self._COLUMNS}, got {span}")
         if self._col + span > self._COLUMNS:
             self._row += 1
             self._col = 0
-        cell.grid(
-            row=self._row, column=self._col, columnspan=span,
-            sticky="nsew", padx=self._GAP, pady=self._GAP,
-        )
+        self._grid.addWidget(widget, self._row, self._col, 1, span)
         self._col += span
         if self._col >= self._COLUMNS:
             self._row += 1
             self._col = 0
 
     def new_row(self) -> None:
-        """Forces the next place_cell() onto a fresh row even if the current
-        one isn't full -- for a page that wants an explicit row break rather
-        than relying on span arithmetic to land exactly on 12."""
+        """Force the next place_cell onto a fresh row even if the current one is
+        not full."""
         if self._col != 0:
             self._row += 1
             self._col = 0
 
 
-class Cell(ctk.CTkFrame):
+class Cell(QFrame):
     """The atomic content container (design spec: .cell / .cell-head /
-    .cell-body). Panel background, 1px border, 2px radius; a title bar
-    (title left, a literal "⋮" menu glyph right, bottom border) over a
-    padded, flex-grow body. `self.body` is where callers pack/grid their
-    own content -- this class only builds the chrome around it."""
+    .cell-body): panel background, 1px border, a title bar over a padded body.
+    Callers add their content to `self.body_layout`. `danger=True` is the
+    red-bordered, red-title Deauth cell."""
 
-    def __init__(self, master, title: str, title_color: str | None = None, **kwargs) -> None:
-        kwargs.setdefault("fg_color", PALETTE["panel"])
-        kwargs.setdefault("border_width", 1)
-        kwargs.setdefault("border_color", PALETTE["border"])   # override directly,
-        # e.g. border_color=PALETTE["danger"] for a danger-bordered cell (design
-        # spec: the Capture & Attack page's Deauth section) -- already a plain
-        # kwarg, no dedicated parameter needed for this one.
-        kwargs.setdefault("corner_radius", CORNER_RADIUS)
-        super().__init__(master, **kwargs)
+    def __init__(self, title: str, *, danger: bool = False, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "cell")
+        flag = "true" if danger else "false"
+        self.setProperty("danger", flag)
 
-        head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(side="top", fill="x")
-        self._title_label = ctk.CTkLabel(
-            head, text=title, font=ui_font(11, "bold"),
-            text_color=title_color if title_color is not None else PALETTE["text"], anchor="w",
-        )
-        self._title_label.pack(side="left", padx=10, pady=6)
-        ctk.CTkLabel(
-            head, text="⋮", font=ui_font(13), text_color=PALETTE["muted"], width=16,
-        ).pack(side="right", padx=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        ctk.CTkFrame(self, fg_color=PALETTE["border"], height=1, corner_radius=0).pack(
-            side="top", fill="x"
-        )
+        head = QFrame()
+        head.setProperty("class", "cellHead")
+        head.setProperty("danger", flag)
+        head_layout = QHBoxLayout(head)
+        head_layout.setContentsMargins(10, 7, 10, 7)
+        self._title_label = QLabel(title)
+        self._title_label.setProperty("class", "cellTitle")
+        self._title_label.setProperty("danger", flag)
+        menu = QLabel("⋮")   # the mockup's vertical-ellipsis menu glyph
+        menu.setProperty("class", "cellMenu")
+        head_layout.addWidget(self._title_label)
+        head_layout.addStretch(1)
+        head_layout.addWidget(menu)
+        outer.addWidget(head)
 
-        self.body = ctk.CTkFrame(self, fg_color="transparent")
-        self.body.pack(side="top", fill="both", expand=True, padx=12, pady=10)
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(12, 12, 12, 12)
+        outer.addWidget(self.body, 1)
 
     def set_title(self, title: str) -> None:
-        self._title_label.configure(text=title)
+        self._title_label.setText(title)
 
 
-class StatusPill(ctk.CTkFrame):
-    """A small bordered Fira Code label (design spec: .status-pill), muted by
-    default, success-green when active -- used both for "Sudo session
-    active"/adapter LIVE-OFF indicators and the Management page's Monitor
-    mode stat. A Frame wrapping a Label (not a bare Label) so it can carry
-    its own border/background, matching the mockup's bordered-pill look
-    rather than plain colored text."""
+class StatusPill(QLabel):
+    """A small bordered Fira Code label (design spec: .status-pill): muted by
+    default, success-green when active. set_state takes an exact PALETTE color
+    for a caller with more than two states (the status bar's ACTIVE/LOST)."""
 
-    def __init__(self, master, text: str, active: bool = False, **kwargs) -> None:
-        kwargs.setdefault("fg_color", "transparent")
-        kwargs.setdefault("border_width", 1)
-        kwargs.setdefault("corner_radius", CORNER_RADIUS)
-        super().__init__(master, **kwargs)
-        self.configure(border_color=PALETTE["success"] if active else PALETTE["border"])
-        self._label = ctk.CTkLabel(
-            self, text=text, font=mono_font(11),
-            text_color=PALETTE["success"] if active else PALETTE["muted"],
-        )
-        self._label.pack(padx=8, pady=2)
+    def __init__(self, text: str, active: bool = False, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setProperty("class", "pill")
+        self.setProperty("state", "success" if active else "muted")
 
-    def set_active(self, active: bool, text: str | None = None) -> None:
-        color = PALETTE["success"] if active else PALETTE["muted"]
-        self.configure(border_color=color if active else PALETTE["border"])
-        self._label.configure(text_color=color, **({"text": text} if text is not None else {}))
+    def set_active(self, active: bool, text: Optional[str] = None) -> None:
+        self._set("success" if active else "muted", text)
 
-    def set_state(self, color: str, text: str | None = None) -> None:
-        """Like set_active(), but for a caller with more than two real
-        states to represent (e.g. StatusBar's privilege indicator -- ACTIVE/
-        LOST, both real, not a boolean) -- takes the exact PALETTE color to
-        show rather than deriving it from True/False."""
-        self.configure(border_color=color)
-        self._label.configure(text_color=color, **({"text": text} if text is not None else {}))
+    def set_state(self, color: str, text: Optional[str] = None) -> None:
+        self._set(_STATE_BY_COLOR.get(color, "muted"), text)
+
+    def _set(self, state: str, text: Optional[str]) -> None:
+        if text is not None:
+            self.setText(text)
+        self.setProperty("state", state)
+        repolish(self)
 
 
-class Chip(ctk.CTkFrame):
-    """A Target-allowlist-style entry (design spec: .chip) -- a bordered Fira
-    Code pill with an inline "×" remove button that turns danger-red on
-    hover. `on_remove` is called with no arguments when the × is clicked;
-    callers decide what that means (e.g. engine.targets.remove(bssid))."""
+class Chip(QFrame):
+    """A Target-allowlist entry (design spec: .chip): a bordered Fira Code label
+    with an inline remove button that turns danger-red on hover. `on_remove` is
+    called with no arguments when it is clicked."""
 
-    def __init__(self, master, text: str, on_remove, **kwargs) -> None:
-        kwargs.setdefault("fg_color", "transparent")
-        kwargs.setdefault("border_width", 1)
-        kwargs.setdefault("border_color", PALETTE["border"])
-        kwargs.setdefault("corner_radius", CORNER_RADIUS)
-        super().__init__(master, **kwargs)
-        ctk.CTkLabel(self, text=text, font=mono_font(11), text_color=PALETTE["text"]).pack(
-            side="left", padx=(8, 4), pady=2
-        )
-        remove_button = ctk.CTkLabel(
-            self, text="×", font=ui_font(12), text_color=PALETTE["muted"], cursor="hand2",
-        )
-        remove_button.pack(side="left", padx=(0, 8), pady=2)
-        remove_button.bind("<Button-1>", lambda _event: on_remove())
-        remove_button.bind("<Enter>", lambda _event: remove_button.configure(text_color=PALETTE["danger"]))
-        remove_button.bind("<Leave>", lambda _event: remove_button.configure(text_color=PALETTE["muted"]))
+    def __init__(self, text: str, on_remove: Callable[[], None], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "chip")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(6)
+        label = QLabel(text)
+        label.setProperty("class", "chipText")
+        remove = QPushButton("×")   # a multiplication sign, the mockup's remove glyph
+        remove.setProperty("class", "chipRemove")
+        remove.clicked.connect(lambda: on_remove())
+        layout.addWidget(label)
+        layout.addWidget(remove)
 
 
-class Tag(ctk.CTkLabel):
+class Tag(QLabel):
     """A small bordered inline label (design spec: .tag / .tag-warn). `warn`
-    flags rows like "Interrupted by crash" in amber; otherwise a plain muted
-    outline."""
+    flags rows like "Interrupted by crash" in amber."""
 
-    def __init__(self, master, text: str, warn: bool = False, **kwargs) -> None:
-        color = PALETTE["warn"] if warn else PALETTE["muted"]
-        kwargs.setdefault("fg_color", "transparent")
-        kwargs.setdefault("corner_radius", CORNER_RADIUS)
-        super().__init__(
-            master, text=text, font=mono_font(10), text_color=color,
-            **kwargs,
-        )
+    def __init__(self, text: str, warn: bool = False, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setProperty("class", "tag")
+        self.setProperty("warn", "true" if warn else "false")

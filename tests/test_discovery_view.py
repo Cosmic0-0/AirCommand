@@ -1,7 +1,9 @@
-"""NetworksView, TargetPicker against a real ctk.CTk()/CTkToplevel and a real
-Engine + FakeProcRunner -- same idiom as tests/test_discovery_acceptance.py
-(engine construction, CSV scripting) and tests/test_sudo_dialog.py (real Tk
-widgets, .invoke() on real CTkButtons, destroy everything in a finally).
+"""NetworksView, TargetPicker for the PySide6 port: real views under qtbot
+against a real Engine + FakeProcRunner, the same idiom as test_app.py (real
+widgets, .click() on real buttons, qtbot owns the QApplication). The two add
+dialogs open with exec() in production; here an autouse fixture makes exec() a
+no-op so the test can fill the fields and click Add without blocking (the plan's
+"Test strategy for Qt": monkeypatch the call that opens the dialog).
 """
 
 from __future__ import annotations
@@ -10,21 +12,26 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import customtkinter as ctk
+import pytest
 
 from aircommand.core.domain import EncryptionType, MacAddress, Network
 from aircommand.core.engine import Engine
 from aircommand.core.events import NetworkDiscovered, NetworkSightingUpdated, TargetAdded, TargetRemoved
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.cell import Cell
-from aircommand.gui.discovery_view import NetworksView, TargetPicker
-from aircommand.gui.theme import PALETTE
+from aircommand.gui.discovery_view import (
+    NetworksView,
+    TargetPicker,
+    _AddAsTargetDialog,
+    _AddManuallyDialog,
+)
+from aircommand.gui.dialog import Dialog
+from aircommand.gui.table import CopyTableView
 
 BSSID_1 = "AA:BB:CC:DD:EE:01"
 BSSID_2 = "AA:BB:CC:DD:EE:02"
 
-# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use --
-# see test_discovery_acceptance.py's identical constant/comment.
+# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
 AP_HEADER = (
@@ -32,18 +39,22 @@ AP_HEADER = (
     "Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key"
 )
 
-# What airodump-ng actually writes to <prefix>-01.csv -- see
-# test_discovery_acceptance.py for the full explanation of this shape.
+# What airodump-ng writes to <prefix>-01.csv (see test_discovery_acceptance.py).
 CSV_CONTENT = (
     f"{AP_HEADER}\n"
     f"{BSSID_1}, 2024-01-01 10:00:00, 2024-01-01 10:00:05, 6, 54, WPA2, CCMP, PSK, -40, 10, 0, 0.0.0.0, 4, Net1, \n"
 )
 
-# _drive's loop is a plain wall-clock loop now, driven by ProcHandle.poll()
-# for liveness, not handle.lines() -- see test_discovery_acceptance.py's module
-# docstring for the full real-hardware finding. One tick is enough for this
-# test to see the CSV file get polled once.
 DISCOVERY_TICK_COUNT = 1
+
+
+@pytest.fixture(autouse=True)
+def _non_modal_dialogs(monkeypatch):
+    """Both add dialogs call exec() in production. exec() blocks a test, so make
+    it a no-op: the view still stores the dialog in self._dialog, and the test
+    drives the widgets directly (the plan's dialog strategy)."""
+    monkeypatch.setattr(_AddAsTargetDialog, "exec", lambda self: None)
+    monkeypatch.setattr(_AddManuallyDialog, "exec", lambda self: None)
 
 
 def _write_csv_on_spawn(argv: list[str]) -> None:
@@ -88,27 +99,26 @@ def make_target_removed(bssid) -> TargetRemoved:
     return TargetRemoved(event_id=uuid.uuid4(), occurred_at=datetime.now(), bssid=bssid)
 
 
+def _model_cell(view, bssid, title: str) -> str:
+    col = [c.title for c in view._COLUMNS].index(title)
+    row = view._model._index[bssid]
+    return view._model.data(view._model.index(row, col))
+
+
 # --- NetworksView ------------------------------------------------------------------
 
 
-def test_networks_view_wraps_its_table_in_a_titled_cell_with_no_internal_scroll(tmp_path):
-    """Design spec §5/§6 item 3: "Networks seen" is a Cell, and the table body
-    grows with the page instead of carrying its own fixed-height scroll box."""
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        assert not isinstance(view._body, ctk.CTkScrollableFrame)
-        assert isinstance(view._body, ctk.CTkFrame)
-
-        cell = view._body.master.master
-        assert isinstance(cell, Cell)
-        assert cell._title_label.cget("text") == "Networks seen"
-    finally:
-        root.destroy()
+def test_networks_view_wraps_its_table_in_a_titled_cell(qtbot, tmp_path):
+    """Design spec section 5: "Networks seen" is a titled Cell over one
+    CopyTableView, and the page (not the table) scrolls as one unit."""
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    assert isinstance(view._cell, Cell)
+    assert view._cell._title_label.text() == "Networks seen"
+    assert isinstance(view._view, CopyTableView)
 
 
-def test_does_not_seed_from_networks_persisted_by_an_earlier_discovery_job(tmp_path):
+def test_does_not_seed_from_networks_persisted_by_an_earlier_discovery_job(qtbot, tmp_path):
     """ADR-0010: the table is session-scoped and starts empty, even though the
     database already holds a Network a previous Discovery job persisted."""
     proc = FakeProcRunner(
@@ -122,360 +132,269 @@ def test_does_not_seed_from_networks_persisted_by_an_earlier_discovery_job(tmp_p
     )
     handle = engine.discovery.start()
     handle.wait_for_test(timeout=2.0)
-    assert engine.discovery.list_networks() != []   # really persisted -- the premise of this test
+    assert engine.discovery.list_networks() != []   # really persisted, the premise of this test
 
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        assert view._rows == {}
-    finally:
-        root.destroy()
+    view = NetworksView(_FakeApp(engine))
+    qtbot.addWidget(view)
+    assert view._rows == {}
 
 
-def test_clear_removes_every_row_and_destroys_its_widgets(tmp_path):
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
-        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
-        old_widgets = [
-            widget for row in view._rows.values() for widget in (*row["labels"], row["button"])
-        ]
-        assert len(old_widgets) == 2 * (len(view._COLUMNS) + 1)
+def test_clear_removes_every_row(qtbot, tmp_path):
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+    assert view._model.rowCount() == 2
 
-        view.clear()
+    view.clear()
 
-        assert view._rows == {}
-        assert all(not widget.winfo_exists() for widget in old_widgets)
-    finally:
-        root.destroy()
+    assert view._rows == {}
+    assert view._model.rowCount() == 0
 
 
-def test_upsert_after_clear_starts_again_at_grid_row_zero(tmp_path):
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
-        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+def test_upsert_after_clear_starts_again_at_model_row_zero(qtbot, tmp_path):
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_1)))
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
 
-        view.clear()
-        view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
+    view.clear()
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
 
-        row = view._rows[MacAddress.parse(BSSID_2)]
-        assert row["labels"][0].grid_info()["row"] == 0
-        assert row["button"].grid_info()["row"] == 0
-    finally:
-        root.destroy()
+    assert view._model._index[MacAddress.parse(BSSID_2)] == 0
+    assert view._model.rowCount() == 1
 
 
-def test_upsert_row_with_network_discovered_creates_a_new_row(tmp_path):
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        network = make_network(bssid=BSSID_2, ssid="Net2")
+def test_upsert_row_with_network_discovered_creates_a_new_row(qtbot, tmp_path):
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
 
-        view.upsert_row(make_network_discovered(network))
+    view.upsert_row(make_network_discovered(make_network(bssid=BSSID_2, ssid="Net2")))
 
-        assert MacAddress.parse(BSSID_2) in view._rows
-        assert len(view._rows) == 1
-    finally:
-        root.destroy()
+    assert MacAddress.parse(BSSID_2) in view._rows
+    assert len(view._rows) == 1
 
 
-def test_upsert_row_with_sighting_updated_updates_existing_row_in_place(tmp_path):
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network(signal=-40)))
+def test_upsert_row_with_sighting_updated_updates_existing_row_in_place(qtbot, tmp_path):
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network(signal=-40)))
 
-        view.upsert_row(make_sighting_updated(make_network(signal=-70)))
+    view.upsert_row(make_sighting_updated(make_network(signal=-70)))
 
-        assert len(view._rows) == 1
-        signal_index = [c.title for c in NetworksView._COLUMNS].index("Signal (dBm)")
-        signal_entry = view._rows[MacAddress.parse(BSSID_1)]["labels"][signal_index]
-        assert signal_entry.get() == "-70 dBm"
-    finally:
-        root.destroy()
+    assert len(view._rows) == 1
+    assert _model_cell(view, MacAddress.parse(BSSID_1), "Signal (dBm)") == "-70 dBm"
 
 
-def test_band_cell_shows_2_4_ghz_5_ghz_or_question_mark_by_channel(tmp_path):
+def test_band_cell_shows_2_4_ghz_5_ghz_or_question_mark_by_channel(qtbot, tmp_path):
     bssid_2_4 = "AA:BB:CC:DD:EE:01"
     bssid_5 = "AA:BB:CC:DD:EE:02"
     bssid_unknown = "AA:BB:CC:DD:EE:03"
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        band_index = [c.title for c in NetworksView._COLUMNS].index("Band")
-        view.upsert_row(make_network_discovered(make_network(bssid=bssid_2_4, channel=6)))
-        view.upsert_row(make_network_discovered(make_network(bssid=bssid_5, channel=36)))
-        view.upsert_row(make_network_discovered(make_network(bssid=bssid_unknown, channel=-1)))
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network(bssid=bssid_2_4, channel=6)))
+    view.upsert_row(make_network_discovered(make_network(bssid=bssid_5, channel=36)))
+    view.upsert_row(make_network_discovered(make_network(bssid=bssid_unknown, channel=-1)))
 
-        assert view._rows[MacAddress.parse(bssid_2_4)]["labels"][band_index].get() == "2.4 GHz"
-        assert view._rows[MacAddress.parse(bssid_5)]["labels"][band_index].get() == "5 GHz"
-        assert view._rows[MacAddress.parse(bssid_unknown)]["labels"][band_index].get() == "?"
-    finally:
-        root.destroy()
+    assert _model_cell(view, MacAddress.parse(bssid_2_4), "Band") == "2.4 GHz"
+    assert _model_cell(view, MacAddress.parse(bssid_5), "Band") == "5 GHz"
+    assert _model_cell(view, MacAddress.parse(bssid_unknown), "Band") == "?"
 
 
-def test_band_column_sits_directly_after_channel_column(tmp_path):
+def test_band_column_sits_directly_after_channel_column():
     titles = [c.title for c in NetworksView._COLUMNS]
     assert titles.index("Band") == titles.index("Channel") + 1
 
 
-def test_band_cell_updates_in_place_when_channel_changes_on_sighting(tmp_path):
+def test_band_cell_updates_in_place_when_channel_changes_on_sighting(qtbot, tmp_path):
+    view = NetworksView(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network(channel=6)))
+    assert _model_cell(view, MacAddress.parse(BSSID_1), "Band") == "2.4 GHz"
+
+    view.upsert_row(make_sighting_updated(make_network(channel=36)))
+
+    assert len(view._rows) == 1
+    assert _model_cell(view, MacAddress.parse(BSSID_1), "Band") == "5 GHz"
+
+
+def test_add_as_target_button_opens_dialog_and_valid_label_adds_target(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        band_index = [c.title for c in NetworksView._COLUMNS].index("Band")
-        view.upsert_row(make_network_discovered(make_network(channel=6)))
-        assert view._rows[MacAddress.parse(BSSID_1)]["labels"][band_index].get() == "2.4 GHz"
+    view = NetworksView(_FakeApp(engine))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network()))
 
-        view.upsert_row(make_sighting_updated(make_network(channel=36)))
+    view._rows[MacAddress.parse(BSSID_1)]["button"].click()
 
-        assert len(view._rows) == 1
-        assert view._rows[MacAddress.parse(BSSID_1)]["labels"][band_index].get() == "5 GHz"
-    finally:
-        root.destroy()
+    dialog = view._dialog
+    assert dialog is not None
+    dialog._label_entry.setText("My house")
+    dialog._add_button.click()
+
+    targets = engine.targets.list()
+    assert len(targets) == 1
+    assert targets[0].bssid == MacAddress.parse(BSSID_1)
+    assert targets[0].ssid == "Net1"
+    assert targets[0].channel == 6
+    assert targets[0].label == "My house"
 
 
-def test_add_as_target_button_opens_dialog_and_valid_label_adds_target(tmp_path):
+def test_add_as_target_dialog_empty_label_shows_error_and_does_not_add(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network()))
+    view = NetworksView(_FakeApp(engine))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network()))
 
-        button = view._rows[MacAddress.parse(BSSID_1)]["button"]
-        button.invoke()
+    view._rows[MacAddress.parse(BSSID_1)]["button"].click()
+    dialog = view._dialog
+    dialog._add_button.click()
 
-        dialog = view._dialog
-        assert dialog is not None
-        dialog._label_entry.insert(0, "My house")
-        dialog._add_button.invoke()
-
-        targets = engine.targets.list()
-        assert len(targets) == 1
-        assert targets[0].bssid == MacAddress.parse(BSSID_1)
-        assert targets[0].ssid == "Net1"
-        assert targets[0].channel == 6
-        assert targets[0].label == "My house"
-    finally:
-        root.destroy()
+    assert dialog._error_label.text() != ""
+    assert engine.targets.list() == []
 
 
-def test_add_as_target_dialog_empty_label_shows_error_and_does_not_add(tmp_path):
+def test_add_as_target_dialog_uses_grid_watch_classes(qtbot, tmp_path):
+    """Themed through the app QSS, not CTk light defaults: accent-fill primary
+    Add, outline Cancel, and a themed Dialog base (the Qt port styles by class
+    property rather than per-widget color kwargs)."""
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network()))
+    view = NetworksView(_FakeApp(engine))
+    qtbot.addWidget(view)
+    view.upsert_row(make_network_discovered(make_network()))
+    view._rows[MacAddress.parse(BSSID_1)]["button"].click()
 
-        button = view._rows[MacAddress.parse(BSSID_1)]["button"]
-        button.invoke()
-
-        dialog = view._dialog
-        dialog._add_button.invoke()
-
-        assert dialog._error_label.cget("text") != ""
-        assert engine.targets.list() == []
-    finally:
-        root.destroy()
-
-
-def test_add_as_target_dialog_uses_grid_watch_tokens(tmp_path):
-    """Themed to match the pages: dark toplevel, accent-fill Add, outline Cancel
-    -- not CTk's light-theme defaults."""
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        view = NetworksView(root, _FakeApp(engine))
-        view.upsert_row(make_network_discovered(make_network()))
-        view._rows[MacAddress.parse(BSSID_1)]["button"].invoke()
-
-        dialog = view._dialog
-        assert dialog.cget("fg_color") == PALETTE["bg"]
-        assert dialog._add_button.cget("fg_color") == PALETTE["accent"]
-        assert dialog._add_button.cget("text_color") == PALETTE["bg"]
-        assert dialog._cancel_button.cget("fg_color") == "transparent"
-        # Outline Cancel hovers to panel, not CTk's stock blue (#3B8ED0) -- the
-        # transparent-fill default-hover fallback was the "blue highlights" bug.
-        assert dialog._cancel_button.cget("hover_color") == PALETTE["panel"]
-        assert dialog._label_entry.cget("fg_color") == PALETTE["bg"]
-    finally:
-        root.destroy()
+    dialog = view._dialog
+    assert isinstance(dialog, Dialog)
+    assert dialog._add_button.property("class") == "primary"
+    assert dialog._cancel_button.property("class") == "btn"
 
 
 # --- TargetPicker ------------------------------------------------------------------
 
 
-def test_wraps_its_table_in_a_titled_cell_with_no_internal_scroll(tmp_path):
-    """Design spec §5/§6 item 3: "Target allowlist" is a Cell, and the table
-    body grows with the page instead of carrying its own fixed-height scroll
-    box."""
-    engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        assert not isinstance(picker._body, ctk.CTkScrollableFrame)
-        assert isinstance(picker._body, ctk.CTkFrame)
-
-        cell = picker._body.master.master
-        assert isinstance(cell, Cell)
-        assert cell._title_label.cget("text") == "Target allowlist"
-    finally:
-        root.destroy()
+def test_target_picker_wraps_its_table_in_a_titled_cell(qtbot, tmp_path):
+    picker = TargetPicker(_FakeApp(_make_engine(tmp_path)))
+    qtbot.addWidget(picker)
+    assert isinstance(picker._cell, Cell)
+    assert picker._cell._title_label.text() == "Target allowlist"
+    assert isinstance(picker._view, CopyTableView)
 
 
-def test_target_picker_seeds_from_existing_targets(tmp_path):
+def test_target_picker_seeds_from_existing_targets(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
     engine.targets.add(MacAddress.parse(BSSID_1), "Net1", 6, "My house")
 
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        assert MacAddress.parse(BSSID_1) in picker._rows
-    finally:
-        root.destroy()
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    assert MacAddress.parse(BSSID_1) in picker._rows
 
 
-def test_target_picker_upsert_row_with_target_added_adds_a_new_row(tmp_path):
+def test_target_picker_upsert_row_with_target_added_adds_a_new_row(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        target = engine.targets.add(MacAddress.parse(BSSID_1), "Net1", 6, "My house")
-        event = TargetAdded(event_id=uuid.uuid4(), occurred_at=datetime.now(), target=target)
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    target = engine.targets.add(MacAddress.parse(BSSID_1), "Net1", 6, "My house")
+    event = TargetAdded(event_id=uuid.uuid4(), occurred_at=datetime.now(), target=target)
 
-        picker.upsert_row(event)
+    picker.upsert_row(event)
 
-        assert target.bssid in picker._rows
-    finally:
-        root.destroy()
+    assert target.bssid in picker._rows
 
 
-def test_target_picker_remove_row_removes_row_and_regrids_the_remaining_one(tmp_path):
+def test_target_picker_remove_row_removes_row_and_regrids_the_remaining_one(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
     target_1 = engine.targets.add(MacAddress.parse(BSSID_1), "Net1", 6, "House1")
     target_2 = engine.targets.add(MacAddress.parse(BSSID_2), "Net2", 11, "House2")
 
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        assert len(picker._rows) == 2
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    assert len(picker._rows) == 2
 
-        picker.remove_row(make_target_removed(target_1.bssid))
+    picker.remove_row(make_target_removed(target_1.bssid))
 
-        assert target_1.bssid not in picker._rows
-        assert target_2.bssid in picker._rows
-        remaining = picker._rows[target_2.bssid]
-        assert remaining["labels"][0].get() == "Net2"
-        # Re-gridded at row 0 -- no permanent gap left where the removed row was.
-        assert remaining["labels"][0].grid_info()["row"] == 0
-        assert remaining["button"].grid_info()["row"] == 0
-    finally:
-        root.destroy()
+    assert target_1.bssid not in picker._rows
+    assert target_2.bssid in picker._rows
+    # Re-placed at model row 0, no permanent gap where the removed row was.
+    assert picker._model._index[target_2.bssid] == 0
+    assert _model_cell(picker, target_2.bssid, "SSID") == "Net2"
+    assert picker._rows[target_2.bssid]["button"] is not None
 
 
-def test_target_picker_remove_button_calls_engine_remove_for_real(tmp_path):
+def test_target_picker_remove_button_calls_engine_remove_for_real(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
     target = engine.targets.add(MacAddress.parse(BSSID_1), "Net1", 6, "House1")
 
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        button = picker._rows[target.bssid]["button"]
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    picker._rows[target.bssid]["button"].click()
 
-        button.invoke()
-
-        assert engine.targets.list() == []
-    finally:
-        root.destroy()
+    assert engine.targets.list() == []
 
 
-def test_add_manually_dialog_valid_input_adds_target(tmp_path):
+def test_add_manually_dialog_valid_input_adds_target(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        picker._open_add_manually_dialog()
-        dialog = picker._dialog
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    picker._open_add_manually_dialog()
+    dialog = picker._dialog
 
-        dialog._bssid_entry.insert(0, BSSID_1)
-        dialog._ssid_entry.insert(0, "Net1")
-        dialog._channel_entry.insert(0, "6")
-        dialog._label_entry.insert(0, "House1")
-        dialog._add_button.invoke()
+    dialog._bssid_entry.setText(BSSID_1)
+    dialog._ssid_entry.setText("Net1")
+    dialog._channel_entry.setText("6")
+    dialog._label_entry.setText("House1")
+    dialog._add_button.click()
 
-        targets = engine.targets.list()
-        assert len(targets) == 1
-        assert targets[0].bssid == MacAddress.parse(BSSID_1)
-        assert targets[0].ssid == "Net1"
-        assert targets[0].channel == 6
-        assert targets[0].label == "House1"
-    finally:
-        root.destroy()
+    targets = engine.targets.list()
+    assert len(targets) == 1
+    assert targets[0].bssid == MacAddress.parse(BSSID_1)
+    assert targets[0].ssid == "Net1"
+    assert targets[0].channel == 6
+    assert targets[0].label == "House1"
 
 
-def test_add_manually_dialog_invalid_bssid_shows_error_and_does_not_add(tmp_path):
+def test_add_manually_dialog_invalid_bssid_shows_error_and_does_not_add(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        picker._open_add_manually_dialog()
-        dialog = picker._dialog
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    picker._open_add_manually_dialog()
+    dialog = picker._dialog
 
-        dialog._bssid_entry.insert(0, "not-a-bssid")
-        dialog._ssid_entry.insert(0, "Net1")
-        dialog._channel_entry.insert(0, "6")
-        dialog._label_entry.insert(0, "House1")
-        dialog._add_button.invoke()
+    dialog._bssid_entry.setText("not-a-bssid")
+    dialog._ssid_entry.setText("Net1")
+    dialog._channel_entry.setText("6")
+    dialog._label_entry.setText("House1")
+    dialog._add_button.click()
 
-        assert dialog._error_label.cget("text") != ""
-        assert engine.targets.list() == []
-    finally:
-        root.destroy()
+    assert dialog._error_label.text() != ""
+    assert engine.targets.list() == []
 
 
-def test_add_manually_dialog_invalid_channel_shows_error_and_does_not_add(tmp_path):
+def test_add_manually_dialog_invalid_channel_shows_error_and_does_not_add(qtbot, tmp_path):
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        picker._open_add_manually_dialog()
-        dialog = picker._dialog
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    picker._open_add_manually_dialog()
+    dialog = picker._dialog
 
-        dialog._bssid_entry.insert(0, BSSID_1)
-        dialog._ssid_entry.insert(0, "Net1")
-        dialog._channel_entry.insert(0, "not-a-number")
-        dialog._label_entry.insert(0, "House1")
-        dialog._add_button.invoke()
+    dialog._bssid_entry.setText(BSSID_1)
+    dialog._ssid_entry.setText("Net1")
+    dialog._channel_entry.setText("not-a-number")
+    dialog._label_entry.setText("House1")
+    dialog._add_button.click()
 
-        assert dialog._error_label.cget("text") != ""
-        assert engine.targets.list() == []
-    finally:
-        root.destroy()
+    assert dialog._error_label.text() != ""
+    assert engine.targets.list() == []
 
 
-def test_add_manually_dialog_uses_grid_watch_tokens(tmp_path):
-    """Themed to match the pages: dark toplevel, accent-fill Add, outline Cancel,
-    dark bordered entries -- not CTk's light-theme defaults."""
+def test_add_manually_dialog_uses_grid_watch_classes(qtbot, tmp_path):
+    """Themed through the app QSS: accent-fill Add, outline Cancel, a themed
+    Dialog base, QLineEdit fields (the Qt port styles by class property)."""
     engine = _make_engine(tmp_path)
-    root = ctk.CTk()
-    try:
-        picker = TargetPicker(root, _FakeApp(engine))
-        picker._open_add_manually_dialog()
-        dialog = picker._dialog
+    picker = TargetPicker(_FakeApp(engine))
+    qtbot.addWidget(picker)
+    picker._open_add_manually_dialog()
+    dialog = picker._dialog
 
-        assert dialog.cget("fg_color") == PALETTE["bg"]
-        assert dialog._add_button.cget("fg_color") == PALETTE["accent"]
-        assert dialog._add_button.cget("text_color") == PALETTE["bg"]
-        assert dialog._cancel_button.cget("fg_color") == "transparent"
-        assert dialog._bssid_entry.cget("fg_color") == PALETTE["bg"]
-    finally:
-        root.destroy()
+    assert isinstance(dialog, Dialog)
+    assert dialog._add_button.property("class") == "primary"
+    assert dialog._cancel_button.property("class") == "btn"

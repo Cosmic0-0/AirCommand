@@ -1,60 +1,66 @@
-"""SudoPasswordDialog — the launch-time modal that collects the sudo password
-Engine.privilege.start() needs (ADR-0002). See docs/design/gui-structure.md
-'Sudo password dialog'.
+"""SudoPasswordDialog: the launch-time modal that collects the sudo password
+Engine.privilege.start() needs (ADR-0002).
 
-Styled entirely through aircommand/gui/dialog.py's shared Grid Watch helpers
-(themed toplevel background, themed entry, accent/outline buttons, centering)
--- the same helpers the Add-as-Target / Add-manually / deauth-confirm dialogs
-use, so all four match the pages instead of falling back to CustomTkinter's
-light-theme defaults (near-white window, stock-blue buttons).
+See docs/design/gui-port/05-boundary-design.md "Sudo dialog". QDialog.exec()
+returning accepted or rejected replaces Tk's grab_set plus wait_window, and the
+.result protocol the startup retry loop reads stays: OK sets result to the typed
+text, Cancel or closing the window (Escape, the window close button) sets it to
+None. The dialog has no parent and centers on screen, which is what the Tk
+transient-to-a-withdrawn-root code effectively gave, so it still maps while
+App's main window is hidden at launch. It is built from aircommand/gui/dialog.py's
+themed QDialog base and button factories, so it matches the pages under the one
+app stylesheet.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-import customtkinter as ctk
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from aircommand.gui import dialog
-from aircommand.gui.theme import PALETTE, ui_font
+from aircommand.gui.dialog import Dialog, error_label, outline_button, primary_button, themed_entry
 
 
-class SudoPasswordDialog(ctk.CTkToplevel):
-    def __init__(self, master, *, error: Optional[str] = None) -> None:
-        super().__init__(master)
+class SudoPasswordDialog(Dialog):
+    def __init__(self, parent: Optional[QWidget] = None, *, error: Optional[str] = None) -> None:
+        super().__init__("AirCommand sudo password", parent)
         self.result: Optional[str] = None
-        dialog.apply_chrome(self, "AirCommand — sudo password", min_width=420, min_height=190)
 
-        ctk.CTkLabel(
-            self, text="AirCommand needs your sudo password to control the adapter.",
-            font=ui_font(12), text_color=PALETTE["text"], wraplength=380, justify="left",
-        ).pack(padx=20, pady=(20, 10))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
 
-        self._entry = dialog.themed_entry(self, show="*")  # show="*" stays: this is a password.
-        self._entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._entry.bind("<Return>", lambda event: self._on_ok())
+        prompt = QLabel("AirCommand needs your sudo password to control the adapter.")
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
 
-        self._error_label = dialog.error_label(self, error or "")
-        self._error_label.pack(padx=20, pady=(0, 10))
+        self._entry = themed_entry(show_password=True)   # show_password masks it: this is a password
+        self._entry.returnPressed.connect(self._on_ok)
+        layout.addWidget(self._entry)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.pack(padx=20, pady=(0, 20), fill="x")
+        self._error_label = error_label(error or "")
+        layout.addWidget(self._error_label)
 
-        # OK is the accent primary; Cancel is the outline recipe -- the pages'
-        # own button vocabulary, not CTk's default blue (the previous mismatch).
-        self._ok_button = dialog.primary_button(button_row, "OK", self._on_ok)
-        self._ok_button.pack(side="right", padx=(10, 0))
-
-        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
-        self._cancel_button.pack(side="right")
-
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        dialog.make_modal(self, focus=self._entry)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        # Cancel is the outline recipe, OK the accent primary -- the pages' own
+        # button vocabulary, applied by the shared factories.
+        self._cancel_button = outline_button("Cancel", self._on_cancel)
+        self._ok_button = primary_button("OK", self._on_ok)
+        self._ok_button.setDefault(True)
+        buttons.addWidget(self._cancel_button)
+        buttons.addWidget(self._ok_button)
+        layout.addLayout(buttons)
 
     def _on_ok(self) -> None:
-        self.result = self._entry.get()
-        self.destroy()
+        self.result = self._entry.text()
+        self.accept()
 
     def _on_cancel(self) -> None:
+        self.reject()
+
+    def reject(self) -> None:
+        # Escape and the window close button both route here through QDialog, so
+        # every non-OK exit leaves result None.
         self.result = None
-        self.destroy()
+        super().reject()
