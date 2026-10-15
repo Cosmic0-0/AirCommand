@@ -1,86 +1,95 @@
-"""NetworksView, TargetPicker — the Discovery & Targets page's two tables. See
-docs/design/gui-structure.md 'Discovery & Targets tab' and
-docs/design/gui-redesign-gridwatch.md §5's "Discovery & Targets" row for the
-Grid Watch restyle this implements.
+"""NetworksView, TargetPicker: the Discovery and Targets page's two tables for
+the PySide6 port. See docs/design/gui-structure.md "Discovery & Targets tab",
+docs/design/gui-redesign-gridwatch.md section 5 ("Discovery & Targets"), and
+docs/design/gui-port/05-boundary-design.md "Tables" for the shape this
+implements.
 
-No table widget exists in CustomTkinter, so each row is built by hand -- one
-read-only CTkEntry per column (selectable/copyable, unlike CTkLabel -- see
-table.py's docstring) plus a trailing action button, laid out with
-.grid(row=..., column=...), tracked in a dict[BSSID, dict] keyed by bssid so
-_upsert/_remove can update or destroy a specific row's widgets in place.
-Column widths/alignment go through table.py's build_header()/add_row()/
-update_row() -- see that module's docstring for why a plain pack()+grid()
-header above a body frame can't just size its columns to fit its own content
-(ThingsToChange item 1).
-
-Each view wraps its header+body in a themed `Cell` ("Networks seen" /
-"Target allowlist" -- design spec §5). `self._body` is a plain
-ctk.CTkFrame, not a ctk.CTkScrollableFrame: per the design spec §6 item 3,
-neither table gets its own internal fixed-height scroll box any more -- the
-whole page (a ctk.CTkScrollableFrame one layer up, in app.py) scrolls as a
-single unit instead.
+Each table is one RowTableModel behind a CopyTableView, wrapped in a titled
+Cell ("Networks seen" / "Target allowlist"). The bssid-keyed row model, the
+upsert_row / remove_row handlers, every engine.targets call, and the two add
+dialogs' validation port as is from the CustomTkinter original; only the widget
+layer is new. The per-row action button (NetworksView's "Add as Target",
+TargetPicker's "Remove") sits in a trailing column placed with
+QTableView.setIndexWidget, the smaller choice than a custom delegate for these
+short tables.
 
 NetworksView is session-scoped (ADR-0010): it starts empty and shows only what
 the current Discovery session has heard, so it is never seeded from the
-database. clear() is how App's "New Session" button ends one session and
-begins the next.
+database. clear() is how App's "New Session" button ends one session and begins
+the next.
 """
 
 from __future__ import annotations
 
-import customtkinter as ctk
+from typing import Optional
+
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from aircommand.core import BSSID, MacAddress, Network, Target
 from aircommand.core.events import TargetAdded, TargetRemoved
-from aircommand.gui import dialog
 from aircommand.gui.cell import Cell
-from aircommand.gui.table import Column, add_row, build_header, update_row
-from aircommand.gui.theme import CORNER_RADIUS, PALETTE, ui_font
+from aircommand.gui.dialog import (
+    Dialog,
+    error_label,
+    field_label,
+    outline_button,
+    primary_button,
+    themed_entry,
+)
+from aircommand.gui.table import Column, CopyTableView, RowTableModel, apply_columns
 
 
-def _make_outline_button(master, text: str, command) -> ctk.CTkButton:
-    """Flat-bordered `.btn-outline` look (design spec §3: "Add as Target",
-    "Add manually", "Remove" all use this). Same recipe as
-    ManagementView._make_outline_button -- copied rather than imported so
-    this page's buttons don't depend on an unrelated page's module."""
-    return ctk.CTkButton(
-        master, text=text, command=command, fg_color="transparent", border_width=1,
-        border_color=PALETTE["border"], text_color=PALETTE["text"],
-        hover_color=PALETTE["panel"], corner_radius=CORNER_RADIUS,
-        font=ui_font(12, "bold"),
-    )  # hover_color=panel -> no CTk default-blue hover; see dialog.outline_button.
+# A full 17-character BSSID in Fira Code 11px plus the QTableView cell padding
+# needs more than the 130px the Tk layout used, or the last octet elides.
+_BSSID_WIDTH = 160
+# The per-row action button (class "btn"/"primary") has 7px vertical padding, so
+# the default QTableView row is too short and clips the glyphs. This row height
+# fits the whole button in both tables.
+_ROW_HEIGHT = 36
 
 
-class NetworksView(ctk.CTkFrame):
+class NetworksView(QWidget):
+    # Widths trimmed from the Tk values (except the widened BSSID) so all seven
+    # data columns plus the action button fit at the 1040px minimum window with
+    # no horizontal scroll. The action column stretches, so its slack goes there
+    # at the wider default window; its initial width is the button's own minimum.
     _COLUMNS = (
-        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70), Column("Band", 70),
-        Column("Encryption", 90), Column("Signal (dBm)", 90), Column("Last Seen", 90),
+        Column("SSID", 130), Column("BSSID", _BSSID_WIDTH), Column("Channel", 64), Column("Band", 68),
+        Column("Encryption", 80), Column("Signal (dBm)", 86), Column("Last Seen", 84),
     )
+    _ACTION_COLUMN = Column("", 110)   # trailing column holding the per-row "Add as Target" button
 
-    def __init__(self, master, app) -> None:
-        super().__init__(master, fg_color="transparent")
+    def __init__(self, app, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
         self._app = app
-        self._rows: dict[BSSID, dict] = {}   # bssid -> {"labels": [CTkEntry,...], "button": CTkButton}
+        # bssid -> {"values": tuple[str, ...], "button": QPushButton}. The model
+        # renders the rows; this mirror keeps the keyed logic the handlers need
+        # (is-this-new, the current cell values) and the per-row button handle.
+        self._rows: dict[BSSID, dict] = {}
         self._dialog: "_AddAsTargetDialog | None" = None
 
-        cell = Cell(self, "Networks seen")
-        cell.pack(fill="both", expand=True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._cell = Cell("Networks seen")
+        layout.addWidget(self._cell)
 
-        header = build_header(cell.body, self._COLUMNS)
-        header.pack(fill="x")
-
-        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
-        self._body.pack(fill="both", expand=True)
+        model_columns = (*self._COLUMNS, self._ACTION_COLUMN)
+        self._model = RowTableModel(model_columns)
+        self._view = CopyTableView()
+        self._view.setModel(self._model)
+        apply_columns(self._view, model_columns)
+        self._view.verticalHeader().setDefaultSectionSize(_ROW_HEIGHT)
+        self._cell.body_layout.addWidget(self._view)
 
     def upsert_row(self, event) -> None:
         self._upsert(event.network)
 
     def clear(self) -> None:
         for row in self._rows.values():
-            for label in row["labels"]:
-                label.destroy()
-            row["button"].destroy()
-        self._rows.clear()   # _upsert's row_index = len(self._rows) restarts at 0
+            if row["button"] is not None:
+                row["button"].deleteLater()
+        self._rows.clear()
+        self._model.clear()   # a fresh upsert then starts again at row 0
 
     def _upsert(self, network: Network) -> None:
         values = (
@@ -92,94 +101,100 @@ class NetworksView(ctk.CTkFrame):
             f"{network.last_signal_dbm} dBm",
             network.last_seen.strftime("%H:%M:%S"),
         )
-        existing = self._rows.get(network.bssid)
-        if existing is None:
-            row_index = len(self._rows)
-            labels = add_row(self._body, row_index, self._COLUMNS, values)
-            button = _make_outline_button(self._body, "Add as Target",
-                                           lambda n=network: self._open_add_target_dialog(n))
-            button.grid(row=row_index, column=len(values), padx=5, pady=2)
-            self._rows[network.bssid] = {"labels": labels, "button": button}
+        if network.bssid not in self._rows:
+            self._model.upsert(network.bssid, (*values, ""))
+            row = self._model.rowCount() - 1   # upsert appends a new key at the end
+            button = outline_button(
+                "Add as Target", lambda n=network: self._open_add_target_dialog(n)
+            )
+            self._view.setIndexWidget(self._model.index(row, len(self._COLUMNS)), button)
+            self._rows[network.bssid] = {"values": values, "button": button}
         else:
-            update_row(existing["labels"], self._COLUMNS, values)
+            self._model.upsert(network.bssid, (*values, ""))
+            self._rows[network.bssid]["values"] = values
 
     def _open_add_target_dialog(self, network: Network) -> None:
-        self._dialog = _AddAsTargetDialog(self, self._app, network)
+        self._dialog = _AddAsTargetDialog(self._app, network, self)
+        self._dialog.exec()
 
 
-class _AddAsTargetDialog(ctk.CTkToplevel):
+class _AddAsTargetDialog(Dialog):
     """Modal, pre-filled bssid/ssid/channel (read-only), asks only for a label.
-    Same modal convention as SudoPasswordDialog (grab_set(), no wait_window() --
-    nothing blocks on the result, it calls engine.targets.add(...) itself and
-    closes).
-    """
+    Add validates, calls engine.targets.add(...), and accepts; Cancel rejects."""
 
-    def __init__(self, master, app, network: Network) -> None:
-        super().__init__(master)
+    def __init__(self, app, network: Network, parent: Optional[QWidget] = None) -> None:
+        super().__init__("Add as Target", parent)
         self._app = app
         self._network = network
-        dialog.apply_chrome(self, "Add as Target", min_width=400, min_height=250)
 
-        dialog.field_label(self, f"SSID: {network.ssid or '(hidden)'}").pack(
-            padx=20, pady=(20, 0), anchor="w"
-        )
-        dialog.field_label(self, f"BSSID: {network.bssid}").pack(padx=20, pady=(0, 0), anchor="w")
-        dialog.field_label(self, f"Channel: {network.channel}").pack(padx=20, pady=(0, 10), anchor="w")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
 
-        dialog.field_label(self, "Label:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._label_entry = dialog.themed_entry(self)
-        self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._label_entry.bind("<Return>", lambda event: self._on_add())
+        layout.addWidget(field_label(f"SSID: {network.ssid or '(hidden)'}"))
+        layout.addWidget(field_label(f"BSSID: {network.bssid}"))
+        layout.addWidget(field_label(f"Channel: {network.channel}"))
 
-        self._error_label = dialog.error_label(self)
-        self._error_label.pack(padx=20, pady=(0, 10))
+        layout.addWidget(field_label("Label:"))
+        self._label_entry = themed_entry()
+        self._label_entry.returnPressed.connect(self._on_add)
+        layout.addWidget(self._label_entry)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.pack(padx=20, pady=(0, 20), fill="x")
+        self._error_label = error_label()
+        layout.addWidget(self._error_label)
 
-        self._add_button = dialog.primary_button(button_row, "Add", self._on_add)
-        self._add_button.pack(side="right", padx=(10, 0))
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self._cancel_button = outline_button("Cancel", self.reject)
+        self._add_button = primary_button("Add", self._on_add)
+        button_row.addWidget(self._cancel_button)
+        button_row.addWidget(self._add_button)
+        layout.addLayout(button_row)
 
-        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
-        self._cancel_button.pack(side="right")
-
-        dialog.make_modal(self, focus=self._label_entry)
+        self._label_entry.setFocus()
 
     def _on_add(self) -> None:
-        label = self._label_entry.get().strip()
+        label = self._label_entry.text().strip()
         if not label:
-            self._error_label.configure(text="Label can't be empty")
+            self._error_label.setText("Label can't be empty")
             return
         self._app.engine.targets.add(self._network.bssid, self._network.ssid, self._network.channel, label)
-        self.destroy()
-
-    def _on_cancel(self) -> None:
-        self.destroy()
+        self.accept()
 
 
-class TargetPicker(ctk.CTkFrame):
+class TargetPicker(QWidget):
     _COLUMNS = (
-        Column("SSID", 150), Column("BSSID", 130), Column("Channel", 70),
+        Column("SSID", 150), Column("BSSID", _BSSID_WIDTH), Column("Channel", 70),
         Column("Label", 140), Column("Date Added", 130),
     )
+    _ACTION_COLUMN = Column("", 120)   # trailing column holding the per-row "Remove" button
 
-    def __init__(self, master, app) -> None:
-        super().__init__(master, fg_color="transparent")
+    def __init__(self, app, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
         self._app = app
         self._rows: dict[BSSID, dict] = {}
         self._dialog: "_AddManuallyDialog | None" = None
 
-        cell = Cell(self, "Target allowlist")
-        cell.pack(fill="both", expand=True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._cell = Cell("Target allowlist")
+        layout.addWidget(self._cell)
 
-        header = build_header(cell.body, self._COLUMNS)
-        header.pack(fill="x")
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addStretch(1)
+        self._add_manually_button = outline_button("Add manually", self._open_add_manually_dialog)
+        header_layout.addWidget(self._add_manually_button)
+        self._cell.body_layout.addWidget(header)
 
-        add_manually_button = _make_outline_button(header, "Add manually", self._open_add_manually_dialog)
-        add_manually_button.grid(row=0, column=len(self._COLUMNS), padx=5)
-
-        self._body = ctk.CTkFrame(cell.body, fg_color="transparent")
-        self._body.pack(fill="both", expand=True)
+        model_columns = (*self._COLUMNS, self._ACTION_COLUMN)
+        self._model = RowTableModel(model_columns)
+        self._view = CopyTableView()
+        self._view.setModel(self._model)
+        apply_columns(self._view, model_columns)
+        self._view.verticalHeader().setDefaultSectionSize(_ROW_HEIGHT)
+        self._cell.body_layout.addWidget(self._view)
 
         for target in app.engine.targets.list():
             self._upsert(target)
@@ -198,106 +213,109 @@ class TargetPicker(ctk.CTkFrame):
             target.label,
             target.date_added.strftime("%Y-%m-%d %H:%M"),
         )
-        existing = self._rows.get(target.bssid)
-        if existing is None:
-            row_index = len(self._rows)
-            labels = add_row(self._body, row_index, self._COLUMNS, values)
-            button = _make_outline_button(self._body, "Remove",
-                                           lambda b=target.bssid: self._app.engine.targets.remove(b))
-            button.grid(row=row_index, column=len(values), padx=5, pady=2)
-            self._rows[target.bssid] = {"labels": labels, "button": button}
+        if target.bssid not in self._rows:
+            self._model.upsert(target.bssid, (*values, ""))
+            self._rows[target.bssid] = {"values": values, "button": None}
+            self._place_remove_button(target.bssid)
         else:
-            update_row(existing["labels"], self._COLUMNS, values)
+            self._model.upsert(target.bssid, (*values, ""))
+            self._rows[target.bssid]["values"] = values
+
+    def _place_remove_button(self, bssid: BSSID) -> None:
+        row = list(self._rows).index(bssid)
+        button = outline_button("Remove", lambda b=bssid: self._app.engine.targets.remove(b))
+        self._view.setIndexWidget(self._model.index(row, len(self._COLUMNS)), button)
+        self._rows[bssid]["button"] = button
 
     def _remove(self, bssid: BSSID) -> None:
-        existing = self._rows.pop(bssid, None)
-        if existing is None:
+        if bssid not in self._rows:
             return
-        for label in existing["labels"]:
-            label.destroy()
-        existing["button"].destroy()
-
-        # Re-grid every remaining row at sequential row indices so no blank gap
-        # is left where the removed row was. dict insertion order is preserved.
-        for row_index, row in enumerate(self._rows.values()):
-            for col, label in enumerate(row["labels"]):
-                label.grid(row=row_index, column=col, padx=5, pady=2, sticky="w")
-            row["button"].grid(row=row_index, column=len(row["labels"]), padx=5, pady=2)
+        # Removing the row shifts every later row up by one, so the trailing
+        # buttons must be rebuilt at the new indices. Drop them all, remove the
+        # row from the model, then re-place one per remaining row in order.
+        for row in self._rows.values():
+            if row["button"] is not None:
+                row["button"].deleteLater()
+                row["button"] = None
+        self._model.remove(bssid)
+        del self._rows[bssid]
+        for remaining in self._rows:
+            self._place_remove_button(remaining)
 
     def _open_add_manually_dialog(self) -> None:
-        self._dialog = _AddManuallyDialog(self, self._app)
+        self._dialog = _AddManuallyDialog(self._app, self)
+        self._dialog.exec()
 
 
-class _AddManuallyDialog(ctk.CTkToplevel):
-    """Modal, all four fields editable -- for a Target not currently visible in
-    NetworksView (e.g. temporarily out of range). Same modal convention as
-    SudoPasswordDialog (grab_set(), no wait_window()).
-    """
+class _AddManuallyDialog(Dialog):
+    """Modal, all four fields editable, for a Target not currently in
+    NetworksView (e.g. temporarily out of range). Add validates (MacAddress.parse,
+    non-empty SSID, int channel, non-empty label), calls engine.targets.add(...),
+    and accepts; Cancel rejects."""
 
-    def __init__(self, master, app) -> None:
-        super().__init__(master)
+    def __init__(self, app, parent: Optional[QWidget] = None) -> None:
+        super().__init__("Add Target manually", parent)
         self._app = app
-        dialog.apply_chrome(self, "Add Target manually", min_width=400, min_height=390)
 
-        dialog.field_label(self, "BSSID:").pack(padx=20, pady=(20, 0), anchor="w")
-        self._bssid_entry = dialog.themed_entry(self)
-        self._bssid_entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._bssid_entry.bind("<Return>", lambda event: self._on_add())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
 
-        dialog.field_label(self, "SSID:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._ssid_entry = dialog.themed_entry(self)
-        self._ssid_entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._ssid_entry.bind("<Return>", lambda event: self._on_add())
+        layout.addWidget(field_label("BSSID:"))
+        self._bssid_entry = themed_entry()
+        self._bssid_entry.returnPressed.connect(self._on_add)
+        layout.addWidget(self._bssid_entry)
 
-        dialog.field_label(self, "Channel:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._channel_entry = dialog.themed_entry(self)
-        self._channel_entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._channel_entry.bind("<Return>", lambda event: self._on_add())
+        layout.addWidget(field_label("SSID:"))
+        self._ssid_entry = themed_entry()
+        self._ssid_entry.returnPressed.connect(self._on_add)
+        layout.addWidget(self._ssid_entry)
 
-        dialog.field_label(self, "Label:").pack(padx=20, pady=(0, 0), anchor="w")
-        self._label_entry = dialog.themed_entry(self)
-        self._label_entry.pack(padx=20, pady=(0, 10), fill="x")
-        self._label_entry.bind("<Return>", lambda event: self._on_add())
+        layout.addWidget(field_label("Channel:"))
+        self._channel_entry = themed_entry()
+        self._channel_entry.returnPressed.connect(self._on_add)
+        layout.addWidget(self._channel_entry)
 
-        self._error_label = dialog.error_label(self)
-        self._error_label.pack(padx=20, pady=(0, 10))
+        layout.addWidget(field_label("Label:"))
+        self._label_entry = themed_entry()
+        self._label_entry.returnPressed.connect(self._on_add)
+        layout.addWidget(self._label_entry)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.pack(padx=20, pady=(0, 20), fill="x")
+        self._error_label = error_label()
+        layout.addWidget(self._error_label)
 
-        self._add_button = dialog.primary_button(button_row, "Add", self._on_add)
-        self._add_button.pack(side="right", padx=(10, 0))
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self._cancel_button = outline_button("Cancel", self.reject)
+        self._add_button = primary_button("Add", self._on_add)
+        button_row.addWidget(self._cancel_button)
+        button_row.addWidget(self._add_button)
+        layout.addLayout(button_row)
 
-        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
-        self._cancel_button.pack(side="right")
-
-        dialog.make_modal(self, focus=self._bssid_entry)
+        self._bssid_entry.setFocus()
 
     def _on_add(self) -> None:
         try:
-            bssid = MacAddress.parse(self._bssid_entry.get().strip())
+            bssid = MacAddress.parse(self._bssid_entry.text().strip())
         except ValueError:
-            self._error_label.configure(text="Invalid BSSID")
+            self._error_label.setText("Invalid BSSID")
             return
 
-        ssid = self._ssid_entry.get().strip()
+        ssid = self._ssid_entry.text().strip()
         if not ssid:
-            self._error_label.configure(text="SSID can't be empty")
+            self._error_label.setText("SSID can't be empty")
             return
 
         try:
-            channel = int(self._channel_entry.get().strip())
+            channel = int(self._channel_entry.text().strip())
         except ValueError:
-            self._error_label.configure(text="Invalid channel")
+            self._error_label.setText("Invalid channel")
             return
 
-        label = self._label_entry.get().strip()
+        label = self._label_entry.text().strip()
         if not label:
-            self._error_label.configure(text="Label can't be empty")
+            self._error_label.setText("Label can't be empty")
             return
 
         self._app.engine.targets.add(bssid, ssid, channel, label)
-        self.destroy()
-
-    def _on_cancel(self) -> None:
-        self.destroy()
+        self.accept()
