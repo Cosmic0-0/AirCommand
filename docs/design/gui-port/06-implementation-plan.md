@@ -341,7 +341,7 @@ Rollback is abandoning the `qt-port` branch. Core and the database do not change
 - Spike code. Commit `spikes/gui-port/spike.py` and `checks.py` (not `__pycache__`), or leave them out. Recommendation: commit the two files. 05 and ADR-0021 cite their line numbers as evidence, F1 copies the `checks.py` pattern, and the Kali VM needs them. This reverses 04-spike-results.md:9-10. If you keep them out, the citations dangle for anyone without your working tree.
 - Font sourcing. Download Hanken Grotesk and Fira Code and their license files before F2 and place them under `aircommand/gui/fonts/`.
 - Merge style for `qt-port`. Recommendation: `--no-ff` merge commit.
-- Logs-page selector live or non-live. Recommendation: non-live, as today. Two lines to change later.
+- Logs-page selector live or non-live. Resolved: live. `App._build_logs_page` wires `TargetAdded` / `TargetRemoved` to the selector's `upsert_row` / `remove_row`.
 - The core-layer hardware items need the real adapter and hands-on time before the first slice, per the Baseline-first decision.
 
 ## Sources

@@ -1,5 +1,14 @@
 # Final touches — what's left before v1 is actually finished
 
+**GUI toolkit note (2026-10-16):** the GUI described below was the original
+CustomTkinter app. The shipped GUI is now PySide6 Qt Widgets, ported per [the
+GUI port docs](design/gui-port/06-implementation-plan.md). Where a row below
+names the Tk app or a now-removed function (item 0's `.mainloop()` launcher, the
+"real Tk window" test-harness references in sections 2 to 4), read it as the
+pre-port record. The port resets the GUI-layer verification items in sections 2
+to 4: each must be re-confirmed through the real Qt GUI on real hardware, as the
+GUI port plan's "Real-hardware re-verification plan" sets out.
+
 Phase 1 (core engine), Phase 2 (real subprocess/hardware code), and Phase 3
 (GUI) are all complete: 201 tests pass (194 headless via
 `FakeProcRunner` as of Phase 3's own completion, plus 7 added since while

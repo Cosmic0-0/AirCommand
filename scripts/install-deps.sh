@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGES="aircrack-ng hashcat nmap hcxtools iw python3-tk python3-venv python3-pip"
+PACKAGES="aircrack-ng hashcat nmap hcxtools iw libxcb-cursor0 python3-venv python3-pip"
 
 if [ "$(uname -s)" != "Linux" ]; then
   echo "AirCommand runs on Linux only. Aborting." >&2

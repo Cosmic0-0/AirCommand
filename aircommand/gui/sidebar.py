@@ -1,36 +1,55 @@
-"""Sidebar — collapsible icon+label nav shell for the Gridwatch x Wireframe A
-redesign. See docs/design/gui-redesign-gridwatch.md §3 ("Sidebar specifics")
-and §4. Five destinations: four main items (Management, Discovery & Targets,
-Capture & Attack, Cracking) in the main list, Logs pinned separately in a
-footer slot -- visually set apart but functionally identical (same click
-behavior, same nav API, same row widget shape).
+"""Sidebar: the collapsible left nav rail for the PySide6 port.
 
-Collapse is an instant width toggle, not the design spec's .14s eased
-transition -- CustomTkinter has no built-in animated resize, and hand-rolling
-one via repeated .after() calls was judged not worth the complexity for a
-sidebar width change; flagged here as a known, deliberate simplification
-rather than a silently dropped requirement.
+See docs/design/gui-redesign-gridwatch.md section 3 ("Sidebar specifics") and
+docs/design/gui-port/05-boundary-design.md "View mapping" and "Motion": a left
+QFrame of nav buttons, 196px expanded and 54px collapsed, the collapse animated
+with one QPropertyAnimation over a width property (140ms, OutCubic,
+interruptible), exactly as the spike did (spikes/gui-port/spike.py). The
+instant toggle the CustomTkinter sidebar documented as a deliberate
+simplification is now a real animation, which restores the Gridwatch spec.
 
-Icons are drawn with a plain tkinter.Canvas (a handful of lines/ovals per
-icon) rather than true SVG -- CustomTkinter has no SVG renderer, and adding
-one (cairosvg/Pillow) would be a new dependency for a cosmetic detail. These
-are deliberately close approximations of the mockup's icon shapes, not a
-pixel-identical reproduction -- see theme.py's own docstring for the same
-"best-effort, not guaranteed" framing applied to fonts.
+on_navigate(key) reports a click; set_active(key) paints the active row without
+echoing a click back, so App drives the rail from its own page switch.
+
+Each nav row is a QPushButton carrying the "nav" class the theme styles, with an
+"active" property the QSS selects on. Its icon reproduces the Tk rail's row: a
+6px dot then an 18px stroke icon, both accent on the active row and muted
+otherwise. The icon shapes are the Tk canvas approximations of the mockup's
+SVGs, redrawn with QPainter into a pixmap. Below the halfway width the label,
+the dot, and the wordmark hide and the icon stays, so the collapsed rail still
+tells the pages apart.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
-import customtkinter as ctk
+from PySide6.QtCore import Property, QEasingCurve, QPointF, QPropertyAnimation, QRectF, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from aircommand.gui.theme import PALETTE, ui_font
+from aircommand.gui import theme
+from aircommand.gui.theme import PALETTE, wordmark_font
 
 _WIDTH_EXPANDED = 196
 _WIDTH_COLLAPSED = 54
+# One module constant for the collapse duration, next to the width constants.
+# Set it to 0 to turn the motion off (01-criteria "Motion fidelity bar"): the
+# animation then jumps straight to the end width with no eased frames.
+COLLAPSE_MS = 140
+_HALFWAY = (_WIDTH_EXPANDED + _WIDTH_COLLAPSED) / 2
+
+_ICON = 18      # the icon square, as the Tk icon canvas
+_DOT = 6        # the active-indicator dot, as the Tk dot canvas
+_DOT_GAP = 6    # space between dot and icon, the Tk dot's right padding
+
+
+def _button_text(label: str) -> str:
+    """A QPushButton reads "&" as a mnemonic marker: it hides the ampersand,
+    underlines the next character, and adds an Alt shortcut. Doubling it shows
+    a literal "&", as the Tk rail did."""
+    return label.replace("&", "&&")
 
 
 @dataclass(frozen=True)
@@ -50,156 +69,170 @@ _FOOTER_ITEM = NavItem("logs", "Logs", "logs")
 ALL_ITEMS = _MAIN_ITEMS + (_FOOTER_ITEM,)   # the full key set App's page map must cover
 
 
-def _draw_icon(canvas: tk.Canvas, kind: str, color: str) -> None:
-    """A 18x18 canvas, approximating the mockup's 14x14 stroke SVGs with a
-    couple of lines/ovals -- see module docstring."""
-    line = {"fill": color, "width": 1.4}
-    stroke = {"fill": "", "outline": color, "width": 1.4}
-    if kind == "management":   # three vertical sliders with a dot each
+def _draw_icon(painter: QPainter, kind: str, color: QColor) -> None:
+    """The Tk rail's 18x18 icon shapes, in the same canvas coordinates. Oval
+    and rectangle arguments are (x1, y1, x2, y2) bounding boxes, as Tk takes them."""
+    pen = QPen(color)
+    pen.setWidthF(1.4)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def line(x1: float, y1: float, x2: float, y2: float) -> None:
+        painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    def oval(x1: float, y1: float, x2: float, y2: float) -> None:
+        painter.drawEllipse(QRectF(x1, y1, x2 - x1, y2 - y1))
+
+    if kind == "management":   # three vertical sliders with a knob each
         for x in (5, 9, 13):
-            canvas.create_line(x, 2, x, 16, **line)
-        canvas.create_oval(3, 6, 7, 10, **stroke)
-        canvas.create_oval(7, 10, 11, 14, **stroke)
-        canvas.create_oval(11, 4, 15, 8, **stroke)
-    elif kind == "discovery":   # concentric circles -- a beacon/target glyph
-        canvas.create_oval(2, 2, 16, 16, **stroke)
-        canvas.create_oval(6, 6, 12, 12, **stroke)
-        canvas.create_oval(8, 8, 10, 10, fill=color, outline="")
-    elif kind == "capture":   # radiating waves around a center dot
-        canvas.create_oval(6, 6, 12, 12, **stroke)
-        canvas.create_line(9, 1, 9, 5, **line)
-        canvas.create_line(9, 13, 9, 17, **line)
-        canvas.create_line(1, 9, 5, 9, **line)
-        canvas.create_line(13, 9, 17, 9, **line)
+            line(x, 2, x, 16)
+        oval(3, 6, 7, 10)
+        oval(7, 10, 11, 14)
+        oval(11, 4, 15, 8)
+    elif kind == "discovery":   # concentric circles, a beacon/target glyph
+        oval(2, 2, 16, 16)
+        oval(6, 6, 12, 12)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        oval(8, 8, 10, 10)
+    elif kind == "capture":   # radiating marks around a center ring
+        oval(6, 6, 12, 12)
+        line(9, 1, 9, 5)
+        line(9, 13, 9, 17)
+        line(1, 9, 5, 9)
+        line(13, 9, 17, 9)
     elif kind == "cracking":   # a key
-        canvas.create_oval(1, 7, 9, 15, **stroke)
-        canvas.create_line(8, 11, 17, 11, **line)
-        canvas.create_line(13, 11, 13, 15, **line)
-        canvas.create_line(16, 11, 16, 15, **line)
+        oval(1, 7, 9, 15)
+        line(8, 11, 17, 11)
+        line(13, 11, 13, 15)
+        line(16, 11, 16, 15)
     elif kind == "logs":   # a document with three lines of text
-        canvas.create_rectangle(3, 1, 15, 17, **stroke)
+        painter.drawRect(QRectF(3, 1, 12, 16))
+        pen.setWidthF(1.2)
+        painter.setPen(pen)
         for y in (6, 9, 12):
-            canvas.create_line(5.5, y, 12.5, y, fill=color, width=1.2)
+            line(5.5, y, 12.5, y)
     else:
         raise ValueError(f"unknown icon kind: {kind!r}")
 
 
-class Sidebar(ctk.CTkFrame):
-    """The design spec's left nav rail. `on_navigate(key)` is called with the
-    clicked item's key whenever the operator picks a destination (including
-    re-clicking the already-active one) -- the caller (App) owns actually
-    switching page content; this class only renders the rail and reports
-    clicks. `set_active(key)` updates which row shows the accent dot without
-    triggering a further on_navigate call, so App can drive the rail's
-    display from its own page-switch logic without an echo."""
+def _render_nav_icon(kind: str, color: str, with_dot: bool) -> QPixmap:
+    """One nav row's icon: the dot then the icon when expanded, the icon alone
+    when collapsed."""
+    offset = _DOT + _DOT_GAP if with_dot else 0
+    pixmap = QPixmap(offset + _ICON, _ICON)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    qcolor = QColor(color)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if with_dot:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(qcolor)
+        painter.drawEllipse(QRectF(0, (_ICON - _DOT) / 2, _DOT, _DOT))
+    painter.translate(offset, 0)
+    _draw_icon(painter, kind, qcolor)
+    painter.end()
+    return pixmap
 
-    def __init__(self, master, on_navigate: Callable[[str], None], **kwargs) -> None:
-        kwargs.setdefault("fg_color", PALETTE["rail"])
-        kwargs.setdefault("corner_radius", 0)
-        kwargs.setdefault("width", _WIDTH_EXPANDED)
-        super().__init__(master, **kwargs)
-        self.pack_propagate(False)   # hold an explicit width regardless of content
+
+class Sidebar(QFrame):
+    """The left nav rail. on_navigate(key) fires on every click, including a
+    re-click of the active row; App owns switching the page content, this
+    class only renders the rail and reports clicks."""
+
+    def __init__(self, on_navigate: Callable[[str], None], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "sidebar")
         self._on_navigate = on_navigate
         self._collapsed = False
+        self._width = _WIDTH_EXPANDED
+        self._labels_shown = True
         self._active_key = _MAIN_ITEMS[0].key
-        self._rows: dict[str, dict] = {}
+        self._items: dict[str, NavItem] = {}
+        self._buttons: dict[str, QPushButton] = {}
+        self.setFixedWidth(_WIDTH_EXPANDED)
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(side="top", fill="x", padx=10, pady=10)
-        self._header = header
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(1)
 
-        self._logo_row = ctk.CTkFrame(header, fg_color="transparent")
-        self._logo_row.pack(side="left")
-        logo_canvas = tk.Canvas(self._logo_row, width=18, height=18, bg=PALETTE["rail"], highlightthickness=0)
-        logo_canvas.pack(side="left")
-        _draw_icon(logo_canvas, "discovery", PALETTE["accent"])   # a stand-in wifi-ish mark
-        self._wordmark = ctk.CTkLabel(
-            self._logo_row, text="AIRCOMMAND", font=ui_font(12, "bold"), text_color=PALETTE["text"],
-        )
-        self._wordmark.pack(side="left", padx=(8, 0))
+        header = QHBoxLayout()
+        self._wordmark = QLabel("AIRCOMMAND")
+        self._wordmark.setProperty("class", "logo")
+        self._wordmark.setFont(wordmark_font())
+        self._collapse_button = QPushButton("‹")   # a left chevron; swaps glyph on collapse
+        self._collapse_button.setProperty("class", "collapse")
+        self._collapse_button.setFixedSize(21, 21)
+        self._collapse_button.clicked.connect(self.toggle_collapse)
+        header.addWidget(self._wordmark)
+        header.addStretch(1)
+        header.addWidget(self._collapse_button)
+        layout.addLayout(header)
 
-        self._collapse_canvas = tk.Canvas(header, width=16, height=16, bg=PALETTE["rail"], highlightthickness=0, cursor="hand2")
-        self._collapse_canvas.pack(side="right")
-        self._collapse_canvas.bind("<Button-1>", lambda _event: self.toggle_collapse())
-        self._draw_chevron()
-
-        nav_list = ctk.CTkFrame(self, fg_color="transparent")
-        nav_list.pack(side="top", fill="x", padx=6)
         for item in _MAIN_ITEMS:
-            self._build_row(nav_list, item)
+            layout.addWidget(self._make_button(item))
+        layout.addStretch(1)
+        layout.addWidget(self._make_button(_FOOTER_ITEM))
 
-        footer = ctk.CTkFrame(self, fg_color="transparent", border_width=1, border_color=PALETTE["border"])
-        footer.pack(side="bottom", fill="x", padx=6, pady=6)
-        self._build_row(footer, _FOOTER_ITEM)
+        # One width property animated per collapse, as the spike measured.
+        self._anim = QPropertyAnimation(self, b"barWidth")
+        self._anim.setDuration(COLLAPSE_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self.set_active(self._active_key)
 
-    def _build_row(self, parent, item: NavItem) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=2, cursor="hand2")
-        row.pack(side="top", fill="x", pady=1)
-
-        dot_canvas = tk.Canvas(row, width=6, height=6, bg=PALETTE["rail"], highlightthickness=0)
-        dot_canvas.pack(side="left", padx=(9, 6), pady=8)
-        dot = dot_canvas.create_oval(0, 0, 6, 6, fill=PALETTE["muted"], outline="")
-
-        icon_canvas = tk.Canvas(row, width=18, height=18, bg=PALETTE["rail"], highlightthickness=0)
-        icon_canvas.pack(side="left", pady=5)
-        _draw_icon(icon_canvas, item.icon, PALETTE["muted"])
-
-        label = ctk.CTkLabel(row, text=item.label, font=ui_font(12), text_color=PALETTE["muted"], anchor="w")
-        label.pack(side="left", padx=(6, 0), pady=8, fill="x", expand=True)
-
-        for widget in (row, dot_canvas, icon_canvas, label):
-            widget.bind("<Button-1>", lambda _event, key=item.key: self._on_navigate(key))
-            widget.bind("<Enter>", lambda _event, r=row, k=item.key: self._on_hover(r, k, True))
-            widget.bind("<Leave>", lambda _event, r=row, k=item.key: self._on_hover(r, k, False))
-
-        self._rows[item.key] = {
-            "row": row, "dot_canvas": dot_canvas, "dot": dot,
-            "icon_canvas": icon_canvas, "icon_kind": item.icon, "label": label,
-        }
-
-    def _on_hover(self, row, key: str, entering: bool) -> None:
-        if key == self._active_key:
-            return   # active row keeps its own background regardless of hover
-        row.configure(fg_color=PALETTE["panel"] if entering else "transparent")
+    def _make_button(self, item: NavItem) -> QPushButton:
+        button = QPushButton(_button_text(item.label))
+        button.setProperty("class", "nav")
+        button.setProperty("active", "false")
+        button.clicked.connect(lambda _checked=False, key=item.key: self._on_navigate(key))
+        self._items[item.key] = item
+        self._buttons[item.key] = button
+        return button
 
     def set_active(self, key: str) -> None:
-        """Updates which row shows the accent dot/background -- does NOT call
-        on_navigate (App drives this from its own already-decided page
-        switch, not the other way around)."""
-        if key not in self._rows:
+        if key not in self._buttons:
             raise ValueError(f"unknown nav key: {key!r}")
         self._active_key = key
-        for row_key, parts in self._rows.items():
-            active = row_key == key
-            color = PALETTE["accent"] if active else PALETTE["muted"]
-            parts["row"].configure(fg_color=PALETTE["panel"] if active else "transparent")
-            parts["dot_canvas"].itemconfigure(parts["dot"], fill=color)
-            parts["label"].configure(text_color=PALETTE["text"] if active else PALETTE["muted"])
-            parts["icon_canvas"].delete("all")
-            _draw_icon(parts["icon_canvas"], parts["icon_kind"], color if active else PALETTE["muted"])
+        for row_key, button in self._buttons.items():
+            button.setProperty("active", "true" if row_key == key else "false")
+            theme.repolish(button)   # Qt does not restyle on a property change on its own
+        self._apply_icons()
+
+    def _apply_icons(self) -> None:
+        """Redraw every row's icon for the current active key and width: accent
+        on the active row, muted elsewhere, with the dot only while labels show."""
+        for key, button in self._buttons.items():
+            color = PALETTE["accent"] if key == self._active_key else PALETTE["muted"]
+            pixmap = _render_nav_icon(self._items[key].icon, color, with_dot=self._labels_shown)
+            button.setIcon(QIcon(pixmap))
+            button.setIconSize(pixmap.size())
 
     def toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
-        self.configure(width=_WIDTH_COLLAPSED if self._collapsed else _WIDTH_EXPANDED)
-        self._wordmark.pack_forget() if self._collapsed else self._wordmark.pack(side="left", padx=(8, 0))
-        self._draw_chevron()
-        for parts in self._rows.values():
-            if self._collapsed:
-                parts["dot_canvas"].pack_forget()
-                parts["label"].pack_forget()
-            else:
-                # Re-insert dot/label in their original left-to-right order --
-                # icon_canvas is already packed, so these go back after it.
-                parts["dot_canvas"].pack(side="left", padx=(9, 6), pady=8, before=parts["icon_canvas"])
-                parts["label"].pack(side="left", padx=(6, 0), pady=8, fill="x", expand=True)
+        self._collapse_button.setText("›" if self._collapsed else "‹")
+        # Retarget from the current width, so a second click mid-flight reverses
+        # smoothly instead of restarting (interruptible, as the spike did).
+        self._anim.stop()
+        self._anim.setStartValue(self._width)
+        self._anim.setEndValue(_WIDTH_COLLAPSED if self._collapsed else _WIDTH_EXPANDED)
+        self._anim.start()
 
-    def _draw_chevron(self) -> None:
-        self._collapse_canvas.delete("all")
-        # Points left when expanded (click to collapse), right when collapsed
-        # (click to expand) -- stands in for the mockup's 180°-rotating chevron.
-        if self._collapsed:
-            self._collapse_canvas.create_line(6, 3, 11, 8, 6, 13, fill=PALETTE["muted"], width=1.4)
-        else:
-            self._collapse_canvas.create_line(11, 3, 6, 8, 11, 13, fill=PALETTE["muted"], width=1.4)
+    def _get_bar_width(self) -> int:
+        return self._width
+
+    def _set_bar_width(self, width: int) -> None:
+        self._width = width
+        self.setFixedWidth(width)
+        # Labels, dots, and the wordmark switch at the halfway width and do not
+        # animate (spike.py). Icons stay at every width.
+        show = width > _HALFWAY
+        if show == self._labels_shown:
+            return
+        self._labels_shown = show
+        self._wordmark.setVisible(show)
+        for key, button in self._buttons.items():
+            button.setText(_button_text(self._items[key].label) if show else "")
+        self._apply_icons()
+
+    barWidth = Property(int, _get_bar_width, _set_bar_width)
