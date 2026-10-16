@@ -1,5 +1,7 @@
 # GUI internal structure
 
+**Superseded for the GUI toolkit by the PySide6 Qt Widgets port ([the GUI port docs](gui-port/06-implementation-plan.md), 2026-10-16).** This document describes the original CustomTkinter design. The shipped GUI is now PySide6 Qt Widgets, so its `ctk.CTk` shell and widget references no longer match the code. What stays authoritative is each view's `Engine` method calls, `GuiEventPump` subscriptions, seed data, and gating or state-machine logic, apart from the one drift [`02-reproduction-inventory.md`](gui-port/02-reproduction-inventory.md) records.
+
 **Superseded for shell/layout by `docs/design/gui-redesign-gridwatch.md`
 (2026-10-09).** The Gridwatch × Wireframe A redesign replaced the
 `ctk.CTkTabview` + four-tab shell described below with a collapsible sidebar

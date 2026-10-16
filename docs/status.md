@@ -8,7 +8,7 @@ the old `docs/roadmap.md` build journal and does not retell its phases.
 
 The GUI has five pages (`aircommand/gui/app.py`): Management, Discovery &
 Targets, Capture & Attack, Cracking, and Logs. Each is a thin
-`CustomTkinter` view over the core engine; see
+`PySide6` Qt Widgets view over the core engine; see
 [`docs/design/core-gui-boundary.md`](design/core-gui-boundary.md) for the
 boundary and [`docs/design/gui-structure.md`](design/gui-structure.md) and
 [`docs/design/gui-redesign-gridwatch.md`](design/gui-redesign-gridwatch.md)
@@ -20,7 +20,7 @@ reconciliation, SQLite persistence, sudo privilege elevation, and radio
 (adapter/monitor-mode) control. It is GUI-agnostic; the GUI calls into it
 and adds no logic of its own.
 
-As of 2026-10-12, `pytest` passes 469 tests, all against `FakeProcRunner`
+As of 2026-10-16, `pytest` passes 508 tests, all against `FakeProcRunner`
 (no real subprocess, root, or hardware).
 
 ## Verified on real hardware vs. only in code
