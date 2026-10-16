@@ -11,12 +11,14 @@ instead of appended text), and docs/design/gui-port/02-reproduction-inventory.md
 the banner, the current-target append filter, and the FAILED/succeeded split
 port verbatim; only the widget layer is new.
 
-The embedded TargetSelector(include_all_option=True) stays non-live: it is
-seeded once and this view never subscribes it to TargetAdded or TargetRemoved
-(05 "Open decisions", reproducing today's behavior). The global
-`pump.on(DeauthFired, audit_log_view.append)` registration (every firing, across
-every job, per ADR-0001's "no exceptions") is wired in App._build_logs_page, not
-here; this module only provides the `append` method to register. That global
+The embedded TargetSelector(include_all_option=True) is kept live: a Target
+added or removed mid-session now appears in or drops out of the filter dropdown.
+This view still never subscribes the selector itself; the TargetAdded /
+TargetRemoved wiring onto its upsert_row / remove_row lives in
+App._build_logs_page, alongside the `pump.on(DeauthFired, audit_log_view.append)`
+registration (every firing, across every job, per ADR-0001's "no exceptions"),
+because this module stays agnostic of the pump and only exposes `target_selector`
+and the `append` method for the shell to wire. That global
 registration coexists with CapturePanel's own per-Start DeauthFired burst-counter
 registration (capture_view.py); they are two independent handlers, each matched
 to its own purpose, and both firing per event is correct.

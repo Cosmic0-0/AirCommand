@@ -502,8 +502,10 @@ class App(QMainWindow):
         # job filter. This is a separate handler from CapturePanel's own
         # per-Start DeauthFired burst-counter registration; both firing per event
         # is correct (02 AuditLogView and CapturePanel rows). The embedded
-        # TargetSelector stays non-live, so no TargetAdded/TargetRemoved wiring
-        # here (05 "Open decisions").
+        # TargetSelector is now kept live too: its TargetAdded/TargetRemoved
+        # wiring sits here, beside the DeauthFired one, since AuditLogView stays
+        # agnostic of the pump (unlike TargetActionsView, which wires its own
+        # selector).
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -522,6 +524,8 @@ class App(QMainWindow):
         self._stack.addWidget(page)
 
         self.pump.on(DeauthFired, self.audit_log_view.append)
+        self.pump.on(TargetAdded, self.audit_log_view.target_selector.upsert_row)
+        self.pump.on(TargetRemoved, self.audit_log_view.target_selector.remove_row)
 
     # -- Shutdown --------------------------------------------------------------
 
