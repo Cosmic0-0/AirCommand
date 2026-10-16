@@ -1,17 +1,18 @@
-"""EnumeratePanel against a real ctk.CTk(), a real Engine + FakeProcRunner, a
-real GuiEventPump (driven by hand via pump._tick()), and a minimal fake status
-bar. NMAP_XML and the threading.excepthook-swap technique are reused verbatim
-from tests/test_enumerate_acceptance.py -- see that file's own module
-docstring for why each is shaped the way it is.
+"""EnumeratePanel for the PySide6 port: a real view under qtbot against a real
+Engine + FakeProcRunner and a real GuiEventPump, with a minimal fake status bar.
+Queued events reach the panel over the pump's signal (awaited with
+handle.wait_for_test() then qtbot.waitUntil). NMAP_XML and the
+threading.excepthook swap are reused from tests/test_enumerate_acceptance.py;
+see that file's docstring for why each is shaped the way it is.
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from datetime import timedelta
 
-import customtkinter as ctk
+from PySide6.QtCore import QObject
+from PySide6.QtGui import QFont, QFontMetrics
 
 from aircommand.core.domain import MacAddress
 from aircommand.core.engine import Engine
@@ -19,19 +20,13 @@ from aircommand.core.events import NmapScanCompleted
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.enumerate_view import EnumeratePanel
 from aircommand.gui.event_pump import GuiEventPump
-from aircommand.gui.theme import PALETTE
+from aircommand.gui.theme import PALETTE, register_fonts
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
-# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use --
-# see test_enumerate_acceptance.py's identical constant/comment. Only needed
-# for the AdapterBusy scenario (Discovery needs monitor mode); the successful-
-# scan and EnumerationFailed scenarios use AdapterMode.MANAGED, which never
-# touches airmon-ng if the adapter was never put into monitor mode.
+# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
-# Copied verbatim from tests/test_enumerate_acceptance.py -- see its own
-# module docstring's "Fixture note" for why this is a single scripted element.
 NMAP_XML = """<?xml version="1.0"?>
 <nmaprun>
 <host>
@@ -56,11 +51,6 @@ NMAP_XML = """<?xml version="1.0"?>
 """
 
 
-class _FakeRoot:
-    def after(self, ms, callback):
-        pass
-
-
 class _FakeStatusBar:
     def __init__(self):
         self.errors: list[str] = []
@@ -72,40 +62,27 @@ class _FakeStatusBar:
 class _FakeApp:
     def __init__(self, engine: Engine):
         self.engine = engine
-        self.pump = GuiEventPump(engine, _FakeRoot())
+        self._pump_parent = QObject()   # keeps the pump alive for the test's lifetime
+        self.pump = GuiEventPump(engine, self._pump_parent)
         self.status_bar = _FakeStatusBar()
 
 
-def _tick_until(pump: GuiEventPump, predicate, timeout: float = 2.0) -> None:
-    """Drives pump._tick() while polling -- _FakeRoot.after() is a no-op, so
-    nothing else ever dispatches queued events to handlers. A bare sleep-and-
-    recheck loop with no tick() call can never observe a state change that
-    only a tick can produce (e.g. active_handle flipping to None once
-    NmapScanCompleted/EnumerationFailed is dispatched) -- it would just burn
-    its full timeout doing nothing, same bug found and fixed the same way in
-    tests/test_capture_view.py."""
-    deadline = time.monotonic() + timeout
-    while not predicate() and time.monotonic() < deadline:
-        pump._tick()
-        time.sleep(0.01)
+def _assert_blocked(panel: EnumeratePanel, hint: str) -> None:
+    assert not panel._start_button.isEnabled()
+    assert panel._hint_label.text() == hint
+    assert PALETTE["warn"] in panel._hint_label.styleSheet()
 
 
-def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
-    # "lo" always carries a real 127.0.0.1/8 address -- see
-    # test_enumerate_acceptance.py's own get_interface_subnet test and module
-    # docstring for why this is the right way to get a deterministic real
-    # subnet through Engine without needing wifi hardware.
-    # "iw": [...] -- RadioController.reserve(MANAGED, ...) runs a real-mode
-    # sync check once (ADR-0016; a "Connected to..." line has no "type" line
-    # for it to find, so it's a harmless no-op there, same as every other
-    # RadioController call site not specifically exercising that check).
-    # Enumerator._verify_adapter_on_target (ADR-0019) shares this SAME "iw"
-    # script key for its own, different "iw dev <if> link" call -- it needs
-    # this exact line to find a match against the adapter actually used here
-    # ("lo", not "wlan0" -- Engine is constructed with adapter="lo" below,
-    # unlike test_enumerate_acceptance.py's _make_enumerator, which always
-    # hardcodes "wlan0") and BSSID_1, or this successful-scan scenario would
-    # be wrongly refused.
+def _assert_startable(panel: EnumeratePanel) -> None:
+    assert panel._start_button.isEnabled()
+    assert panel._hint_label.text() == EnumeratePanel._HINT_TEXT
+    assert PALETTE["muted"] in panel._hint_label.styleSheet()
+
+
+def test_successful_scan_populates_results_and_reenables_start_button(qtbot, tmp_path):
+    # "lo" always carries 127.0.0.1/8, a deterministic real subnet. The "iw"
+    # script serves both reserve(MANAGED)'s sync check and
+    # Enumerator._verify_adapter_on_target's "iw dev <if> link" (ADR-0019).
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="lo",
         proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on lo)"]}),
@@ -115,39 +92,27 @@ def test_successful_scan_populates_results_and_reenables_start_button(tmp_path):
     completed = []
     engine.subscribe(completed.append, NmapScanCompleted)
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
+    panel = EnumeratePanel(_FakeApp(engine))
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_clicked()
-        handle = panel.active_handle
-        assert handle is not None
+    panel.on_start_clicked()
+    handle = panel.active_handle
+    assert handle is not None
 
-        handle.wait_for_test(timeout=2.0)
-        _tick_until(fake_app.pump, lambda: panel.active_handle is None, timeout=2.0)
+    handle.wait_for_test(timeout=2.0)
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
 
-        assert len(completed) == 1
-        assert len(completed[0].hosts) == 2
+    assert len(completed) == 1
+    assert len(completed[0].hosts) == 2
 
-        # One read-only CTkEntry per (host, column) -- see EnumeratePanel._populate_results.
-        assert len(panel._results_body.winfo_children()) == 2 * len(EnumeratePanel._COLUMNS)
-        assert panel._status_label.cget("text") == "Found 2 host(s)"
-        assert panel.active_handle is None
-        assert panel._start_button.cget("state") == "normal"
-    finally:
-        root.destroy()
+    assert panel._model.rowCount() == 2
+    assert panel._status_label.text() == "Found 2 host(s)"
+    assert panel.active_handle is None
+    assert panel._start_button.isEnabled()
 
 
-def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(tmp_path):
-    # Discovery's _drive loop is a plain wall-clock loop now, driven by
-    # ProcHandle.poll() for liveness, not handle.lines() content -- see
-    # test_capture_acceptance.py's module docstring for the full real-hardware
-    # finding. running_polls below (plus a tiny drive_tick_interval) keeps
-    # Discovery's thread genuinely still holding the RF reservation by the
-    # time the very next line below runs -- same idiom as that file's own
-    # AdapterBusy test.
+def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(qtbot, tmp_path):
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
         proc=FakeProcRunner(
@@ -157,95 +122,60 @@ def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(tmp_path)
         drive_tick_interval=timedelta(seconds=0.001),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
-    engine.discovery.start()  # reserves the adapter synchronously -- same
-    # recipe as test_enumerate_acceptance.py's own AdapterBusy test.
+    engine.discovery.start()  # reserves the adapter synchronously
 
     fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
+    panel = EnumeratePanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_clicked()
+    panel.on_start_clicked()
 
-        assert len(fake_app.status_bar.errors) == 1
-        assert "discovery" in fake_app.status_bar.errors[0]
-        assert panel.active_handle is None
-    finally:
-        root.destroy()
+    assert len(fake_app.status_bar.errors) == 1
+    assert "discovery" in fake_app.status_bar.errors[0]
+    assert panel.active_handle is None
 
 
-def test_enumeration_failed_on_a_nonexistent_adapter_updates_status_and_reenables_button(tmp_path):
-    # get_interface_subnet raises a REAL OSError for an interface that doesn't
-    # exist on this machine -- no mocking needed. Same
-    # threading.excepthook-swap technique as test_enumerate_acceptance.py's own
-    # equivalent test, and for the same reason: the exception propagates out of
-    # the driver thread uncaught, which pytest would otherwise only surface
-    # as a warning collected AFTER this test function has already returned.
-    # "iw": [] -- see test_successful_scan_populates_results_and_reenables_
-    # start_button's own comment (ADR-0016's sync check needs a script entry
-    # too, even though this test's whole point is a DIFFERENT real OSError).
+def test_enumeration_failed_on_a_nonexistent_adapter_updates_status_and_reenables_button(qtbot, tmp_path):
+    # get_interface_subnet raises a real OSError for an interface that does not
+    # exist. _drive publishes EnumerationFailed and re-raises, so the status
+    # updates (the queued event) and the OSError reaches threading.excepthook.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan-does-not-exist-99",
         proc=FakeProcRunner(script={"iw": []}),
     )
-    # ADR-0016's bounded retry would otherwise spend its full real timeout
-    # retrying a genuinely nonexistent interface -- same reach-into-the-
-    # private-attribute precedent test_crack_acceptance.py's own ADR-0015
-    # tests use, since Engine has no constructor passthrough for this.
     engine.enumerate._subnet_wait_timeout_s = 0
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
     thread_exceptions = []
     original_hook = threading.excepthook
     threading.excepthook = thread_exceptions.append
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
 
+    panel = EnumeratePanel(_FakeApp(engine))
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+    try:
         panel.on_start_clicked()
         handle = panel.active_handle
         assert handle is not None
 
         handle.wait_for_test(timeout=2.0)
-        # wait_for_test() unblocks the instant mark_terminal() sets its internal
-        # event, inside `finally` -- slightly BEFORE the exception actually
-        # finishes propagating out of the thread and hits threading.excepthook.
-        deadline = time.monotonic() + 2.0
-        while not thread_exceptions and time.monotonic() < deadline:
-            time.sleep(0.01)
+        qtbot.waitUntil(lambda: bool(thread_exceptions), timeout=2000)
+        qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
 
-        _tick_until(fake_app.pump, lambda: panel.active_handle is None, timeout=2.0)
-
-        assert "failed" in panel._status_label.cget("text").lower()
+        assert "failed" in panel._status_label.text().lower()
         assert panel.active_handle is None
-        assert panel._start_button.cget("state") == "normal"
+        assert panel._start_button.isEnabled()
 
         assert len(thread_exceptions) == 1
         assert thread_exceptions[0].exc_type is OSError
     finally:
         threading.excepthook = original_hook
-        root.destroy()
 
 
-def _assert_blocked(panel: EnumeratePanel, hint: str) -> None:
-    assert panel._start_button.cget("state") == "disabled"
-    assert panel._hint_label.cget("text") == hint
-    assert panel._hint_label.cget("text_color") == PALETTE["warn"]
-
-
-def _assert_startable(panel: EnumeratePanel) -> None:
-    assert panel._start_button.cget("state") == "normal"
-    assert panel._hint_label.cget("text") == EnumeratePanel._HINT_TEXT
-    assert panel._hint_label.cget("text_color") == PALETTE["muted"]
-
-
-def test_start_disabled_with_monitor_mode_hint_while_adapter_is_in_monitor_mode(tmp_path):
-    # Monitor mode entered through the public Management-page entry point,
-    # before the panel even exists -- the guard must hold from construction,
-    # not only after a poll tick.
+def test_start_disabled_with_monitor_mode_hint_while_adapter_is_in_monitor_mode(qtbot, tmp_path):
+    # Monitor mode entered before the panel exists: the guard must hold from
+    # construction, not only after a poll tick.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
         proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT}),
@@ -253,75 +183,62 @@ def test_start_disabled_with_monitor_mode_hint_while_adapter_is_in_monitor_mode(
     engine.radio.start_monitor_mode()
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
-        panel.set_target(target)   # a Target alone must not re-enable it
-        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
-    finally:
-        root.destroy()
+    panel = EnumeratePanel(_FakeApp(engine))
+    qtbot.addWidget(panel)
+    _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
+    panel.set_target(target)   # a Target alone must not re-enable it
+    _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
 
 
-def test_guard_follows_monitor_mode_changes_made_outside_the_panel(tmp_path):
-    # Mode flips here go through RadioController directly, exactly like the
-    # Management page's Start/Stop Airmon-ng buttons, which publish nothing on
-    # the bus -- so only _poll_radio_state can notice them. No mainloop runs
-    # in these tests, so the panel's own after() reschedule never fires and
-    # each tick is driven by hand.
+def test_guard_follows_monitor_mode_changes_made_outside_the_panel(qtbot, tmp_path):
+    # Mode flips go through RadioController directly, like the Management page's
+    # Start/Stop Airmon-ng buttons, which publish nothing on the bus, so only
+    # _poll_radio_state notices them. Driven by hand here.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
         proc=FakeProcRunner(script={"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "systemctl": []}),
     )
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
-        _assert_startable(panel)
+    panel = EnumeratePanel(_FakeApp(engine))
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+    _assert_startable(panel)
 
-        engine.radio.start_monitor_mode()
-        panel._poll_radio_state()
-        _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
+    engine.radio.start_monitor_mode()
+    panel._poll_radio_state()
+    _assert_blocked(panel, EnumeratePanel._MONITOR_MODE_HINT_TEXT)
 
-        engine.radio.stop_monitor_mode()
-        panel._poll_radio_state()
-        _assert_startable(panel)
-    finally:
-        root.destroy()
+    engine.radio.stop_monitor_mode()
+    panel._poll_radio_state()
+    _assert_startable(panel)
 
 
-def test_no_adapter_selected_disables_start_and_a_direct_click_shows_an_error(tmp_path):
-    # NoAdapterSelected used to escape on_start_clicked uncaught (straight into
-    # Tk's callback handler, nothing on screen). Calling on_start_clicked
-    # directly bypasses the disabled button on purpose, to prove the backstop.
+def test_no_adapter_selected_disables_start_and_a_direct_click_shows_an_error(qtbot, tmp_path):
+    # Calling on_start_clicked directly bypasses the disabled button on purpose,
+    # to prove the NoAdapterSelected backstop surfaces an error rather than
+    # escaping uncaught.
     engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter=None, proc=FakeProcRunner(script={}))
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
-        _assert_blocked(panel, EnumeratePanel._NO_ADAPTER_HINT_TEXT)
+    panel = EnumeratePanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+    _assert_blocked(panel, EnumeratePanel._NO_ADAPTER_HINT_TEXT)
 
-        panel.on_start_clicked()
+    panel.on_start_clicked()
 
-        assert fake_app.status_bar.errors == ["No adapter selected: pick one on the Management page first"]
-        assert panel.active_handle is None
-    finally:
-        root.destroy()
+    assert fake_app.status_bar.errors == ["No adapter selected: pick one on the Management page first"]
+    assert panel.active_handle is None
 
 
-def test_radio_command_failed_message_describes_leaving_monitor_mode(tmp_path):
-    # ADR-0016's desync: RadioController believes the adapter is managed (so
-    # the guard leaves Start enabled -- it reads in-memory state only), but
-    # `iw dev wlan0 info` says monitor. reserve(MANAGED) then really runs
-    # airmon-ng stop + `systemctl restart NetworkManager`, and the scripted
-    # systemctl failure is what raises RadioCommandFailed.
+def test_radio_command_failed_message_describes_leaving_monitor_mode(qtbot, tmp_path):
+    # ADR-0016 desync: RadioController believes the adapter is managed (so the
+    # guard leaves Start enabled), but `iw dev wlan0 info` says monitor.
+    # reserve(MANAGED) then runs airmon-ng stop + `systemctl restart
+    # NetworkManager`, and the scripted systemctl failure raises
+    # RadioCommandFailed.
     engine = Engine(
         db_path=":memory:", work_dir=tmp_path, adapter="wlan0",
         proc=FakeProcRunner(
@@ -333,19 +250,37 @@ def test_radio_command_failed_message_describes_leaving_monitor_mode(tmp_path):
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
     fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = EnumeratePanel(root, fake_app)
-        panel.set_target(target)
-        _assert_startable(panel)
+    panel = EnumeratePanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+    _assert_startable(panel)
 
-        panel.on_start_clicked()
+    panel.on_start_clicked()
 
-        assert len(fake_app.status_bar.errors) == 1
-        error = fake_app.status_bar.errors[0]
-        assert error.startswith("Couldn't switch the adapter out of monitor mode back to normal wifi:")
-        assert "into monitor mode" not in error
-        assert "systemctl restart NetworkManager" in error
-        assert panel.active_handle is None
-    finally:
-        root.destroy()
+    assert len(fake_app.status_bar.errors) == 1
+    error = fake_app.status_bar.errors[0]
+    assert error.startswith("Couldn't switch the adapter out of monitor mode back to normal wifi:")
+    assert "into monitor mode" not in error
+    assert "systemctl restart NetworkManager" in error
+    assert panel.active_handle is None
+
+
+def test_ip_column_is_wide_enough_for_a_full_ipv4_address(qtbot, tmp_path):
+    """Regression (DEFECT 3): the IP column must hold a full 15-character IPv4
+    ("255.255.255.255") without eliding. The cell paints Fira Code 11px and the
+    QSS gives each item 6px of left and right padding, so the column must cover
+    the advance plus 12px. The width was widened from the old 120, which elided
+    the last octet."""
+    register_fonts()   # match the real app, so Fira Code (not a fallback) is measured
+    engine = Engine(db_path=":memory:", work_dir=tmp_path, adapter="wlan0", proc=FakeProcRunner(script={}))
+    panel = EnumeratePanel(_FakeApp(engine))
+    qtbot.addWidget(panel)
+
+    ip_col = EnumeratePanel._COLUMNS[0]
+    assert ip_col.title == "IP"
+    assert ip_col.width >= 150   # catches a regression to the old 120
+
+    mono = QFont("Fira Code")
+    mono.setPixelSize(11)
+    fm = QFontMetrics(mono)
+    assert ip_col.width - 12 >= fm.horizontalAdvance("255.255.255.255")
