@@ -1,16 +1,19 @@
-"""CapturePanel against a real ctk.CTk(), a real Engine + FakeProcRunner, a
-real GuiEventPump (driven by hand via pump._tick(), same idiom as
-tests/test_event_pump.py), and a minimal fake status bar. Scripting recipes
-(airmon-ng/airodump-ng/aircrack-ng/aireplay-ng, cap-file-on-spawn, slow lines
-for real-thread-timing) are reused verbatim from tests/test_capture_acceptance.py
--- see that file's own module docstring for why each one is shaped the way it is.
+"""CapturePanel for the PySide6 port: a real view under qtbot against a real
+Engine + FakeProcRunner and a real GuiEventPump, with a minimal fake status bar.
+Queued events reach the panel over the pump's signal, so a worker-thread
+terminal is awaited with handle.wait_for_test() and then qtbot.waitUntil lets the
+queued slot run (the Qt replacement for the Tk pump._tick() drain). Scripting
+recipes are reused from tests/test_capture_acceptance.py; see that file's
+docstring for why each is shaped the way it is.
 """
 
 from __future__ import annotations
 
-import time
 from datetime import timedelta
 from pathlib import Path
+
+from PySide6.QtCore import QObject, Qt
+from PySide6.QtWidgets import QPushButton
 
 from aircommand.core.domain import MacAddress, StopReason
 from aircommand.core.engine import Engine
@@ -18,48 +21,26 @@ from aircommand.core.events import CaptureStopped
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.capture_view import CapturePanel
 from aircommand.gui.event_pump import GuiEventPump
-from aircommand.gui.theme import PALETTE
-
-import customtkinter as ctk
 
 BSSID_1 = MacAddress(value="AA:BB:CC:DD:EE:01")
 
 NO_HANDSHAKE_OUTPUT = ["No valid WPA handshakes found"]
 CAP_FILE_BYTES = b"fake-cap-file-bytes-for-sha256-hashing"
 
-# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use --
-# see test_capture_acceptance.py's identical constant/comment.
+# RadioController.reserve() spawns "airmon-ng" on its first monitor-mode use.
 AIRMON_NO_RENAME_OUTPUT = ["monitor mode already enabled on wlan0"]
 
-# _drive's loop is a plain wall-clock loop now, driven by ProcHandle.poll() for
-# liveness, not handle.lines() content -- see test_capture_acceptance.py's
-# module docstring for the full real-hardware finding. Same generous shared
-# running_polls/tick_interval choice as that file, for the same reason.
 AIRODUMP_RUNNING_POLLS = 1000
 DRIVE_TICK_INTERVAL = timedelta(seconds=0.001)
 
-PRE_CANCEL_SETTLE_S = 0.02
-
 
 def _write_cap_file_on_spawn(argv: list[str]) -> None:
-    """Copied verbatim from tests/test_capture_acceptance.py -- see its own
-    docstring for why the guard needs both checks."""
+    """Copied from tests/test_capture_acceptance.py: airodump-ng appends
+    "-01.cap" to the -w prefix, so write to that exact path."""
     if argv[0] != "airodump-ng" or "-w" not in argv:
         return
-    # airodump-ng's OWN naming convention (confirmed against the real binary's
-    # format string, see capture.py's ThingsToChange-item-3 comment): it
-    # appends "-01.cap" to the prefix it's given -- it does NOT write the
-    # prefix verbatim. Matching that here, not the prefix, is what makes this
-    # fixture catch the real-hardware FileNotFoundError that masqueraded as
-    # passing for as long as this fixture wrote to the bare prefix instead.
     cap_prefix = argv[argv.index("-w") + 1]
-    cap_path = Path(f"{cap_prefix}-01.cap")
-    cap_path.write_bytes(CAP_FILE_BYTES)
-
-
-class _FakeRoot:
-    def after(self, ms, callback):
-        pass
+    Path(f"{cap_prefix}-01.cap").write_bytes(CAP_FILE_BYTES)
 
 
 class _FakeStatusBar:
@@ -73,7 +54,8 @@ class _FakeStatusBar:
 class _FakeApp:
     def __init__(self, engine: Engine):
         self.engine = engine
-        self.pump = GuiEventPump(engine, _FakeRoot())
+        self._pump_parent = QObject()   # keeps the pump alive for the test's lifetime
+        self.pump = GuiEventPump(engine, self._pump_parent)
         self.status_bar = _FakeStatusBar()
 
 
@@ -91,73 +73,42 @@ def _make_engine(tmp_path, script: dict) -> Engine:
     )
 
 
-def _find_all_buttons(widget) -> list:
-    """Recursively collects every CTkButton under `widget`, walking the real
-    Tk widget tree -- used to assert on button placement/uniqueness across
-    the two Cells CapturePanel now renders into, without hardcoding which
-    container holds which button."""
-    found = []
-    for child in widget.winfo_children():
-        if isinstance(child, ctk.CTkButton):
-            found.append(child)
-        found.extend(_find_all_buttons(child))
-    return found
+def _buttons_with_text(widget, text: str) -> list[QPushButton]:
+    return [b for b in widget.findChildren(QPushButton) if b.text() == text]
 
 
-def _tick_until(pump: GuiEventPump, predicate, timeout: float = 2.0) -> None:
-    """Drives pump._tick() while polling -- _FakeRoot.after() is a no-op, so
-    nothing else ever dispatches queued events to handlers. A bare sleep-and-
-    recheck loop with no tick() call can never observe a state change that
-    only a tick can produce (e.g. active_handle flipping to None once
-    CaptureStopped is dispatched) -- it would just burn its full timeout doing
-    nothing every time, which is exactly what this replaced (confirmed: the
-    two callers below each took ~2s for no reason before this fix)."""
-    deadline = time.monotonic() + timeout
-    while not predicate() and time.monotonic() < deadline:
-        pump._tick()
-        time.sleep(0.01)
-
-
-def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(tmp_path):
+def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(qtbot, tmp_path):
     engine = _make_engine(tmp_path, {"airmon-ng": AIRMON_NO_RENAME_OUTPUT, "airodump-ng": []})
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
-    engine.discovery.start()  # reserves the adapter synchronously -- see
-    # test_capture_acceptance.py's own AdapterBusy test for the timing rationale.
+    engine.discovery.start()  # reserves the adapter synchronously
 
     fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
-        panel.set_target(target)
+    panel = CapturePanel(fake_app, confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_passive_clicked()
+    panel.on_start_passive_clicked()
 
-        assert len(fake_app.status_bar.errors) == 1
-        assert "discovery" in fake_app.status_bar.errors[0]
-        assert panel.active_handle is None
-    finally:
-        root.destroy()
+    assert len(fake_app.status_bar.errors) == 1
+    assert "discovery" in fake_app.status_bar.errors[0]
+    assert panel.active_handle is None
 
 
-def test_deauth_confirm_declined_does_not_start_a_job(tmp_path):
+def test_deauth_confirm_declined_does_not_start_a_job(qtbot, tmp_path):
     engine = _make_engine(tmp_path, {})
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: False)
-        panel.set_target(target)
+    panel = CapturePanel(_FakeApp(engine), confirm_deauth=lambda t: False)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_deauth_clicked()
+    panel.on_start_deauth_clicked()
 
-        assert panel.active_handle is None
-        assert engine._jobs.active_job_ids() == []
-    finally:
-        root.destroy()
+    assert panel.active_handle is None
+    assert engine._jobs.active_job_ids() == []
 
 
-def test_deauth_confirm_accepted_starts_a_job(tmp_path):
+def test_deauth_confirm_accepted_starts_a_job(qtbot, tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
         "airodump-ng": [],
@@ -166,24 +117,20 @@ def test_deauth_confirm_accepted_starts_a_job(tmp_path):
     })
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
-        panel.set_target(target)
+    panel = CapturePanel(_FakeApp(engine), confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_deauth_clicked()
+    panel.on_start_deauth_clicked()
 
-        assert panel.active_handle is not None
-        assert engine._jobs.active_job_ids() == [panel.active_handle.job_id]
+    assert panel.active_handle is not None
+    assert engine._jobs.active_job_ids() == [panel.active_handle.job_id]
 
-        panel.active_handle.cancel()
-        panel.active_handle.wait_for_test(timeout=2.0)
-    finally:
-        root.destroy()
+    panel.active_handle.cancel()
+    panel.active_handle.wait_for_test(timeout=2.0)
 
 
-def test_passive_capture_end_to_end_reaches_a_handshake_and_resets_on_stop(tmp_path):
+def test_passive_capture_end_to_end_reaches_a_handshake_and_resets_on_stop(qtbot, tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
         "airodump-ng": [],
@@ -191,36 +138,29 @@ def test_passive_capture_end_to_end_reaches_a_handshake_and_resets_on_stop(tmp_p
     })
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
-        panel.set_target(target)
+    panel = CapturePanel(_FakeApp(engine), confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_passive_clicked()
-        handle = panel.active_handle
-        assert handle is not None
+    panel.on_start_passive_clicked()
+    handle = panel.active_handle
+    assert handle is not None
 
-        handle.wait_for_test(timeout=2.0)
-        # HandshakeCaptured and CaptureStopped are both already sitting in the
-        # pump's queue by now (EventBus.publish is synchronous, and mark_terminal
-        # -- which is what wait_for_test() unblocks on -- runs last, per
-        # capture.py's own "mark_terminal is LAST, deliberately" comment).
-        # Dispatching them to handlers requires actually ticking the pump.
-        _tick_until(fake_app.pump, lambda: panel.active_handle is None, timeout=2.0)
+    handle.wait_for_test(timeout=2.0)
+    # HandshakeCaptured and CaptureStopped are already published by now; spin the
+    # Qt loop so the queued pump slot delivers them to the panel's handlers.
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
 
-        assert len(engine.capture.list_handshakes(target)) == 1
-        assert len(panel._handshake_list.winfo_children()) == 1
+    assert len(engine.capture.list_handshakes(target)) == 1
+    assert panel._handshake_list_layout.count() == 1
 
-        assert panel.active_handle is None
-        assert panel._start_passive_button.cget("state") == "normal"
-        assert panel._start_deauth_button.cget("state") == "normal"
-        assert panel._cancel_button.cget("state") == "disabled"
-    finally:
-        root.destroy()
+    assert panel.active_handle is None
+    assert panel._start_passive_button.isEnabled()
+    assert panel._start_deauth_button.isEnabled()
+    assert not panel._cancel_button.isEnabled()
 
 
-def test_cancel_button_cancels_an_in_progress_capture(tmp_path):
+def test_cancel_button_cancels_an_in_progress_capture(qtbot, tmp_path):
     engine = _make_engine(tmp_path, {
         "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
         "airodump-ng": [],
@@ -231,79 +171,55 @@ def test_cancel_button_cancels_an_in_progress_capture(tmp_path):
     stopped_events = []
     engine.subscribe(stopped_events.append, CaptureStopped)
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
-        panel.set_target(target)
+    panel = CapturePanel(_FakeApp(engine), confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        panel.on_start_passive_clicked()
-        handle = panel.active_handle
-        assert handle is not None
+    panel.on_start_passive_clicked()
+    handle = panel.active_handle
+    assert handle is not None
 
-        assert panel._cancel_button.cget("state") == "normal"
-        assert panel._start_passive_button.cget("state") == "disabled"
-        assert panel._start_deauth_button.cget("state") == "disabled"
+    assert panel._cancel_button.isEnabled()
+    assert not panel._start_passive_button.isEnabled()
+    assert not panel._start_deauth_button.isEnabled()
 
-        time.sleep(PRE_CANCEL_SETTLE_S)  # let real loop iterations happen first --
-        # see test_capture_acceptance.py module docstring point 1.
-        panel._cancel_button.invoke()
+    qtbot.wait(20)   # let real drive-loop iterations happen before the cancel
+    qtbot.mouseClick(panel._cancel_button, Qt.MouseButton.LeftButton)
 
-        handle.wait_for_test(timeout=2.0)
-        _tick_until(fake_app.pump, lambda: panel.active_handle is None, timeout=2.0)
-        assert len(stopped_events) == 1
-        assert stopped_events[0].reason == StopReason.CANCELLED
+    handle.wait_for_test(timeout=2.0)
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
+    assert len(stopped_events) == 1
+    assert stopped_events[0].reason == StopReason.CANCELLED
 
-        assert panel.active_handle is None
-        assert panel._status_label.cget("text") == "Stopped (cancelled)"
-        assert panel._start_passive_button.cget("state") == "normal"
-        assert panel._start_deauth_button.cget("state") == "normal"
-        assert panel._cancel_button.cget("state") == "disabled"
-    finally:
-        root.destroy()
+    assert panel.active_handle is None
+    assert panel._status_label.text() == "Stopped (cancelled)"
+    assert panel._start_passive_button.isEnabled()
+    assert panel._start_deauth_button.isEnabled()
+    assert not panel._cancel_button.isEnabled()
 
 
-def test_deauth_cell_is_danger_styled_and_cancel_appears_only_once(tmp_path):
-    # docs/design/gui-redesign-gridwatch.md §5/§6 item 5: Capture and Deauth
-    # render as two separate Cells -- Deauth is danger-bordered/red-titled,
-    # and the shared Cancel button lives only in the Capture cell (Deauth
-    # gets its own "Fire Deauth" button instead of a second Cancel).
+def test_deauth_cell_is_danger_styled_and_cancel_appears_only_once(qtbot, tmp_path):
+    # docs/design/gui-redesign-gridwatch.md section 5 / section 6 item 5: Capture
+    # and Deauth render as two separate Cells. Deauth is the danger cell
+    # (danger="true", styled red by the QSS), and the shared Cancel lives only in
+    # the Capture cell; Deauth has its own Fire Deauth button (class "danger").
     engine = _make_engine(tmp_path, {})
     target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
 
-    fake_app = _FakeApp(engine)
-    root = ctk.CTk()
-    try:
-        panel = CapturePanel(root, fake_app, confirm_deauth=lambda t: True)
-        panel.set_target(target)
+    panel = CapturePanel(_FakeApp(engine), confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
 
-        # Deauth cell is danger-bordered and red-titled; Capture cell is not.
-        assert panel._deauth_cell.cget("border_color") == PALETTE["danger"]
-        assert panel._deauth_cell._title_label.cget("text_color") == PALETTE["danger"]
-        assert panel._capture_cell.cget("border_color") != PALETTE["danger"]
-        assert panel._capture_cell._title_label.cget("text_color") != PALETTE["danger"]
+    assert panel._deauth_cell.property("danger") == "true"
+    assert panel._capture_cell.property("danger") == "false"
 
-        # The outline Cancel uses the app's flat recipe with an explicit
-        # non-blue hover (PALETTE["panel"]) -- left unset, CTkButton's
-        # transparent-fill hover falls back to its Light-theme stock blue
-        # (#3B8ED0), the reported "blue button highlights".
-        assert panel._cancel_button.cget("fg_color") == "transparent"
-        assert panel._cancel_button.cget("hover_color") == PALETTE["panel"]
+    cancel_buttons = _buttons_with_text(panel, "Cancel")
+    assert cancel_buttons == [panel._cancel_button]
+    assert panel._cancel_button in panel._capture_cell.findChildren(QPushButton)
+    assert panel._cancel_button not in panel._deauth_cell.findChildren(QPushButton)
 
-        all_buttons = _find_all_buttons(panel)
-        cancel_buttons = [b for b in all_buttons if b.cget("text") == "Cancel"]
-        assert len(cancel_buttons) == 1
-        assert cancel_buttons[0] is panel._cancel_button
-        # The one Cancel button lives inside the Capture cell, not Deauth.
-        assert panel._cancel_button in _find_all_buttons(panel._capture_cell)
-        assert panel._cancel_button not in _find_all_buttons(panel._deauth_cell)
-
-        # "Start Deauth-Assisted Capture" is gone; the button is "Fire Deauth"
-        # and lives in the Deauth cell.
-        fire_deauth_buttons = [b for b in all_buttons if b.cget("text") == "Fire Deauth"]
-        assert len(fire_deauth_buttons) == 1
-        assert fire_deauth_buttons[0] is panel._start_deauth_button
-        assert panel._start_deauth_button in _find_all_buttons(panel._deauth_cell)
-        assert not any(b.cget("text") == "Start Deauth-Assisted Capture" for b in all_buttons)
-    finally:
-        root.destroy()
+    fire_buttons = _buttons_with_text(panel, "Fire Deauth")
+    assert fire_buttons == [panel._start_deauth_button]
+    assert panel._start_deauth_button in panel._deauth_cell.findChildren(QPushButton)
+    assert panel._start_deauth_button.property("class") == "danger"
+    assert not _buttons_with_text(panel, "Start Deauth-Assisted Capture")

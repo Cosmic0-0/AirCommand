@@ -7,11 +7,11 @@ Wireframe A shell (collapsible sidebar nav plus five pages), and
 docs/design/gui-port/05-boundary-design.md "View mapping", "Launch order", and
 "Shutdown" for the Qt shape.
 
-The shell, sidebar, status bar, and sudo dialog landed in F3. P1 replaces the
-Management placeholder with the real ManagementView (and adds the page-level
-scroll wrapper and the on_adapter_selected fan-out); the remaining pages stay
-placeholders in the QStackedWidget until P2 to P5 give each its real view and
-that page's own engine calls and pump subscriptions. Only shell-level wiring
+The shell, sidebar, status bar, and sudo dialog landed in F3; P1 to P5 then gave
+every page in the QStackedWidget its real view. Each page builder composes that
+page's view and wires the page's own engine calls and pump subscriptions (the
+Discovery band state machine, the global HandshakeCaptured feed to the cracking
+picker, the global DeauthFired feed to the audit log). Shell-level wiring also
 lives here: the sudo prompt and retry, startup reconciliation, navigation, the
 keepalive status-bar subscriptions, and shutdown.
 """
@@ -47,7 +47,9 @@ from aircommand.core import (
 )
 from aircommand.core.domain import StopReason
 from aircommand.core.events import (
+    DeauthFired,
     DiscoveryStopped,
+    HandshakeCaptured,
     NetworkDiscovered,
     NetworkSightingUpdated,
     SudoKeepaliveFailed,
@@ -56,6 +58,8 @@ from aircommand.core.events import (
     TargetRemoved,
 )
 from aircommand.core.procutil import ProcRunner
+from aircommand.gui.audit_log_view import AuditLogView
+from aircommand.gui.crack_view import CrackPanel, HandshakePicker, WordlistPicker
 from aircommand.gui.dialog import Dialog, outline_button, primary_button
 from aircommand.gui.discovery_view import NetworksView, TargetPicker
 from aircommand.gui.event_pump import GuiEventPump
@@ -63,6 +67,7 @@ from aircommand.gui.management_view import ManagementView
 from aircommand.gui.sidebar import Sidebar
 from aircommand.gui.status_bar import StatusBar
 from aircommand.gui.sudo_dialog import SudoPasswordDialog
+from aircommand.gui.target_actions_view import TargetActionsView
 
 # ADR-0018: sentinel label for the band menu's "nothing picked yet" placeholder.
 # Deliberately never a key in self._band_choices, so a future bug that forgets
@@ -444,24 +449,79 @@ class App(QMainWindow):
             self._band_menu.setEnabled(True)
 
     def _build_capture_attack_page(self) -> None:
-        self._add_placeholder_page("capture", "Capture & Attack")
+        # TargetActionsView owns this page's wiring: CapturePanel registers
+        # HandshakeCaptured once globally (manual capture_job_id match) in its
+        # own __init__, and TargetActionsView registers TargetAdded/TargetRemoved
+        # for its selector. CaptureStopped, the local DeauthFired burst counter,
+        # NmapScanCompleted, and EnumerationFailed are per-Start only_job
+        # registrations inside the panels (02 CapturePanel/EnumeratePanel rows).
+        self.target_actions_view = TargetActionsView(self)
+        page = self._scroll_page(self.target_actions_view)
+        self._pages["capture"] = page
+        self._stack.addWidget(page)
 
     def _build_cracking_page(self) -> None:
-        self._add_placeholder_page("cracking", "Cracking")
+        # Composes the page's three widgets and owns the one global
+        # HandshakeCaptured registration (05 "The bridge"): the event carries no
+        # job_id, so only_job cannot filter it, and the picker wants every
+        # captured handshake with no job filter. This is a separate handler from
+        # CapturePanel's own global HandshakeCaptured registration; both firing
+        # per event is correct (02 HandshakePicker and CapturePanel rows).
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+
+        title = QLabel("Cracking")
+        title.setProperty("class", "pageTitle")
+        layout.addWidget(title)
+
+        self.handshake_picker = HandshakePicker(self, on_selected=self._on_handshake_selected)
+        self.wordlist_picker = WordlistPicker(on_selected=self._on_wordlist_selected)
+        self.crack_panel = CrackPanel(self)
+        layout.addWidget(self.handshake_picker)
+        layout.addWidget(self.wordlist_picker)
+        layout.addWidget(self.crack_panel)
+        layout.addStretch(1)
+
+        page = self._scroll_page(content)
+        self._pages["cracking"] = page
+        self._stack.addWidget(page)
+
+        self.pump.on(HandshakeCaptured, self.handshake_picker.append)
+
+    def _on_handshake_selected(self, handshake) -> None:
+        self.crack_panel.set_handshake(handshake)
+
+    def _on_wordlist_selected(self, path) -> None:
+        self.crack_panel.set_wordlist(path)
 
     def _build_logs_page(self) -> None:
-        self._add_placeholder_page("logs", "Logs")
+        # Composes AuditLogView and owns the one global DeauthFired registration
+        # (05 "The bridge"): every firing is logged across every job, with no
+        # job filter. This is a separate handler from CapturePanel's own
+        # per-Start DeauthFired burst-counter registration; both firing per event
+        # is correct (02 AuditLogView and CapturePanel rows). The embedded
+        # TargetSelector stays non-live, so no TargetAdded/TargetRemoved wiring
+        # here (05 "Open decisions").
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
 
-    def _add_placeholder_page(self, key: str, title: str) -> None:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(26, 22, 26, 22)
-        heading = QLabel(title)
-        heading.setProperty("class", "pageTitle")
-        layout.addWidget(heading)
+        title = QLabel("Logs")
+        title.setProperty("class", "pageTitle")
+        layout.addWidget(title)
+
+        self.audit_log_view = AuditLogView(self, self._interrupted_deauth_targets)
+        layout.addWidget(self.audit_log_view)
         layout.addStretch(1)
-        self._pages[key] = page
+
+        page = self._scroll_page(content)
+        self._pages["logs"] = page
         self._stack.addWidget(page)
+
+        self.pump.on(DeauthFired, self.audit_log_view.append)
 
     # -- Shutdown --------------------------------------------------------------
 

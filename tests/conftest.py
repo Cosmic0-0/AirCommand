@@ -13,22 +13,12 @@ import gc
 
 import pytest
 
-# GUI test modules still written for Tk cannot share a pytest process with a
-# live QApplication, so each stays out of collection until its slice rewrites it
-# for Qt. collect_ignore never imports the module, which a module-level skip
-# marker would (discovery_view.py and enumerate_view.py import names table.py
-# only provides after F2, so a skip marker would still raise ImportError at
-# collection). The comment on each entry names the slice that re-enables it.
-collect_ignore = [
-    # test_app.py, test_status_bar.py, test_sudo_dialog.py re-enabled in F3 (Qt shell).
-    # test_discovery_view.py re-enabled in P2 (Qt Discovery and Targets page).
-    "test_capture_view.py",         # P3
-    "test_enumerate_view.py",       # P3
-    "test_target_actions_view.py",  # P3
-    "test_target_selector.py",      # P3
-    "test_crack_view.py",           # P4
-    "test_audit_log_view.py",       # P5
-]
+# GUI test modules still written for Tk could not share a pytest process with a
+# live QApplication, so each stayed out of collection until its slice rewrote it
+# for Qt. P5 ported the last one (test_audit_log_view.py), so the list is now
+# empty: every GUI test module is Qt and active. The finalize slice (Z) removes
+# this machinery and the autouse gc fixture below entirely.
+collect_ignore: list[str] = []
 
 
 @pytest.fixture(autouse=True)
