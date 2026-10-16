@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build AirCommand-x86_64.AppImage. See docs/adr/0020-appimage-packaging.md.
 #
-# Bundles CPython 3.12, Tcl/Tk, CustomTkinter, and the aircommand package into a
-# single AppImage. The native tools (aircrack-ng suite, nmap, hashcat,
-# hcxpcapngtool, iw) stay on the host and are NOT bundled, so a fresh VM
-# still needs:  sudo apt install aircrack-ng iw nmap hashcat hcxtools
+# Bundles CPython 3.12, PySide6-Essentials (the Qt Widgets libraries), and the
+# aircommand package into a single AppImage. The native tools (aircrack-ng
+# suite, nmap, hashcat, hcxpcapngtool, iw) stay on the host and are NOT bundled,
+# and Qt's xcb plugin needs libxcb-cursor0 on the host, so a fresh VM still
+# needs:  sudo apt install aircrack-ng iw nmap hashcat hcxtools libxcb-cursor0
 #
 # Linux x86_64 only. Needs: bash, curl or wget, sha256sum, and network access
 # the first time (to fetch the pinned base image, appimagetool, and the pip
@@ -16,8 +17,8 @@
 set -euo pipefail
 
 # --- pinned, checksum-verified downloads --------------------------------------
-# python-appimage (niess): a relocatable CPython 3.12 with a working _tkinter and
-# Tcl/Tk 8.6, built on glibc 2.17 for forward portability.
+# python-appimage (niess): a relocatable CPython 3.12 built on glibc 2.17 for
+# forward portability. PySide6-Essentials is pip-installed into it below.
 PY_URL="https://github.com/niess/python-appimage/releases/download/python3.12/python3.12.15-cp312-cp312-manylinux2014_x86_64.AppImage"
 PY_SHA256="a6a9bf619a3e21c5623be144d8ac4e458e1a5b5c133b1cc99b142d6e71b82c76"
 # appimagetool, pinned release (not the rolling "continuous" tag).
@@ -115,5 +116,6 @@ echo "If the host lacks FUSE 2 (recent Ubuntu/Mint/Kali), either:"
 echo "    sudo apt install libfuse2    # or libfuse2t64 on 24.04-based releases"
 echo "or run without FUSE:"
 echo "    ${OUTPUT} --appimage-extract-and-run"
-echo "The native tools are not bundled. On a fresh VM install them once:"
-echo "    sudo apt install aircrack-ng iw nmap hashcat hcxtools"
+echo "The native tools are not bundled, and Qt's xcb plugin needs libxcb-cursor0."
+echo "On a fresh VM install them once:"
+echo "    sudo apt install aircrack-ng iw nmap hashcat hcxtools libxcb-cursor0"

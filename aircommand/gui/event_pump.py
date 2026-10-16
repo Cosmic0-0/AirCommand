@@ -1,48 +1,55 @@
-"""GuiEventPump — bridges EventBus (any thread) to Tk's single-threaded mainloop.
-NOT polling core internals: the queue holds already-finished, already-persisted
-domain events core pushed; nothing here asks core 'what's your state?'. It exists
-because Tk widgets may only be touched from the main thread, so a background-thread
-subscriber callback can't call widget methods directly — it can only hand off a
-value through a thread-safe queue for the mainloop to drain on its own schedule.
+"""GuiEventPump: bridges the core EventBus onto the Qt GUI thread.
+
+The core publishes domain events from background driver and keepalive threads.
+Qt widgets may be touched only from the GUI thread, so the pump turns each
+published event into one queued Qt signal. The bus callback runs on whatever
+thread published and does one thing: emit the signal. Because the pump lives on
+the GUI thread, the queued connection marshals the slot onto that thread, where
+the handler registry runs and widget access is legal.
+
+This is not polling core internals. The events are already finished and
+persisted; nothing here asks the core for its state. The connection is queued
+explicitly, so delivery is always deferred to the event loop even when an event
+is published on the GUI thread itself (for example TargetAdded from a click).
 """
 
 from __future__ import annotations
 
-import queue
 from typing import Callable, Optional, TYPE_CHECKING
+
+from PySide6.QtCore import QObject, Qt, Signal
 
 from aircommand.core.events import Event
 from aircommand.core.jobs import JobId
 
 if TYPE_CHECKING:
-    import customtkinter as ctk
     from aircommand.core import Engine
 
 
-class GuiEventPump:
-    def __init__(self, engine: "Engine", root: "ctk.CTk", tick_ms: int = 50) -> None:
-        self._q: "queue.Queue[Event]" = queue.Queue()
-        self._sub = engine.subscribe(self._q.put)  # producer-thread side: O(1) enqueue, never raises
-        self._root = root
-        self._tick_ms = tick_ms
+class GuiEventPump(QObject):
+    _event = Signal(object)  # emitted on the bus-callback thread, received on the GUI thread
+
+    def __init__(self, engine: "Engine", parent: QObject) -> None:
+        super().__init__(parent)
         self._handlers: dict[type, list[tuple[Callable[[Event], None], Optional[JobId]]]] = {}
+        self._stopped = False
+        self._event.connect(self._dispatch, Qt.QueuedConnection)
+        self._sub = engine.subscribe(self._on_bus_event)
 
     def on(self, event_type: type, handler: Callable[[Event], None], only_job: Optional[JobId] = None) -> None:
         self._handlers.setdefault(event_type, []).append((handler, only_job))
 
-    def start(self) -> None:
-        self._tick()
+    def stop(self) -> None:
+        self._stopped = True
+        self._sub.unsubscribe()
 
-    def _tick(self) -> None:
-        while True:
-            try:
-                event = self._q.get_nowait()
-            except queue.Empty:
-                break
+    def _on_bus_event(self, event: Event) -> None:
+        self._event.emit(event)
 
-            for handler, only_job in self._handlers.get(type(event), []):
-                if only_job is not None and getattr(event, "job_id", None) != only_job:
-                    continue
-                handler(event)
-
-        self._root.after(self._tick_ms, self._tick)
+    def _dispatch(self, event: Event) -> None:
+        if self._stopped:
+            return
+        for handler, only_job in self._handlers.get(type(event), []):
+            if only_job is not None and getattr(event, "job_id", None) != only_job:
+                continue
+            handler(event)

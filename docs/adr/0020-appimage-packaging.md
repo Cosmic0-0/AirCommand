@@ -1,11 +1,12 @@
 # Ship AirCommand as an AppImage that bundles Python, not the native tools
 
 **Status: implemented and verified on this Linux Mint 22.3 machine. The build
-runs, the bundled interpreter's `_tkinter` opens a real `Tk()` root, and
-`import customtkinter` plus the app entry point load from inside the bundle. Not
-yet run on a genuinely fresh VM, and the privileged capture and crack paths
-still need real monitor-mode hardware this pass could not exercise. See
-Consequences.**
+runs, the bundled interpreter imports PySide6 and the app entry point loads
+from inside the bundle (`aircommand --help` runs from the packaged binary),
+with the Hanken Grotesk and Fira Code fonts shipped under
+`aircommand/gui/fonts/`. Not yet run on a genuinely fresh VM, and the
+privileged capture and crack paths still need real monitor-mode hardware this
+pass could not exercise. See Consequences.**
 
 The user wants one file to copy to a new VM and run, instead of installing a
 system Python, a virtualenv, and the pip dependencies by hand every time. An
@@ -16,19 +17,20 @@ how that squares with the launch-time sudo model in ADR-0002.
 ## Decision
 
 Build from the python-appimage (niess) manylinux2014 CPython 3.12 base. That
-base ships a relocatable interpreter with a working `_tkinter` and Tcl/Tk 8.6,
-which is the one hard part of packaging a CustomTkinter app. It is built against
-glibc 2.17, so one build runs on older and newer hosts alike. We pip-install the
-`aircommand` package and its one runtime dependency (`customtkinter`, which
-pulls in `darkdetect` and `packaging`) into that base, CustomTkinter's bundled
-theme and font assets included, and repackage with appimagetool.
+base ships a relocatable interpreter built against glibc 2.17, so one build runs
+on older and newer hosts alike. We pip-install the `aircommand` package and its
+one runtime dependency (`PySide6-Essentials`, which pulls in `shiboken6` and
+carries the Qt Widgets libraries) into that base, the bundled Hanken Grotesk and
+Fira Code fonts under `aircommand/gui/fonts/` included through the package-data
+entry in `pyproject.toml`, and repackage with appimagetool.
 
-Bundled: CPython 3.12, Tcl/Tk, `_tkinter`, `customtkinter` and its assets, the
-`aircommand` package.
+Bundled: CPython 3.12, `PySide6-Essentials` and its Qt libraries, the
+`aircommand` package and its bundled fonts.
 
 Left on the host: the aircrack-ng suite (`airodump-ng`, `aireplay-ng`,
 `aircrack-ng`, `airmon-ng`), `iw`, `nmap`, `hashcat`,
-`hcxpcapngtool`, and `systemctl`. The app finds these on `PATH`. Privileged
+`hcxpcapngtool`, and `systemctl`, found on `PATH`, plus `libxcb-cursor0`, which
+Qt's xcb platform plugin needs on the host (ADR-0021 Consequences). Privileged
 calls resolve through sudo's own `secure_path`. A fresh VM still needs one apt
 install for them. The AppImage removes the Python setup, not the native-tool
 setup, and the README says so.
@@ -49,8 +51,8 @@ Why the native tools stay on the host:
   redistribution burden for a convenience build.
 
 The launcher (`AppRun`) runs the app as the normal user through the base image's
-own `usr/bin/python3.12` wrapper, which already sets the Tcl/Tk and SSL
-environment. It adds two things. It appends `/usr/sbin:/sbin` to `PATH` so
+own `usr/bin/python3.12` wrapper, which already sets the bundled interpreter's
+SSL and library environment. It adds two things. It appends `/usr/sbin:/sbin` to `PATH` so
 unprivileged host tools such as `iw` resolve on any VM, and it sets
 `PYTHONSAFEPATH=1` so the current directory cannot shadow the bundled
 `aircommand` package. The database and working directory keep their defaults
@@ -64,9 +66,9 @@ first launch, so nothing there changes.
   the sudo-reads-a-file-under-FUSE problem, and it takes on nmap and GPL
   redistribution for no real gain.
 - **A zipapp or shiv single `.pyz`.** Rejected for this request. It carries
-  neither the interpreter nor Tcl/Tk, so a fresh VM would still need a matching
-  Python and a system Tk. It does not solve the stated problem.
-- **A PyInstaller one-file binary.** Rejected. Tcl/Tk bundling is fragile, and
+  neither the interpreter nor the Qt libraries, so a fresh VM would still need a
+  matching Python and a system Qt. It does not solve the stated problem.
+- **A PyInstaller one-file binary.** Rejected. Qt bundling is fragile, and
   the output is glibc-sensitive without an old build host, which is the exact
   portability problem the manylinux base already solves.
 - **(Chosen)** The python-appimage base, bundle Python and the app, leave the
@@ -80,8 +82,8 @@ first launch, so nothing there changes.
 - Build output goes to `dist/` (gitignored). Downloaded build tools are pinned
   by version and SHA-256 and cached outside the repo.
 - The one-file promise is honest only for the Python layer. A fresh VM still
-  needs `sudo apt install aircrack-ng iw nmap hashcat hcxtools`. There is
-  no in-app preflight that names a missing tool today. A missing unprivileged
+  needs `sudo apt install aircrack-ng iw nmap hashcat hcxtools libxcb-cursor0`.
+  There is no in-app preflight that names a missing tool today. A missing unprivileged
   tool surfaces as a `FileNotFoundError`-backed job error, a missing privileged
   one as a non-zero `sudo` exit. A `shutil.which` preflight would be a
   worthwhile core-code follow-up and is out of scope here.

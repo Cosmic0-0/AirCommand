@@ -1,118 +1,141 @@
-"""Shared fixed-width-column table helper. ThingsToChange item 1: Discovery's
-(and, it turns out, Target Actions/Enumerate's) table columns drift out of
-alignment between the header row and the data rows below it.
+"""Shared table for the PySide6 port: one generic RowTableModel behind a
+QTableView, replacing the CustomTkinter readonly-entry grid.
 
-Root cause, confirmed empirically (not assumed from Tk docs) before writing
-this fix: each affected view builds its header row and its body rows as two
-SEPARATE .grid() layouts in two different container widgets (a plain header
-CTkFrame, a scrollable body CTkScrollableFrame) — the body has to live in its
-own scrollable container so the header doesn't scroll away with it, but that
-means they're two independent Tk "grid masters", and Tk's grid geometry
-manager sizes each grid's own columns to fit only ITS OWN widest cell. A
-header cell ("SSID") and a body cell (an actual SSID value) are different
-widths, so the columns drift. Tried first and rejected: grid's own `uniform`
-column-group option, which sounds like it should solve exactly this — tested
-directly against this app's own widgets, and it does NOT synchronize widths
-across separate grid masters, only within one.
+05-boundary-design.md "Tables": one model backs all three tables (Networks,
+Targets, enumerate results). It keeps the mockup's Column(title, width) tuple as
+data and exposes the API the pump handlers call: upsert(key, values) and
+remove(key) for the live, bssid-keyed tables, and set_rows(rows) and clear() for
+the enumerate results. A new key appends inside beginInsertRows; an existing key
+updates in place and emits dataChanged for that row.
 
-Body cells are CTkEntry widgets in "readonly" state, not CTkLabel — this is
-why, see add_row()'s docstring. That choice turns out to also fix the drift
-bug outright: confirmed empirically (a real on-screen widget, a body value
-much longer than its column's pixel width, winfo_width() read back after
-update_idletasks()) that CTkEntry's own fixed pixel width does NOT
-geometry-propagate past a long value the way CTkLabel's does — the column
-stays exactly at Column.width and the overflow text just scrolls inside the
-entry's own xview instead of forcing the grid column wider. Header cells
-don't have this problem either way (header text is always a short fixed
-title like "BSSID"), so build_header() below still uses plain CTkLabel.
-
-Only three of this app's five list/table-shaped views actually have this
-header+body-as-two-grids shape at all: NetworksView and TargetPicker
-(discovery_view.py), and EnumeratePanel (enumerate_view.py). CapturePanel's
-handshake list, HandshakePicker (crack_view.py), and AuditLogView each render
-one composed string per row via plain .pack() — no columns, no .grid() call
-anywhere in those three files, so there's nothing for this bug to affect
-there (confirmed by grep, not assumed from a visual skim).
+A QTableView has one header over one body, so the two-grid column drift the old
+table.py fought is gone. Column.width is the initial section width; the last
+section stretches. QTableView does not copy a cell to the clipboard itself, so
+CopyTableView adds a Ctrl+C handler for the readonly-entry copy behavior the
+mockup's data cells had.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional, Sequence
 
-import customtkinter as ctk
-
-from aircommand.gui.theme import PALETTE, mono_font, ui_font
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import QApplication, QTableView, QWidget
 
 
 @dataclass(frozen=True)
 class Column:
     title: str
-    width: int  # pixels — shared minimum/clamp width for this column's header AND every body cell
+    width: int  # pixels: the column's initial section width
 
 
-def build_header(parent: ctk.CTkFrame, columns: tuple[Column, ...]) -> ctk.CTkFrame:
-    """One muted label per column (design spec: .table's "muted 10.5px
-    headers"), each pinned to its Column.width. Pass the SAME `columns` tuple
-    to add_row()/update_row() below for the body grid -- that pairing is what
-    keeps the two separate grid masters aligned. Returns a plain CTkFrame
-    using .grid() internally, same as before the Grid Watch restyle -- kept
-    this way (no extra divider/border wrapper baked in here) because at
-    least one caller (TargetPicker) grids its own "Add manually" button
-    directly onto this return value; every caller that wants the header set
-    visually apart from the body now wraps this whole table in a themed Cell
-    instead, whose own head/body border already provides that structure."""
-    header = ctk.CTkFrame(parent, fg_color="transparent")
-    for col_index, column in enumerate(columns):
-        ctk.CTkLabel(
-            header, text=column.title, font=ui_font(10), text_color=PALETTE["muted"],
-            width=column.width, anchor="w",
-        ).grid(row=0, column=col_index, padx=5, sticky="w")
-    return header
+class RowTableModel(QAbstractTableModel):
+    """A flat table of string rows. Keyed rows (upsert/remove) and bulk rows
+    (set_rows/clear) share one model; set_rows drops the key index because the
+    enumerate results that use it are never upserted."""
+
+    def __init__(self, columns: Sequence[Column], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._columns = tuple(columns)
+        self._rows: list[tuple[str, ...]] = []
+        self._index: dict[object, int] = {}
+
+    # --- Qt model protocol ---------------------------------------------------
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._columns)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and index.isValid():
+            return self._rows[index.row()][index.column()]
+        return None
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self._columns[section].title
+        return None
+
+    # --- live keyed updates --------------------------------------------------
+    def upsert(self, key: object, values: Sequence[str]) -> None:
+        row = tuple(values)
+        existing = self._index.get(key)
+        if existing is None:
+            position = len(self._rows)
+            self.beginInsertRows(QModelIndex(), position, position)
+            self._index[key] = position
+            self._rows.append(row)
+            self.endInsertRows()
+            return
+        self._rows[existing] = row
+        top = self.index(existing, 0)
+        bottom = self.index(existing, len(self._columns) - 1)
+        self.dataChanged.emit(top, bottom, [Qt.ItemDataRole.DisplayRole])
+
+    def remove(self, key: object) -> None:
+        existing = self._index.get(key)
+        if existing is None:
+            return
+        self.beginRemoveRows(QModelIndex(), existing, existing)
+        del self._rows[existing]
+        del self._index[key]
+        for other_key, position in self._index.items():
+            if position > existing:
+                self._index[other_key] = position - 1
+        self.endRemoveRows()
+
+    # --- bulk replacement ----------------------------------------------------
+    def set_rows(self, rows: Sequence[Sequence[str]]) -> None:
+        self.beginResetModel()
+        self._rows = [tuple(row) for row in rows]
+        self._index = {}
+        self.endResetModel()
+
+    def clear(self) -> None:
+        self.set_rows([])
 
 
-def add_row(
-    body: ctk.CTkBaseClass, row_index: int, columns: tuple[Column, ...], values: tuple[str, ...]
-) -> list[ctk.CTkEntry]:
-    """Adds one data row of read-only entry cells to `body` (typically a
-    CTkScrollableFrame) at row_index, one per column, width-matched against
-    `columns` -- see build_header().
+class CopyTableView(QTableView):
+    """A QTableView that copies the selected cells to the clipboard on Ctrl+C.
+    Qt selects cells but does not copy them itself."""
 
-    Read-only CTkEntry instead of CTkLabel so a cell's value (a BSSID, an
-    SSID, ...) can be mouse-drag-selected and copied (Ctrl+C) like any other
-    text field -- a plain CTkLabel can't be selected at all. border_width=0,
-    corner_radius=0 and fg_color="transparent" make it render flush with the
-    row, same as the CTkLabel it replaces, instead of looking like an input
-    box. state="readonly" blocks typing/paste/cut while leaving selection and
-    copy untouched -- standard Tk Entry behaviour, confirmed empirically
-    below alongside the recipe for changing a readonly entry's text (see
-    _set_cell_text())."""
-    entries = []
-    for col_index, (column, value) in enumerate(zip(columns, values)):
-        entry = ctk.CTkEntry(
-            body, width=column.width, fg_color="transparent",
-            border_width=0, corner_radius=0, justify="left",
-            font=mono_font(11), text_color=PALETTE["text"],   # design spec:
-            # "11.5px Fira Code data cells" -- adapter names, BSSIDs, etc.
-        )
-        _set_cell_text(entry, value)
-        entry.grid(row=row_index, column=col_index, padx=5, pady=2, sticky="w")
-        entries.append(entry)
-    return entries
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self._copy_selection()
+            return
+        super().keyPressEvent(event)
 
+    def _selected_text(self) -> str:
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return ""
+        indexes = sorted(indexes, key=lambda index: (index.row(), index.column()))
+        lines: list[str] = []
+        current_row = indexes[0].row()
+        cells: list[str] = []
+        for index in indexes:
+            if index.row() != current_row:
+                lines.append("\t".join(cells))
+                cells = []
+                current_row = index.row()
+            cells.append(str(index.data() or ""))
+        lines.append("\t".join(cells))
+        return "\n".join(lines)
 
-def update_row(entries: list[ctk.CTkEntry], columns: tuple[Column, ...], values: tuple[str, ...]) -> None:
-    """Updates an existing row's text in place (a re-sighted Network, a
-    relabelled Target, ...) -- same cells as add_row()."""
-    for entry, value in zip(entries, values):
-        _set_cell_text(entry, value)
+    def _copy_selection(self) -> None:
+        text = self._selected_text()
+        if text:
+            QApplication.clipboard().setText(text)
 
 
-def _set_cell_text(entry: ctk.CTkEntry, value: str) -> None:
-    """Replaces a readonly entry's content. Confirmed empirically: a Tk Entry
-    in readonly state silently no-ops .insert()/.delete() instead of raising
-    -- state has to go back to "normal" around the edit, then back to
-    "readonly", or the new value never actually lands."""
-    entry.configure(state="normal")
-    entry.delete(0, "end")
-    entry.insert(0, value)
-    entry.configure(state="readonly")
+def apply_columns(view: QTableView, columns: Sequence[Column]) -> None:
+    """Set each column's initial width, stretch the last section, and hide the
+    row-number gutter. Call after the model is set."""
+    view.verticalHeader().setVisible(False)
+    for section, column in enumerate(columns):
+        view.setColumnWidth(section, column.width)
+    header = view.horizontalHeader()
+    header.setStretchLastSection(True)

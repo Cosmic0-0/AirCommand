@@ -1,6 +1,6 @@
 # AirCommand
 
-AirCommand is a wifi-auditing orchestrator. A CustomTkinter GUI wraps
+AirCommand is a wifi-auditing orchestrator. A PySide6 Qt Widgets GUI wraps
 `aircrack-ng`, `hashcat`, and `nmap`, and adds workflow, tracking, and
 authorization enforcement on top of them.
 
@@ -114,17 +114,18 @@ a fresh machine or VM from nothing to a running app.
 ### 1. System packages
 
 AirCommand shells out to the aircrack-ng suite, hashcat, nmap, and
-`hcxpcapngtool`, and the GUI needs Tkinter. Install them with apt:
+`hcxpcapngtool`, and the Qt GUI needs `libxcb-cursor0` for its xcb plugin.
+Install them with apt:
 
 ```bash
-sudo apt install aircrack-ng hashcat nmap hcxtools iw python3-tk python3-venv python3-pip
+sudo apt install aircrack-ng hashcat nmap hcxtools iw libxcb-cursor0 python3-venv python3-pip
 ```
 
 - `aircrack-ng` provides airodump-ng, aireplay-ng, airmon-ng, and aircrack-ng, which cover Discovery, Capture, deauth, and monitor-mode control.
 - `hashcat` runs the offline crack. `hcxtools` provides `hcxpcapngtool`, which converts a capture into the format hashcat reads.
 - `nmap` runs Enumerate's host and port scan.
 - `iw` reads which bands your adapter supports. Without it, Discovery offers 2.4 GHz only.
-- `python3-tk` is Tkinter, which CustomTkinter builds on. `python3-venv` and `python3-pip` create and populate the virtual environment.
+- `libxcb-cursor0` is the XCB cursor library Qt's platform plugin loads at startup. `python3-venv` and `python3-pip` create and populate the virtual environment.
 
 The same line works on Kali. apt skips anything already installed.
 
@@ -176,8 +177,8 @@ passthrough.
 
 ### AppImage
 
-The AppImage is one executable that carries CPython 3.12, Tcl/Tk,
-CustomTkinter, and the `aircommand` package. It does not carry the native
+The AppImage is one executable that carries CPython 3.12, PySide6 (the Qt
+Widgets libraries), and the `aircommand` package. It does not carry the native
 tools: the aircrack-ng suite, `nmap`, `hashcat`, `hcxpcapngtool`, and `iw`.
 Those stay on the host. The AppImage removes the Python setup, the virtual
 environment and the pip install above. It does not remove the native-tool
@@ -203,7 +204,7 @@ the Python packages the AppImage already carries, so
 [1. System packages](#1-system-packages) explains each one:
 
 ```bash
-sudo apt install aircrack-ng iw nmap hashcat hcxtools
+sudo apt install aircrack-ng iw nmap hashcat hcxtools libxcb-cursor0
 ```
 
 Run it as your normal user, never with sudo. The app asks for your sudo
@@ -231,7 +232,7 @@ fresh VM or against real monitor-mode hardware.
 
 AirCommand splits into two layers. A GUI-agnostic core package handles
 discovery, capture, cracking, and allowlist enforcement. A thin
-CustomTkinter layer calls into that core. It adds no logic of its own.
+PySide6 Qt Widgets layer calls into that core. It adds no logic of its own.
 
 Structured data, such as seen networks, the Target allowlist, and crack
 results, lives in SQLite. Binary artifacts, such as captures and

@@ -1,49 +1,64 @@
-"""TargetActionsView — composes TargetSelector + CapturePanel + EnumeratePanel;
-owns the deauth confirm dialog. See docs/design/gui-structure.md 'Target
-Actions tab'.
+"""TargetActionsView: the Capture and Attack page for the PySide6 port. Composes
+TargetSelector, CapturePanel, and EnumeratePanel, and owns the deauth confirm
+dialog.
+
+See docs/design/gui-structure.md "Target Actions tab",
+docs/design/gui-redesign-gridwatch.md section 5 ("Capture & Attack") for the
+three stacked full-width sections, and
+docs/design/gui-port/02-reproduction-inventory.md (TargetActionsView row) and
+05-boundary-design.md "View mapping". The composition order, the
+_on_target_changed fan-out, the two TargetAdded/TargetRemoved subscriptions, and
+the _confirm_deauth_dialog bool gate port verbatim; only the widget layer is
+new. The Tk _DeauthConfirmDialog becomes a QDialog whose exec() returns a bool.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-import customtkinter as ctk
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from aircommand.core import Target
 from aircommand.core.events import TargetAdded, TargetRemoved
-from aircommand.gui import dialog
 from aircommand.gui.capture_view import CapturePanel
+from aircommand.gui.dialog import Dialog, outline_button, primary_button
 from aircommand.gui.enumerate_view import EnumeratePanel
 from aircommand.gui.target_selector import TargetSelector
-from aircommand.gui.theme import PALETTE, ui_font
+
+_PAGE_TITLE = "Capture & Attack"   # a QLabel with no buddy shows a single "&" literally
+_PAGE_COPY = "Capture and transmission are gated to Targets. Every deauth firing is logged."
 
 
-class TargetActionsView(ctk.CTkFrame):
-    def __init__(self, master, app) -> None:
-        # fg_color="transparent" so the page's dark PALETTE["bg"] shows through
-        # the gaps around the cells, exactly like this page's sibling containers
-        # (NetworksView, ManagementView, CapturePanel, ...). Left unset, this
-        # frame fell back to CustomTkinter's default -- which, because nothing
-        # sets dark appearance mode, resolves to the light-theme gray86 -- and
-        # since CapturePanel/EnumeratePanel/TargetSelector are all transparent,
-        # that near-white showed through as the "odd white areas" on this page.
-        super().__init__(master, fg_color="transparent")
+class TargetActionsView(QWidget):
+    def __init__(self, app, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
         self._app = app
 
-        # CapturePanel/EnumeratePanel are constructed before TargetSelector,
-        # even though they're visually packed below it: TargetSelector.__init__
-        # synchronously calls on_change (via _rebuild) with the initial
-        # selection, and _on_target_changed below needs self.capture_panel/
-        # self.enumerate_panel to already exist by the time that first call
-        # happens. Packing order (which determines the actual layout) is set
-        # separately below and is unaffected by this construction order.
-        self.capture_panel = CapturePanel(self, app, confirm_deauth=self._confirm_deauth_dialog)
-        self.enumerate_panel = EnumeratePanel(self, app)
-        self.target_selector = TargetSelector(self, app, on_change=self._on_target_changed)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(8)
 
-        self.target_selector.pack(side="top", fill="x", pady=(0, 10))
-        self.capture_panel.pack(side="top", fill="both", expand=True, pady=(0, 10))
-        self.enumerate_panel.pack(side="top", fill="both", expand=True)
+        title = QLabel(_PAGE_TITLE)
+        title.setProperty("class", "pageTitle")
+        root.addWidget(title)
+        copy = QLabel(_PAGE_COPY)
+        copy.setProperty("class", "pageSub")
+        copy.setWordWrap(True)
+        root.addWidget(copy)
+
+        # CapturePanel and EnumeratePanel are constructed before TargetSelector,
+        # though they are laid out below it: TargetSelector.__init__ calls
+        # on_change synchronously with its initial pick, and _on_target_changed
+        # needs both panels to already exist. Layout order is set separately
+        # below and is independent of this construction order.
+        self.capture_panel = CapturePanel(app, confirm_deauth=self._confirm_deauth_dialog)
+        self.enumerate_panel = EnumeratePanel(app)
+        self.target_selector = TargetSelector(app, on_change=self._on_target_changed)
+
+        root.addWidget(self.target_selector)
+        root.addWidget(self.capture_panel)
+        root.addWidget(self.enumerate_panel)
+        root.addStretch(1)
 
         app.pump.on(TargetAdded, self.target_selector.upsert_row)
         app.pump.on(TargetRemoved, self.target_selector.remove_row)
@@ -53,56 +68,44 @@ class TargetActionsView(ctk.CTkFrame):
         self.enumerate_panel.set_target(target)
 
     def _confirm_deauth_dialog(self, target: Target) -> bool:
-        # ADR-0001: deauth stays in scope only *with* extra confirmation
-        # friction, on every firing, with no way to skip it. This replaces the
-        # old tkinter.messagebox.askyesno (which can't be themed and read as a
-        # light native popup against the dark app) with a themed modal that
-        # returns the same bool. The gate is unchanged: this still blocks until
-        # the operator answers and CapturePanel still refuses to start unless it
-        # returns True. Default focus is on Cancel and Enter/Escape both cancel,
-        # so an accidental keypress can never fire the burst.
-        confirm = _DeauthConfirmDialog(self, target)
-        self.wait_window(confirm)
-        return confirm.result
+        # ADR-0001: deauth stays in scope only with extra confirmation friction,
+        # on every firing, with no way to skip it. exec() blocks until the
+        # operator answers and returns True only when they click Fire Deauth.
+        dialog = _DeauthConfirmDialog(target, self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
 
-class _DeauthConfirmDialog(ctk.CTkToplevel):
-    """Themed replacement for the native yes/no deauth confirmation. `result`
-    is False unless the operator explicitly clicks Fire Deauth -- closing the
-    window, Cancel, Enter and Escape all leave it False."""
+class _DeauthConfirmDialog(Dialog):
+    """Themed replacement for the native yes/no deauth confirmation. Accepts only
+    when the operator clicks Fire Deauth; Cancel, Escape, Enter (which triggers
+    the default Cancel), and closing the window all reject, so a stray keypress
+    can never fire the burst."""
 
-    def __init__(self, master, target: Target) -> None:
-        super().__init__(master)
-        self.result = False
-        dialog.apply_chrome(self, "Confirm deauth", min_width=440, min_height=180)
+    def __init__(self, target: Target, parent: Optional[QWidget] = None) -> None:
+        super().__init__("Confirm deauth", parent)
 
-        ctk.CTkLabel(
-            self,
-            text=(
-                f"This will actively transmit deauthentication frames at {target.ssid} "
-                f"({target.bssid}) to force a handshake. Every firing is logged. Continue?"
-            ),
-            font=ui_font(12), text_color=PALETTE["text"], wraplength=400, justify="left",
-        ).pack(padx=20, pady=(20, 16))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
 
-        button_row = ctk.CTkFrame(self, fg_color="transparent")
-        button_row.pack(padx=20, pady=(0, 20), fill="x")
-        # Fire is the danger primary; Cancel is the outline default. Fire packs
-        # to the right of Cancel but is NOT the focus default -- see _on_cancel.
-        self._fire_button = dialog.primary_button(button_row, "Fire Deauth", self._on_fire, danger=True)
-        self._fire_button.pack(side="right", padx=(10, 0))
-        self._cancel_button = dialog.outline_button(button_row, "Cancel", self._on_cancel)
-        self._cancel_button.pack(side="right")
+        message = QLabel(
+            f"This will actively transmit deauthentication frames at {target.ssid} "
+            f"({target.bssid}) to force a handshake. Every firing is logged. Continue?"
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
 
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self.bind("<Escape>", lambda _event: self._on_cancel())
-        self.bind("<Return>", lambda _event: self._on_cancel())  # Enter cancels, never fires
-        dialog.make_modal(self, focus=self._cancel_button)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self._cancel_button = outline_button("Cancel", self.reject)
+        self._fire_button = primary_button("Fire Deauth", self.accept, danger=True)
+        button_row.addWidget(self._cancel_button)
+        button_row.addWidget(self._fire_button)
+        layout.addLayout(button_row)
 
-    def _on_fire(self) -> None:
-        self.result = True
-        self.destroy()
-
-    def _on_cancel(self) -> None:
-        self.result = False
-        self.destroy()
+        # Default focus on Cancel: Enter triggers the default button, so it
+        # cancels rather than fires; Escape and the window close reject by
+        # QDialog default.
+        self._fire_button.setAutoDefault(False)
+        self._cancel_button.setDefault(True)
+        self._cancel_button.setFocus()
