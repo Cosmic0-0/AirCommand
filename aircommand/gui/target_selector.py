@@ -11,10 +11,11 @@ label bookkeeping, the seed from engine.targets.list(), and the selection
 fallback logic port as is from the CustomTkinter original; only the widget layer
 is new.
 
-P5's Logs page reuses this class with include_all_option=True and does not wire
-its pump events, so the selector must work when the parent never registers
-TargetAdded / TargetRemoved (05 "Open decisions"): it is simply seeded once and
-not kept live. TargetActionsView does register them (target_actions_view.py).
+Both call sites now keep this live: TargetActionsView wires TargetAdded /
+TargetRemoved to upsert_row / remove_row itself (target_actions_view.py), and the
+Logs page's reuse with include_all_option=True gets the same wiring in
+App._build_logs_page. The seed from engine.targets.list() still stands on its own,
+so the selector also works when a parent never registers those events.
 """
 
 from __future__ import annotations

@@ -179,6 +179,20 @@ QTableView {{ background: {p['panel']}; border: none; gridline-color: transparen
 QTableView::item {{ border-bottom: 1px solid {p['border']}; padding: 3px 6px; }}
 QHeaderView::section {{ background: {p['panel']}; color: {p['muted']}; border: none;
     border-bottom: 1px solid {p['border']}; padding: 6px 8px; font-size: 10px; font-weight: 600; }}
+
+/* QScrollBar is a real Qt class, not one of this app's semantic classes, so it
+   takes a plain type selector rather than the [class="..."] attribute form. Qt's
+   default handle is a light grey that reads as a bright gash down the dark Grid
+   Watch theme, so the track sinks into the page and only the handle carries a
+   hairline-border tone that lifts on hover. */
+QScrollBar:vertical {{ background: {p['bg']}; width: 9px; margin: 0; border: none; }}
+QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: {r}px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: {p['muted']}; }}
+QScrollBar:horizontal {{ background: {p['bg']}; height: 9px; margin: 0; border: none; }}
+QScrollBar::handle:horizontal {{ background: {p['border']}; border-radius: {r}px; min-width: 24px; }}
+QScrollBar::handle:horizontal:hover {{ background: {p['muted']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
 
 

@@ -135,7 +135,7 @@ No core file changes in this port. These stay exactly as they are:
 
 Only one needs the owner.
 
-**Logs-page target selector, live or not.** `AuditLogView` builds its filter selector and never subscribes it to `TargetAdded` or `TargetRemoved`. The dropdown is seeded once and does not follow targets added or removed during the session (02-reproduction-inventory.md, "Drift against gui-structure.md"; gui-structure.md event table rows for `TargetAdded` and `TargetRemoved`). Recommendation: reproduce the non-live behavior. Making it live is a two-line change, wiring the subscriptions the way `TargetActionsView` does (target_actions_view.py:48-49).
+**Logs-page target selector, live or not.** Resolved: the owner chose live. `AuditLogView` still never subscribes the selector itself, but `App._build_logs_page` now wires `TargetAdded` / `TargetRemoved` to its `upsert_row` / `remove_row`, the way `TargetActionsView` does for its own selector (target_actions_view.py:48-49), so the Logs filter dropdown follows targets added or removed during the session. This closes the drift against gui-structure.md's event table (02-reproduction-inventory.md, "Drift against gui-structure.md").
 
 Taken in this doc, each reversible:
 

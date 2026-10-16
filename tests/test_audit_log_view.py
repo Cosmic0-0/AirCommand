@@ -24,7 +24,7 @@ from PySide6.QtWidgets import QLabel
 
 from aircommand.core.domain import DeauthOptions, MacAddress
 from aircommand.core.engine import Engine
-from aircommand.core.events import DeauthFired
+from aircommand.core.events import DeauthFired, TargetAdded, TargetRemoved
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.audit_log_view import AuditLogView
 from aircommand.gui.cell import Tag
@@ -90,6 +90,11 @@ def _row_text(row) -> str:
     if isinstance(row, QLabel):
         return row.text()
     return next(c.text() for c in row.findChildren(QLabel) if not isinstance(c, Tag))
+
+
+def _selector_labels(view: AuditLogView) -> list:
+    menu = view.target_selector._menu
+    return [menu.itemText(i) for i in range(menu.count())]
 
 
 # --- Banner ------------------------------------------------------------------
@@ -219,6 +224,34 @@ def test_append_respects_active_filter(qtbot, tmp_path):
     view.append(new_event)
 
     assert len(_rows(view)) == row_count_before
+
+
+# --- Live filter dropdown ----------------------------------------------------
+
+
+def test_filter_dropdown_follows_targets_when_wired_like_app(qtbot, tmp_path):
+    """The Logs filter dropdown is now kept live. AuditLogView stays agnostic of
+    the pump, so App._build_logs_page wires TargetAdded / TargetRemoved to the
+    selector's upsert_row / remove_row; this test makes the same two registrations
+    onto the fake app's real pump and proves a mid-session add and remove reach
+    the dropdown's item list. The events are published by real engine calls, not
+    hand-built, and the pump delivers them queued, so each assertion waits for the
+    loop to drain."""
+    engine = _make_engine(tmp_path)
+    fake_app = _FakeApp(engine)
+    view = AuditLogView(fake_app, [])
+    qtbot.addWidget(view)
+
+    # The exact two registrations _build_logs_page makes (app.py).
+    fake_app.pump.on(TargetAdded, view.target_selector.upsert_row)
+    fake_app.pump.on(TargetRemoved, view.target_selector.remove_row)
+
+    target = engine.targets.add(BSSID_1, "Live-SSID", 6, "My house")
+    expected = view.target_selector._label_for(target)
+    qtbot.waitUntil(lambda: expected in _selector_labels(view), timeout=2000)
+
+    engine.targets.remove(target.bssid)
+    qtbot.waitUntil(lambda: expected not in _selector_labels(view), timeout=2000)
 
 
 # --- FAILED row rendering ----------------------------------------------------

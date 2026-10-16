@@ -14,7 +14,7 @@ token hex directly.
 from __future__ import annotations
 
 import pytest
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea
 
 from aircommand.gui import theme
 from aircommand.gui.cell import Cell
@@ -74,3 +74,25 @@ def test_cell_background_uses_the_panel_token(qtbot):
     # Sample low in the body, clear of the head's bottom border and the 2px
     # rounded corners.
     assert _pixel(cell, 110, 128) == _rgb(PALETTE["panel"])
+
+
+def test_scrollbar_handle_uses_a_palette_token_not_qt_default_grey(qtbot):
+    # Qt's unstyled scrollbar handle renders #e6e6e6, a bright grey gash on the
+    # dark theme. Oversized content forces a real vertical scrollbar, and the
+    # grabbed handle pixel must come from the theme, not that default.
+    area = QScrollArea()
+    content = QLabel("x\n" * 200)
+    area.setWidget(content)
+    area.setStyleSheet(theme.STYLESHEET)
+    area.resize(160, 120)
+    qtbot.addWidget(area)
+    area.show()
+    qtbot.waitUntil(area.verticalScrollBar().isVisible, timeout=2000)
+
+    bar = area.verticalScrollBar()
+    # Centre of the bar's width, well inside the handle that sits at the top
+    # (the step-arrow buttons are zeroed out, so the handle starts at y=0, and
+    # min-height 24 keeps it tall enough to sample clear of its rounded corners).
+    pixel = _pixel(bar, bar.width() // 2, 12)
+    assert pixel != (230, 230, 230)
+    assert pixel == _rgb(PALETTE["border"])
