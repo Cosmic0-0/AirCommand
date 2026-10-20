@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
-from enum import Enum, auto
+from enum import Enum
 from pathlib import Path
 from typing import NewType, Optional
 import string

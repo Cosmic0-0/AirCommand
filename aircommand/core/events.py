@@ -19,13 +19,13 @@ import threading
 import uuid
 
 from aircommand.core.domain import (
-    AuditLogEntry,
     BSSID,
     CrackResultRow,
     EnumHost,
     Handshake,
     JobId,
     Network,
+    StopReason,
     Target,
 )
 
@@ -79,7 +79,7 @@ class DiscoveryStopped(DurableEvent):
     driver anywhere in this codebase had ever surfaced stderr before."""
 
     job_id: JobId
-    reason: "StopReason"
+    reason: StopReason
     error_detail: Optional[str] = None
 
 
@@ -142,7 +142,7 @@ class CaptureStopped(DurableEvent):
 
     job_id: JobId
     target_id: int
-    reason: "StopReason"
+    reason: StopReason
     error_detail: Optional[str] = None
 
 
