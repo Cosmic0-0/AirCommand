@@ -167,6 +167,9 @@ class CrackPanel(QWidget):
         self.selected_handshake: Optional[Handshake] = None
         self.selected_wordlist: Optional[Path] = None
         self.active_handle: Optional[JobHandle] = None
+        # Unsubscribe handles for the current Start's per-job registrations,
+        # dropped when the job reaches its terminal event (_on_result).
+        self._job_subscriptions: list[Callable[[], None]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -249,11 +252,23 @@ class CrackPanel(QWidget):
         return f"{outcome_text} | wordlist {wordlist} | {timestamp}"
 
     def on_start_clicked(self) -> None:
-        handle = self._app.engine.crack.start(self.selected_handshake, self.selected_wordlist)
+        try:
+            handle = self._app.engine.crack.start(self.selected_handshake, self.selected_wordlist)
+        except RuntimeError as e:
+            # Crack takes no RF reservation and no live allowlist re-check (the
+            # handshake's provenance is the authorization), so the only start-time
+            # failure is the registry/thread unwind re-raising. Report it and
+            # leave the panel re-startable.
+            self._app.status_bar.show_error(f"Couldn't start crack: {e}")
+            return
         self.active_handle = handle
         self._status_label.setText("Cracking...")
-        self._app.pump.on(CrackProgress, self._on_progress, only_job=handle.job_id)
-        self._app.pump.on(CrackResult, self._on_result, only_job=handle.job_id)
+        # Per-job registrations, dropped on the terminal event (_on_result), so
+        # the handler list doesn't grow for the life of the session.
+        self._job_subscriptions = [
+            self._app.pump.on(CrackProgress, self._on_progress, only_job=handle.job_id),
+            self._app.pump.on(CrackResult, self._on_result, only_job=handle.job_id),
+        ]
         self._update_button_state()
 
     def _on_progress(self, event) -> None:
@@ -265,6 +280,12 @@ class CrackPanel(QWidget):
 
     def _on_result(self, event) -> None:
         self.active_handle = None
+        self._unsubscribe_job()   # terminal event: drop this Start's registrations
         self._status_label.setText(self._format_result(event.result))
         self._refresh_results()
         self._update_button_state()
+
+    def _unsubscribe_job(self) -> None:
+        for unsubscribe in self._job_subscriptions:
+            unsubscribe()
+        self._job_subscriptions = []

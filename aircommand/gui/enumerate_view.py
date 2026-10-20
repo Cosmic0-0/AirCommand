@@ -25,12 +25,19 @@ guard is kept current by the QTimer, not by events.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from aircommand.core import AdapterBusy, JobHandle, NoAdapterSelected, RadioCommandFailed, Target
+from aircommand.core import (
+    AdapterBusy,
+    JobHandle,
+    NoAdapterSelected,
+    NotATargetError,
+    RadioCommandFailed,
+    Target,
+)
 from aircommand.core.domain import EnumHost
 from aircommand.core.events import EnumerationFailed, NmapScanCompleted
 from aircommand.gui.cell import Cell
@@ -65,6 +72,9 @@ class EnumeratePanel(QWidget):
         self._app = app
         self.target: Optional[Target] = None
         self.active_handle: Optional[JobHandle] = None
+        # Unsubscribe handles for the current scan's per-job registrations,
+        # dropped when it reaches a terminal event (_on_completed / _on_failed).
+        self._job_subscriptions: list[Callable[[], None]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -169,20 +179,42 @@ class EnumeratePanel(QWidget):
                 f"Couldn't switch the adapter out of monitor mode back to normal wifi: {e}"
             )
             return
+        except NotATargetError:
+            # The allowlist gate re-derives the Target at start; it may have been
+            # removed since this panel's target was set. Report the refusal — the
+            # gate stays authoritative — and leave the panel re-startable.
+            self._app.status_bar.show_error(
+                "That network is no longer an authorized Target. Re-add it on the Discovery & Targets page."
+            )
+            return
+        except RuntimeError as e:
+            self._app.status_bar.show_error(f"Couldn't start the scan: {e}")
+            return
         self.active_handle = handle
         self._clear_results()
         self._status_label.setText("Enumerating...")
-        self._app.pump.on(NmapScanCompleted, self._on_completed, only_job=handle.job_id)
-        self._app.pump.on(EnumerationFailed, self._on_failed, only_job=handle.job_id)
+        # Per-job registrations, dropped on a terminal event (either handler
+        # fires), so the handler list doesn't grow for the life of the session.
+        self._job_subscriptions = [
+            self._app.pump.on(NmapScanCompleted, self._on_completed, only_job=handle.job_id),
+            self._app.pump.on(EnumerationFailed, self._on_failed, only_job=handle.job_id),
+        ]
         self._update_button_state()
 
     def _on_completed(self, event) -> None:
         self.active_handle = None
+        self._unsubscribe_job()   # terminal event: drop this scan's registrations
         self._status_label.setText(f"Found {len(event.hosts)} host(s)")
         self._populate_results(event.hosts)
         self._update_button_state()
 
     def _on_failed(self, event) -> None:
         self.active_handle = None
+        self._unsubscribe_job()   # terminal event: drop this scan's registrations
         self._status_label.setText(f"Enumeration failed: {event.error}")
         self._update_button_state()
+
+    def _unsubscribe_job(self) -> None:
+        for unsubscribe in self._job_subscriptions:
+            unsubscribe()
+        self._job_subscriptions = []

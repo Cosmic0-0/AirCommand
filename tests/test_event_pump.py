@@ -19,6 +19,7 @@ for an event published on the GUI thread. Tests spin the loop with qtbot
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -231,9 +232,38 @@ def test_only_job_can_never_match_handshake_captured_which_has_no_job_id(qtbot):
     assert received == []
 
 
+# --- Unsubscribe lifecycle ---------------------------------------------------
+
+def test_on_returns_an_unsubscribe_handle_that_removes_the_registration(qtbot):
+    # A per-Start registration must be removable so the handler list does not grow
+    # for the life of the session. on() returns a handle that drops exactly its own
+    # registration and leaves the others in place.
+    engine = _FakeEngine()
+    pump = _make_pump(engine)
+    job = JobId(uuid.uuid4())
+    received: list[CaptureStopped] = []
+    kept: list[CaptureStopped] = []
+
+    unsubscribe = pump.on(CaptureStopped, received.append, only_job=job)
+    pump.on(CaptureStopped, kept.append, only_job=job)   # a sibling that must survive
+
+    unsubscribe()
+
+    matching = make_capture_stopped(job)
+    engine.bus.publish(matching)
+    qtbot.waitUntil(lambda: kept == [matching], timeout=2000)
+
+    assert received == []   # the unsubscribed handler never ran
+    assert unsubscribe() is None   # a second call is a harmless no-op
+
+
 # --- Proof 4: a raising handler and stop() -----------------------------------
 
-def test_a_raising_handler_does_not_stop_later_events_from_being_delivered(qtbot):
+def test_a_raising_handler_is_isolated_and_logged_not_propagated(qtbot, caplog):
+    # The pump isolates per-handler failures the same way EventBus.publish does:
+    # a raising handler must not stop a later event from being delivered, must not
+    # propagate out of the Qt slot (which on PySide6 >= 6.5 can abort the app),
+    # and must be logged rather than swallowed silently.
     engine = _FakeEngine()
     pump = _make_pump(engine)
     delivered: list[CaptureStopped] = []
@@ -241,17 +271,24 @@ def test_a_raising_handler_does_not_stop_later_events_from_being_delivered(qtbot
     def raising_handler(event: TargetAdded) -> None:
         raise RuntimeError("handler boom")
 
+    # A raising handler on the SAME event as a good one, to prove one bad handler
+    # does not stop the others within a single dispatch.
+    recorded: list[TargetAdded] = []
     pump.on(TargetAdded, raising_handler)
+    pump.on(TargetAdded, recorded.append)
     pump.on(CaptureStopped, delivered.append)
 
+    added = make_target_added()
     later = make_capture_stopped(JobId(uuid.uuid4()))
-    with capture_exceptions() as exceptions:
-        engine.bus.publish(make_target_added())  # its slot raises
+    with capture_exceptions() as exceptions, caplog.at_level(logging.ERROR, logger="aircommand.gui.event_pump"):
+        engine.bus.publish(added)  # one slot raises, the sibling must still run
         engine.bus.publish(later)  # a separate queued slot call
         qtbot.waitUntil(lambda: delivered == [later], timeout=2000)
 
     assert delivered == [later]
-    assert len(exceptions) == 1  # the raise was captured, not swallowed silently
+    assert recorded == [added]   # the sibling handler ran despite the raise
+    assert exceptions == []       # the raise did NOT propagate out of the Qt slot
+    assert "TargetAdded" in caplog.text   # it was logged, not swallowed silently
 
 
 def test_stop_prevents_any_handler_from_running_afterwards(qtbot):

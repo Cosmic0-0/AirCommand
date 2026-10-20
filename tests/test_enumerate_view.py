@@ -16,7 +16,7 @@ from PySide6.QtGui import QFont, QFontMetrics
 
 from aircommand.core.domain import MacAddress
 from aircommand.core.engine import Engine
-from aircommand.core.events import NmapScanCompleted
+from aircommand.core.events import EnumerationFailed, NmapScanCompleted
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.enumerate_view import EnumeratePanel
 from aircommand.gui.event_pump import GuiEventPump
@@ -110,6 +110,63 @@ def test_successful_scan_populates_results_and_reenables_start_button(qtbot, tmp
     assert panel._status_label.text() == "Found 2 host(s)"
     assert panel.active_handle is None
     assert panel._start_button.isEnabled()
+
+
+def test_target_removed_before_start_is_reported_and_leaves_no_active_handle(qtbot, tmp_path):
+    # The allowlist gate re-derives the Target at start (allowlist.require_target),
+    # so a Target removed between selection and the Start click raises
+    # NotATargetError. The slot must report it through the status bar, start no
+    # scan, and leave nothing half-registered on the pump.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="lo",
+        proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on lo)"]}),
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    panel = EnumeratePanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+
+    engine.targets.remove(target.bssid)   # the allowlist changes after selection
+
+    panel.on_start_clicked()
+
+    assert panel.active_handle is None
+    assert len(fake_app.status_bar.errors) == 1
+    assert "Target" in fake_app.status_bar.errors[0]
+    assert panel._job_subscriptions == []
+    assert fake_app.pump._handlers.get(NmapScanCompleted, []) == []
+    assert fake_app.pump._handlers.get(EnumerationFailed, []) == []
+
+
+def test_scan_handlers_are_unsubscribed_on_the_terminal_event(qtbot, tmp_path):
+    # The per-scan NmapScanCompleted/EnumerationFailed registrations must be
+    # dropped when the scan reaches its terminal event, or the handler list grows
+    # for the life of the session.
+    engine = Engine(
+        db_path=":memory:", work_dir=tmp_path, adapter="lo",
+        proc=FakeProcRunner(script={"nmap": [NMAP_XML], "iw": [f"Connected to {BSSID_1.value.lower()} (on lo)"]}),
+    )
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    panel = EnumeratePanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+
+    panel.on_start_clicked()
+    handle = panel.active_handle
+    assert handle is not None
+    assert len(fake_app.pump._handlers.get(NmapScanCompleted, [])) == 1
+    assert len(fake_app.pump._handlers.get(EnumerationFailed, [])) == 1
+
+    handle.wait_for_test(timeout=2.0)
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
+
+    assert panel._job_subscriptions == []
+    assert fake_app.pump._handlers.get(NmapScanCompleted, []) == []
+    assert fake_app.pump._handlers.get(EnumerationFailed, []) == []
 
 
 def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(qtbot, tmp_path):

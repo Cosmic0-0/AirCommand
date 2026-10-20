@@ -15,6 +15,7 @@ is published on the GUI thread itself (for example TargetAdded from a click).
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Qt, Signal
@@ -24,6 +25,8 @@ from aircommand.core.jobs import JobId
 
 if TYPE_CHECKING:
     from aircommand.core import Engine
+
+logger = logging.getLogger(__name__)
 
 
 class GuiEventPump(QObject):
@@ -36,8 +39,22 @@ class GuiEventPump(QObject):
         self._event.connect(self._dispatch, Qt.QueuedConnection)
         self._sub = engine.subscribe(self._on_bus_event)
 
-    def on(self, event_type: type, handler: Callable[[Event], None], only_job: Optional[JobId] = None) -> None:
-        self._handlers.setdefault(event_type, []).append((handler, only_job))
+    def on(
+        self, event_type: type, handler: Callable[[Event], None], only_job: Optional[JobId] = None
+    ) -> Callable[[], None]:
+        # Returns an unsubscribe handle (mirrors EventBus.subscribe's Subscription).
+        # A per-Start registration grows the handler list for the life of the
+        # session otherwise; the caller removes it on the job's terminal event.
+        registration = (handler, only_job)
+        handlers = self._handlers.setdefault(event_type, [])
+        handlers.append(registration)
+
+        def unsubscribe() -> None:
+            try:
+                handlers.remove(registration)
+            except ValueError:
+                pass   # already removed — a second call, or a job with two terminal events
+        return unsubscribe
 
     def stop(self) -> None:
         self._stopped = True
@@ -49,7 +66,14 @@ class GuiEventPump(QObject):
     def _dispatch(self, event: Event) -> None:
         if self._stopped:
             return
-        for handler, only_job in self._handlers.get(type(event), []):
+        # Snapshot: a terminal handler may unsubscribe itself (and its siblings)
+        # mid-dispatch. Isolate per-handler failures the same way EventBus.publish
+        # does — one raising GUI handler must not stop the others or, on PySide6
+        # >= 6.5, propagate out of the Qt slot and abort the app.
+        for handler, only_job in list(self._handlers.get(type(event), [])):
             if only_job is not None and getattr(event, "job_id", None) != only_job:
                 continue
-            handler(event)
+            try:
+                handler(event)
+            except Exception:
+                logger.exception("GUI handler raised while handling %s", type(event).__name__)

@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject
 
 from aircommand.core.domain import CrackResultRow, Exhausted, MacAddress, StopReason
 from aircommand.core.engine import Engine
-from aircommand.core.events import HandshakeCaptured
+from aircommand.core.events import CrackProgress, CrackResult, HandshakeCaptured
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui import crack_view
 from aircommand.gui.crack_view import CrackPanel, HandshakePicker, WordlistPicker
@@ -196,6 +196,34 @@ def test_crack_panel_end_to_end_successful_crack(qtbot, tmp_path):
 
     assert panel._results_layout.count() >= 1
     assert panel._start_button.isEnabled()
+
+
+def test_crack_job_handlers_are_unsubscribed_on_the_terminal_event(qtbot, tmp_path):
+    # The per-Start CrackProgress/CrackResult registrations must be dropped when
+    # the job reaches its terminal event (CrackResult), or the handler list grows
+    # for the life of the session.
+    engine = _make_engine(tmp_path, _base_script([]), hashcat_key=FOUND_KEY)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    fake_app = _FakeApp(engine)
+    panel = CrackPanel(fake_app)
+    qtbot.addWidget(panel)
+    panel.set_handshake(handshake)
+    panel.set_wordlist(tmp_path / "wordlist.txt")
+
+    panel.on_start_clicked()
+    handle = panel.active_handle
+    assert handle is not None
+    assert len(fake_app.pump._handlers.get(CrackProgress, [])) == 1
+    assert len(fake_app.pump._handlers.get(CrackResult, [])) == 1
+
+    handle.wait_for_test(timeout=2.0)
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
+
+    assert panel._job_subscriptions == []
+    assert fake_app.pump._handlers.get(CrackProgress, []) == []
+    assert fake_app.pump._handlers.get(CrackResult, []) == []
 
 
 def test_crack_panel_format_result_distinguishes_error_stop_reason_from_completed(qtbot, tmp_path):

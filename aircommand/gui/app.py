@@ -19,7 +19,7 @@ keepalive status-bar subscriptions, and shutdown.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -254,6 +254,10 @@ class App(QMainWindow):
         self._discovery_handle = None
         self._discovery_paused = False
         self._discovery_stopping = False
+        # Unsubscribe handle for the current scan's DiscoveryStopped registration,
+        # dropped when that scan reaches its terminal event (ADR-0010). A new one
+        # is taken per Start/Resume/New Session, so it must not accumulate.
+        self._discovery_subscription: Optional[Callable[[], None]] = None
         # Read once, here: an adapter's bands do not change while it stays bound,
         # and the dropdown only offers choices built from them (ADR-0013). May
         # come back empty if no adapter is selected yet (ADR-0017);
@@ -421,7 +425,9 @@ class App(QMainWindow):
             self.status_bar.show_error(f"Discovery couldn't {what}: {e}")
             return  # stay Idle/paused; table, buttons and band menu untouched
         self._discovery_handle = handle
-        self.pump.on(DiscoveryStopped, self._on_discovery_stopped, only_job=handle.job_id)
+        self._discovery_subscription = self.pump.on(
+            DiscoveryStopped, self._on_discovery_stopped, only_job=handle.job_id
+        )
         if new_session:
             self.networks_view.clear()   # only once start() succeeded, so a failed
             # start leaves the old rows in place
@@ -431,6 +437,11 @@ class App(QMainWindow):
         self._band_menu.setEnabled(False)   # no Band change mid-scan
 
     def _on_discovery_stopped(self, event: DiscoveryStopped) -> None:
+        # Terminal event for this scan's job: drop its registration before any
+        # early return, so Pause/Resume cycles don't accumulate handlers.
+        if self._discovery_subscription is not None:
+            self._discovery_subscription()
+            self._discovery_subscription = None
         if event.reason == StopReason.ERROR:
             message = "Discovery stopped unexpectedly, check your adapter/sudo session, then Resume"
             if event.error_detail is not None:   # best-effort hint from airodump-ng's stderr

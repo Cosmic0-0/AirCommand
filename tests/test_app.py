@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QApplication, QComboBox
 
 from aircommand.core import AdapterBusy, AdapterMode, BandUnavailable, Engine, PrivilegeStatus, RadioCommandFailed
 from aircommand.core.domain import JobKind, MacAddress
-from aircommand.core.events import NetworkDiscovered, SudoKeepaliveFailed
+from aircommand.core.events import DiscoveryStopped, NetworkDiscovered, SudoKeepaliveFailed
 from aircommand.core.jobs import JobRegistry
 from aircommand.core.persistence.db import Database
 from aircommand.core.procutil import FakeProcRunner
@@ -678,6 +678,30 @@ def test_discovery_tab_is_in_scanning_state_once_started(mock_run, make_live_app
         assert not app._band_menu.isEnabled()
         assert app._new_session_button.text() == "New Session"
         assert app.networks_view._rows == {}
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
+def test_discovery_stopped_handlers_do_not_accumulate_across_pause_resume(mock_run, make_live_app, qtbot):
+    # Each Start/Resume/New Session takes a new per-job DiscoveryStopped
+    # registration; the terminal event (_on_discovery_stopped) must drop it, or the
+    # handler list grows by one every Pause/Resume cycle for the life of the
+    # session.
+    mock_run.return_value = _completed(0)
+    app = make_live_app()   # one scan running: one DiscoveryStopped registration
+    try:
+        assert app._discovery_subscription is not None
+        assert len(app.pump._handlers.get(DiscoveryStopped, [])) == 1
+
+        for _ in range(3):
+            _pause_and_drain(app, qtbot)   # Pause -> terminal event -> unsubscribe
+            assert app._discovery_subscription is None
+            assert app.pump._handlers.get(DiscoveryStopped, []) == []
+
+            app._pause_resume_button.click()   # Resume: one fresh registration
+            _assert_scanning_state(app)
+            assert len(app.pump._handlers.get(DiscoveryStopped, [])) == 1
     finally:
         app.on_close()
 

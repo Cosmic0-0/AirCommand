@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QPushButton
 
 from aircommand.core.domain import MacAddress, StopReason
 from aircommand.core.engine import Engine
-from aircommand.core.events import CaptureStopped
+from aircommand.core.events import CaptureStopped, DeauthFired, HandshakeCaptured
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.gui.capture_view import CapturePanel
 from aircommand.gui.event_pump import GuiEventPump
@@ -92,6 +92,65 @@ def test_adapter_busy_on_start_shows_error_and_leaves_no_active_handle(qtbot, tm
     assert len(fake_app.status_bar.errors) == 1
     assert "discovery" in fake_app.status_bar.errors[0]
     assert panel.active_handle is None
+
+
+def test_target_removed_before_start_is_reported_and_leaves_panel_restartable(qtbot, tmp_path):
+    # The allowlist gate re-derives the Target at start (allowlist.require_target),
+    # so a Target removed between selection and the Start click raises
+    # NotATargetError. The slot must report it through the status bar, start no job,
+    # and leave the panel re-startable with nothing half-registered on the pump.
+    engine = _make_engine(tmp_path, {})
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    panel = CapturePanel(fake_app, confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+    assert panel._start_passive_button.isEnabled()
+
+    engine.targets.remove(target.bssid)   # the allowlist changes after selection
+
+    panel.on_start_passive_clicked()
+
+    assert panel.active_handle is None
+    assert len(fake_app.status_bar.errors) == 1
+    assert "Target" in fake_app.status_bar.errors[0]
+    # Re-startable, and no half-registered per-job handlers from the aborted start.
+    assert panel._start_passive_button.isEnabled()
+    assert panel._job_subscriptions == []
+    assert fake_app.pump._handlers.get(CaptureStopped, []) == []
+    assert fake_app.pump._handlers.get(DeauthFired, []) == []
+
+
+def test_capture_job_handlers_are_unsubscribed_on_the_terminal_event(qtbot, tmp_path):
+    # The per-Start CaptureStopped/DeauthFired registrations must be dropped when
+    # the job reaches its terminal event, or the handler list grows for the life of
+    # the session. The once, unfiltered HandshakeCaptured registration stays.
+    engine = _make_engine(tmp_path, {
+        "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+        "airodump-ng": [],
+        "aircrack-ng": ["   1  AA:BB:CC:DD:EE:01  Test-SSID              WPA (1 handshake)"],
+    })
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+
+    fake_app = _FakeApp(engine)
+    panel = CapturePanel(fake_app, confirm_deauth=lambda t: True)
+    qtbot.addWidget(panel)
+    panel.set_target(target)
+
+    panel.on_start_passive_clicked()
+    handle = panel.active_handle
+    assert handle is not None
+    assert len(fake_app.pump._handlers.get(CaptureStopped, [])) == 1
+    assert len(fake_app.pump._handlers.get(DeauthFired, [])) == 1
+
+    handle.wait_for_test(timeout=2.0)
+    qtbot.waitUntil(lambda: panel.active_handle is None, timeout=2000)
+
+    assert panel._job_subscriptions == []
+    assert fake_app.pump._handlers.get(CaptureStopped, []) == []
+    assert fake_app.pump._handlers.get(DeauthFired, []) == []
+    assert len(fake_app.pump._handlers.get(HandshakeCaptured, [])) == 1   # the global one survives
 
 
 def test_deauth_confirm_declined_does_not_start_a_job(qtbot, tmp_path):

@@ -27,7 +27,7 @@ from typing import Callable, Optional
 
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from aircommand.core import AdapterBusy, JobHandle, RadioCommandFailed, Target
+from aircommand.core import AdapterBusy, JobHandle, NotATargetError, RadioCommandFailed, Target
 from aircommand.core.events import CaptureStopped, DeauthFired, HandshakeCaptured
 from aircommand.gui.cell import Cell
 from aircommand.gui.dialog import outline_button, primary_button
@@ -58,6 +58,9 @@ class CapturePanel(QWidget):
         self.active_handle: Optional[JobHandle] = None
         self._burst_count = 0
         self._failed_burst_count = 0
+        # Unsubscribe handles for the current Start's per-job registrations,
+        # dropped when the job reaches its terminal event (_on_stopped).
+        self._job_subscriptions: list[Callable[[], None]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -175,14 +178,29 @@ class CapturePanel(QWidget):
         except RadioCommandFailed as e:
             self._app.status_bar.show_error(f"Couldn't switch the adapter into monitor mode: {e}")
             return
+        except NotATargetError:
+            # The allowlist gate re-derives the Target at start; it may have been
+            # removed since this panel's target was set. Report the refusal — the
+            # gate stays authoritative — and leave the panel re-startable.
+            self._app.status_bar.show_error(
+                "That network is no longer an authorized Target. Re-add it on the Discovery & Targets page."
+            )
+            return
+        except RuntimeError as e:
+            self._app.status_bar.show_error(f"Couldn't start capture: {e}")
+            return
         self.active_handle = handle
         self._burst_count = 0
         self._failed_burst_count = 0
         self._status_label.setText("Capturing...")
-        self._app.pump.on(CaptureStopped, self._on_stopped, only_job=handle.job_id)
-        # Local live burst counter, a separate registration from the tab-global
-        # audit-log one (a later slice, out of scope here).
-        self._app.pump.on(DeauthFired, self._on_burst, only_job=handle.job_id)
+        # Per-job registrations, dropped on the terminal event (_on_stopped), so
+        # the handler list doesn't grow for the life of the session.
+        self._job_subscriptions = [
+            self._app.pump.on(CaptureStopped, self._on_stopped, only_job=handle.job_id),
+            # Local live burst counter, a separate registration from the tab-global
+            # audit-log one (a later slice, out of scope here).
+            self._app.pump.on(DeauthFired, self._on_burst, only_job=handle.job_id),
+        ]
         self._update_button_states()
 
     def _on_handshake(self, event) -> None:
@@ -192,11 +210,17 @@ class CapturePanel(QWidget):
 
     def _on_stopped(self, event) -> None:
         self.active_handle = None
+        self._unsubscribe_job()   # terminal event: drop this Start's registrations
         text = f"Stopped ({event.reason.value})"
         if event.error_detail is not None:   # best-effort hint from airodump-ng's stderr
             text += f": {event.error_detail}"
         self._status_label.setText(text)
         self._update_button_states()
+
+    def _unsubscribe_job(self) -> None:
+        for unsubscribe in self._job_subscriptions:
+            unsubscribe()
+        self._job_subscriptions = []
 
     def _on_burst(self, event) -> None:
         # ADR-0012: DeauthFired fires on every attempt, success or not, so a
