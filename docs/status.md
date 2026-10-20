@@ -20,7 +20,7 @@ reconciliation, SQLite persistence, sudo privilege elevation, and radio
 (adapter/monitor-mode) control. It is GUI-agnostic; the GUI calls into it
 and adds no logic of its own.
 
-As of 2026-10-20, `pytest` passes 509 tests, all against `FakeProcRunner`
+As of 2026-10-20, `pytest` passes 516 tests, all against `FakeProcRunner`
 (no real subprocess, root, or hardware).
 
 `Crack.start()` was brought in line with the other three drivers'
