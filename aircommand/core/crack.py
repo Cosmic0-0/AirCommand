@@ -35,11 +35,10 @@ logger = logging.getLogger(__name__)
 # glued to the password rather than the password alone -- and a WPA2 passphrase
 # can itself legally contain ':', so splitting the combined format after the
 # fact isn't reliable either. Passing --outfile-format 2 makes hashcat itself
-# write ONLY the plaintext, one per line, sidestepping this. Confidence note
-# (same tier as docs/roadmap.md's other research-only flags): format code 2 =
-# "plain" is long-standing, well-documented hashcat CLI behavior, but this
-# wasn't checked against a real hashcat run -- worth the same Phase 2 sanity
-# check as the --status-json field shapes.
+# write ONLY the plaintext, one per line, sidestepping this. Confidence note:
+# format code 2 = "plain" is long-standing, well-documented hashcat CLI
+# behavior, but this wasn't checked against a real hashcat run -- worth the
+# same sanity check as the --status-json field shapes.
 HASHCAT_OUTFILE_FORMAT_PLAIN_ONLY = "2"
 
 # ADR-0015: hcxpcapngtool is a one-shot, non-interactive pcap parser -- a much

@@ -38,9 +38,9 @@ class Pacer:
     """Rate-gates a periodic check inside a driver loop that iterates far faster
     than the interval actually wanted (e.g. once per redrawn stdout line, not
     once every 2-3s) -- shared by Discovery's CSV poll and Capture's deauth-burst
-    and handshake-check timers (see docs/roadmap.md Phase 1 items 0 and 1, and
-    docs/design/core-gui-boundary.md's "poll a clean on-disk artifact instead of
-    a live stream" idiom). due() returns True at most once per interval, measured
+    and handshake-check timers (see docs/design/core-gui-boundary.md's "poll a
+    clean on-disk artifact instead of a live stream" idiom). due() returns True
+    at most once per interval, measured
     from construction (or the last True) -- never on the very first call, since a
     freshly-spawned tool needs at least one interval to produce anything worth
     checking.

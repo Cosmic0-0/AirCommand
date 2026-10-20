@@ -465,7 +465,7 @@ class RadioController:
         return parse_iw_dev_type(output) == "monitor"
 
     def _start_monitor_mode(self) -> str:
-        # HARDWARE-CONFIRMED (docs/roadmap.md Phase 2 item 5) against a real
+        # HARDWARE-CONFIRMED against a real
         # Ralink RT2870/RT3070 (rt2800usb): it does rename, matching the
         # "classically... reportedly true for rt2800usb" research -- but with a
         # real twist that research didn't anticipate. This adapter's

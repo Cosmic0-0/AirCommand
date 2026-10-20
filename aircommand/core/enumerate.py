@@ -1,8 +1,8 @@
 """Enumerator — wraps nmap against a Target's network. Gated: requires a Target,
 same as Capture. See CONTEXT.md: 'Action'.
 
-Subnet source (docs/roadmap.md Phase 1 item 3 — this was a genuine open design
-question, resolved by explicit user decision, not something to redecide here):
+Subnet source (this was a genuine open design question, resolved by explicit
+user decision, not something to redecide here):
 **Option A.** AirCommand never joins a network itself. It assumes the operator
 already associated the adapter to the target network through their OS's normal
 wifi settings before clicking "Enumerate", and just reads whatever subnet that
@@ -14,7 +14,7 @@ every other driver already uses (see e.g. discovery.py's parse-error comment) �
 `events.py`'s `EnumerationFailed` is published (from `_drive`'s `except`
 clause) on any exception during the scan, subnet lookup failure being the most
 likely real case. Option B (AirCommand manages the join itself, storing
-credentials) was rejected — see docs/roadmap.md Phase 1 item 3 for the tradeoff.
+credentials) was rejected: Option A needs no credential storage.
 """
 
 from __future__ import annotations

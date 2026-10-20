@@ -488,8 +488,7 @@ class HandshakeRepository:
     repository-mints convention TargetRepository already established. This is a
     deliberate decision, not a default: the original capture.py TODO sketch
     showed the opposite (facade mints from a raw row), but that was never
-    actually implemented, so there was no shipped code to reconcile -- see
-    docs/roadmap.md Phase 1 item 1."""
+    actually implemented, so there was no shipped code to reconcile."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -602,7 +601,7 @@ def _row_to_crack_result(row: sqlite3.Row) -> CrackResultRow:
 
 class CrackResultRepository:
     """Not mint-restricted (CrackResultRow is a plain dataclass) — lower-stakes
-    than Handshake/Target, per docs/roadmap.md Phase 1 item 2."""
+    than Handshake/Target."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -642,7 +641,7 @@ class CrackResultRepository:
 class EnumResultRepository:
     """No mint restriction, no reader method (yet): nothing in Enumerator's
     facade surface exposes a list_results()-equivalent today, so there's
-    nothing to read this back for -- see docs/roadmap.md Phase 1 item 3."""
+    nothing to read this back for."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn

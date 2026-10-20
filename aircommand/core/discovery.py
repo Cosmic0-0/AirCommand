@@ -29,10 +29,10 @@ from aircommand.core.rf import AdapterMode, AdapterReservation, BandUnavailable,
 
 logger = logging.getLogger(__name__)
 
-# airodump-ng doesn't stream CSV to stdout (see docs/roadmap.md Phase 1 item 0) --
-# _drive polls the on-disk file it writes instead, at this cadence ("every 2-3s"
-# per the roadmap's research). Overridable per-instance (see __init__) purely for
-# test injectability, same reason SudoSession.__init__ takes keepalive_interval_s.
+# airodump-ng doesn't stream CSV to stdout -- _drive polls the on-disk file it
+# writes instead, at this cadence ("every 2-3s"). Overridable per-instance (see
+# __init__) purely for test injectability, same reason SudoSession.__init__ takes
+# keepalive_interval_s.
 DEFAULT_DISCOVERY_POLL_INTERVAL = timedelta(seconds=2)
 
 # SIGTERM, then this long (polled, not a blind sleep) before escalating to

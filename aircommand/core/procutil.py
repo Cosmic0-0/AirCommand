@@ -439,8 +439,8 @@ class FakeProcRunner:
         to simulate a tool that writes a real on-disk artifact (airodump-ng's
         --write/-w, hashcat's --outfile) instead of only producing stdout. Kept
         as a plain callback rather than flag-parsing logic here, since different
-        drivers invoke the same tool name with different flags -- see
-        docs/roadmap.md Phase 1 item 0. returncodes/stderr map that same argv[0]
+        drivers invoke the same tool name with different flags. returncodes/stderr
+        map that same argv[0]
         key to a scripted exit code / stderr tail, each defaulting to "succeeded,
         nothing captured" so every existing script= call site is unaffected.
         running_polls maps argv[0] to how many poll() calls should report "still

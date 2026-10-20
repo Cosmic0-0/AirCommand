@@ -98,12 +98,11 @@ def parse_aircrack_handshake_check(output: str) -> bool:
 
 @dataclass(frozen=True)
 class HashcatStatus:
-    """One parsed --status-json tick. Field-shape research is in
-    docs/roadmap.md Phase 1 item 2 (strong-confidence via a third-party typed
-    binding + hashcat's own issue discussion, not yet checked against a real
-    hashcat run — flagged there for a Phase 2 sanity check). Deliberately holds
-    no found-key/outcome field: Crack determines outcome from the --outfile
-    after the process exits, not from any --status-json tick — see crack.py."""
+    """One parsed --status-json tick. Field shapes are strong-confidence (a
+    third-party typed binding + hashcat's own issue discussion), not yet checked
+    against a real hashcat run. Deliberately holds no found-key/outcome field:
+    Crack determines outcome from the --outfile after the process exits, not
+    from any --status-json tick — see crack.py."""
 
     percent: Optional[float]  # progress[0] / progress[1] * 100 when progress[1] > 0, else None
     hashrate: str  # e.g. "12.3 MH/s" — summed device speed, unit-scaled from raw H/s
@@ -135,8 +134,8 @@ def parse_hashcat_status_line(line: str) -> Optional[HashcatStatus]:
 
 
 def _format_hashrate(h_per_s: int) -> str:
-    """Raw devices[].speed values are H/s ints (per docs/roadmap.md Phase 1 item
-    2) — scale to a human string, e.g. 12345678 -> '12.3 MH/s'."""
+    """Raw devices[].speed values are H/s ints — scale to a human string, e.g.
+    12345678 -> '12.3 MH/s'."""
     if h_per_s == 0:
         return "0 H/s"
     units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s"]
@@ -150,8 +149,8 @@ def _format_hashrate(h_per_s: int) -> str:
 
 def parse_airmon_monitor_interface(output: str, fallback: str) -> str:
     """`airmon-ng start <adapter>`'s own stdout -> the resulting monitor-mode
-    interface name. HARDWARE-CONFIRMED (docs/roadmap.md Phase 2 item 5) against
-    a real Ralink RT2870/RT3070 (rt2800usb driver) adapter with a udev-persistent
+    interface name. HARDWARE-CONFIRMED against a real Ralink RT2870/RT3070
+    (rt2800usb driver) adapter with a udev-persistent
     name (`wlx<mac>`, 15 characters — right at Linux's IFNAMSIZ-1 limit):
 
         Interface wlx24050f7d7ae0mon is too long for linux so it will be
