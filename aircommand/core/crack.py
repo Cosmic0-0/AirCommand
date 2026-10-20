@@ -100,11 +100,30 @@ class Crack:
 
     def start(self, handshake: Handshake, wordlist_path: Path) -> JobHandle:
         # No allowlist re-check — handshake.target_id is the proof (see module docstring).
-        job_id, token = self._jobs.new_job(JobKind.CRACK, target_id=handshake.target_id)
+        job_id = None
+        try:
+            # GAP FOUND, same shape as discovery.py/capture.py/enumerate.py's own
+            # start() unwind -- missed here originally. If new_job() raises (it
+            # re-raises after its own internal rollback, see jobs.py) or
+            # Thread.start() itself raises, job_id would be left tracked in the
+            # registry with no driver thread ever running to mark_terminal() it:
+            # wait_for_test() would hang forever and the RUNNING jobs row would
+            # linger until the next launch's reconciliation. Crack takes no RF
+            # reservation (hashcat doesn't touch the radio), so there is nothing to
+            # release here, only the registry/DB entry to unwind. CrackStarted is
+            # published only AFTER Thread.start() succeeds now (moved from before
+            # it, matching capture.py's CaptureStarted) -- publishing it earlier
+            # announced a crack that, if the thread was never created, would never
+            # actually run.
+            job_id, token = self._jobs.new_job(JobKind.CRACK, target_id=handshake.target_id)
+            threading.Thread(target=self._drive, args=(job_id, token, handshake, wordlist_path),
+                             daemon=True).start()
+        except Exception:
+            if job_id is not None:
+                self._jobs.mark_terminal(job_id)
+            raise
         self._bus.publish(CrackStarted(event_id=uuid.uuid4(), occurred_at=datetime.now(),
                                         job_id=job_id, handshake_id=handshake.id))  # the sync write CrackStarted describes
-        threading.Thread(target=self._drive, args=(job_id, token, handshake, wordlist_path),
-                          daemon=True).start()   # no RF reservation — hashcat doesn't touch the radio
         return JobHandle(job_id, JobKind.CRACK, self._jobs)
 
     def list_results(self, handshake: Optional[Handshake] = None) -> list[CrackResultRow]:

@@ -47,7 +47,7 @@ import pytest
 
 from aircommand.core.domain import Aborted, Exhausted, Found, MacAddress, StopReason
 from aircommand.core.engine import Engine
-from aircommand.core.events import CrackProgress, CrackResult, HandshakeCaptured
+from aircommand.core.events import CrackProgress, CrackResult, CrackStarted, HandshakeCaptured
 from aircommand.core.parse import _format_hashrate
 from aircommand.core.procutil import FakeProcRunner, _FakeProcHandle, terminate_with_escalation
 
@@ -910,6 +910,56 @@ def test_crack_cleans_up_even_if_new_connection_scope_raises(tmp_path):
 
     assert len(results) == 1
     assert results[0].job_id == second_handle.job_id
+
+
+def test_crack_cleans_up_job_and_does_not_announce_if_thread_start_raises(tmp_path):
+    """Regression for Crack.start()'s own unwind gap (the fix that brought it in
+    line with discovery.py/capture.py/enumerate.py's already-hardened start()
+    methods): start() used to call new_job(), publish CrackStarted, and spawn the
+    driver thread with nothing guarding the spawn. If Thread.start() raised, the
+    job stayed tracked in the registry with no thread ever running to
+    mark_terminal() it -- wait_for_test() would hang forever and the RUNNING jobs
+    row would linger -- and a CrackStarted announcing a crack that never runs had
+    already been published. Proves the fix: the failed start() marks the job
+    terminal (a second crack right after completes normally rather than the
+    session being wedged) and publishes NO CrackStarted."""
+    engine = _make_engine(tmp_path, _base_script([_status_json((1, 1), 1_000_000)]), hashcat_key=FOUND_KEY)
+    target = engine.targets.add(BSSID_1, "Test-SSID", 6, "My house")
+    handshake = _capture_handshake(engine, target)
+
+    started = []
+    results = []
+    engine.subscribe(started.append, CrackStarted)
+    engine.subscribe(results.append, CrackResult)
+
+    real_thread = threading.Thread
+    calls = {"n": 0}
+
+    def raise_on_first_thread(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("can't start new thread")
+        return real_thread(*args, **kwargs)
+
+    wordlist_path = tmp_path / "wordlist.txt"
+    threading.Thread = raise_on_first_thread
+    try:
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            engine.crack.start(handshake, wordlist_path)
+    finally:
+        threading.Thread = real_thread
+
+    # Nothing was announced for the crack that never ran, and no result row.
+    assert started == []
+    assert results == []
+
+    # The real assertion: the failed start() cleaned up its job (mark_terminal
+    # ran), so the live session isn't wedged -- a second crack completes.
+    second_handle = engine.crack.start(handshake, wordlist_path)
+    second_handle.wait_for_test(timeout=2.0)
+    assert len(results) == 1
+    assert len(started) == 1
+    assert started[0].job_id == second_handle.job_id
 
 
 def _make_stress_on_spawn(wordlist_to_key: dict[str, str]) -> Callable[[list[str]], None]:

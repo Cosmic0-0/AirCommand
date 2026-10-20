@@ -20,8 +20,16 @@ reconciliation, SQLite persistence, sudo privilege elevation, and radio
 (adapter/monitor-mode) control. It is GUI-agnostic; the GUI calls into it
 and adds no logic of its own.
 
-As of 2026-10-16, `pytest` passes 508 tests, all against `FakeProcRunner`
+As of 2026-10-20, `pytest` passes 509 tests, all against `FakeProcRunner`
 (no real subprocess, root, or hardware).
+
+`Crack.start()` was brought in line with the other three drivers'
+already-hardened start() methods (2026-10-20): it now unwinds the job
+registry/DB entry if `new_job()` or `Thread.start()` raises, and publishes
+`CrackStarted` only after the driver thread actually starts (matching
+`capture.py`'s `CaptureStarted`). Previously a failed thread spawn left a
+RUNNING jobs row and a stuck in-memory job entry, and announced a crack that
+would never run. Regression-tested in `tests/test_crack_acceptance.py`.
 
 ## Verified on real hardware vs. only in code
 
