@@ -17,11 +17,9 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from aircommand import DEFAULT_DB_PATH, DEFAULT_WORK_DIR
 from aircommand.gui import theme
 from aircommand.gui.app import App
-
-DEFAULT_DB_PATH = Path("~/.aircommand/aircommand.db").expanduser()
-DEFAULT_WORK_DIR = Path("~/.aircommand/work").expanduser()
 
 
 def parse_args() -> argparse.Namespace:

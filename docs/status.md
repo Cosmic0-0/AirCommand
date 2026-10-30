@@ -20,8 +20,19 @@ reconciliation, SQLite persistence, sudo privilege elevation, and radio
 (adapter/monitor-mode) control. It is GUI-agnostic; the GUI calls into it
 and adds no logic of its own.
 
-As of 2026-10-20, `pytest` passes 516 tests, all against `FakeProcRunner`
+As of 2026-10-30, `pytest` passes 587 tests, all against `FakeProcRunner`
 (no real subprocess, root, or hardware).
+
+The real-hardware test harness (`aircommand/hwtest/`, run with
+`scripts/hw_test.sh <interface>`) drives the real engine, tools and adapter
+on the app's own database and work directory, and writes a report folder for
+diagnosis; [`docs/hardware-testing.md`](hardware-testing.md) is its how-to.
+It ships inside the `aircommand` package (`pyproject.toml` includes
+`aircommand*`), along with its GUI wiring smoke
+(`aircommand/gui/hwtest_smoke.py`, which imports `unittest.mock` lazily).
+That is accepted. Both are small and run only when invoked, and leaving one
+module out of a package would need packaging machinery this project doesn't
+otherwise have.
 
 `Crack.start()` was brought in line with the other three drivers'
 already-hardened start() methods (2026-10-20): it now unwinds the job
@@ -64,7 +75,9 @@ not just deprioritized. See
 ## Open
 
 Short list; full detail and checkboxes live in
-[`docs/final-touches.md`](final-touches.md).
+[`docs/final-touches.md`](final-touches.md). The real-hardware test harness
+collects evidence for most of these; see
+[`docs/hardware-testing.md`](hardware-testing.md) for how to run it.
 
 - Re-confirm Capture's Cancel button through the real GUI on real hardware.
 - Click through the real Cracking page for a full real handshake-to-password run.

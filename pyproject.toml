@@ -29,3 +29,6 @@ include = ["aircommand*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"
+markers = [
+    "hardware: opt-in real-hardware tests (aircommand.hwtest); only run when AIRCOMMAND_HW_TESTS=1, see tests/hardware/conftest.py",
+]

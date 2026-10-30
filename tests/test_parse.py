@@ -9,6 +9,7 @@ from aircommand.core.parse import (
     parse_iw_dev_link_bssid,
     parse_iw_dev_type,
     parse_iw_phy_bands,
+    parse_iw_phy_interface_modes,
 )
 
 AP_HEADER = (
@@ -492,3 +493,47 @@ def test_malformed_mac_after_connected_to_returns_none_not_a_raise():
     # parse call, not just the regex's own "doesn't match at all" case the
     # other unparsable-input test above covers.
     assert parse_iw_dev_link_bssid("Connected to aaa:bb:cc:dd:ee:f (on wlan0)\n") is None
+
+
+# --- parse_iw_phy_interface_modes ---
+
+# A real `iw phy phy4 info` excerpt (2026-10-30). "monitor" is listed under both
+# "Supported interface modes:" and "software interface modes (can always be
+# added):".
+IW_PHY_INFO = (
+    "Wiphy phy4\n\twiphy index: 4\n\tSupported Ciphers:\n\t\t* WEP40 (00-0f-ac:1)\n"
+    "\t\t* CCMP-128 (00-0f-ac:4)\n\tAvailable Antennas: TX 0x3 RX 0x3\n"
+    "\tSupported interface modes:\n\t\t * IBSS\n\t\t * managed\n\t\t * AP\n"
+    "\t\t * AP/VLAN\n\t\t * monitor\n\tBand 1:\n\t\tCapabilities: 0x196f\n"
+    "\t\tFrequencies:\n\t\t\t* 2412.0 MHz [1] (20.0 dBm)\n"
+    "\tsoftware interface modes (can always be added):\n\t\t * AP/VLAN\n\t\t * monitor\n"
+    "\tinterface combinations are not supported\n"
+)
+
+
+def test_real_iw_phy_output_yields_exactly_the_supported_modes_block():
+    assert parse_iw_phy_interface_modes(IW_PHY_INFO) == frozenset({"IBSS", "managed", "AP", "AP/VLAN", "monitor"})
+
+
+def test_monitor_only_in_the_software_modes_block_does_not_count():
+    # The bug being fixed: a parse that ran past the first block reported monitor
+    # support because "software interface modes" lists it again.
+    output = IW_PHY_INFO.replace("\t\t * monitor\n", "", 1)
+
+    assert "monitor" not in parse_iw_phy_interface_modes(output)
+
+
+def test_missing_supported_modes_header_returns_empty_set():
+    output = IW_PHY_INFO.replace("\tSupported interface modes:\n", "")
+
+    assert parse_iw_phy_interface_modes(output) == frozenset()
+
+
+def test_empty_output_returns_empty_set():
+    assert parse_iw_phy_interface_modes("") == frozenset()
+
+
+def test_space_indented_variant_is_parsed_the_same_way():
+    output = "  Supported interface modes:\n      * monitor\n  Band 1:\n"
+
+    assert parse_iw_phy_interface_modes(output) == frozenset({"monitor"})

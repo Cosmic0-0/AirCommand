@@ -278,6 +278,42 @@ def parse_iw_phy_bands(output: str) -> frozenset[Band]:
     return frozenset(bands)
 
 
+def parse_iw_phy_interface_modes(output: str) -> frozenset[str]:
+    """`iw phy <phy> info`'s stdout -> the entries of its "Supported interface
+    modes:" block ("managed", "monitor", "AP/VLAN", ...), or an empty set if the
+    block is missing. Only that block counts: the same output lists modes again
+    under "software interface modes (can always be added):", and on the real
+    dual-band adapter (2026-10-30, `iw phy phy4 info`) "* monitor" appears in
+    both, so a parse that runs past the first block reports monitor support for
+    an adapter that lacks it.
+
+    The block ends at the first non-blank line indented no deeper than its own
+    header. Every line after "Wiphy phyN" is tab-indented, so "ends at an
+    unindented line" never fires; real output indents the header one tab and
+    each entry two tabs plus a space ("\\t\\t * monitor"), and the next section
+    ("\\tBand 1:") returns to one tab. Tabs are expanded before comparing, so a
+    space-indented variant compares the same way."""
+    modes: set[str] = set()
+    header_indent: Optional[int] = None
+    for line in output.splitlines():
+        expanded = line.expandtabs(8)
+        stripped = expanded.strip()
+        indent = len(expanded) - len(expanded.lstrip())
+        if header_indent is None:
+            if stripped == "Supported interface modes:":
+                header_indent = indent
+            continue
+        if not stripped:
+            continue
+        if indent <= header_indent:
+            break
+        if stripped.startswith("*"):
+            mode = stripped[1:].strip()
+            if mode:
+                modes.add(mode)
+    return frozenset(modes)
+
+
 def filter_hc22000_lines_by_bssid(content: str, bssid: MacAddress) -> list[str]:
     """hcxpcapngtool's -o output (the hashcat -m 22000 hash format) -> only the
     lines whose AP MAC field matches `bssid`. ADR-0015: defense in depth, not

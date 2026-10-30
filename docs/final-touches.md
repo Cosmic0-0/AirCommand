@@ -23,6 +23,63 @@ Nothing below is a design question. Everything here is either a small
 mechanical gap or a hands-on validation step — there is no more "should this
 be built" left to decide before v1, only "does it actually work."
 
+## Real-hardware tests (the hardware harness)
+
+The automated suite runs entirely against `FakeProcRunner`: no real
+subprocess, root, or radio. It covers the harness's own decision logic against
+a simulated radio, but nothing in it puts the real adapter in monitor mode or
+runs real `airmon-ng`, `airodump-ng` or sudo. `aircommand/hwtest/` fills that
+gap. It drives the real core `Engine` against the real tools and adapter, on
+the app's own database and work directory, and writes a report folder you hand
+back for diagnosis.
+
+Run it from the repo root, with the venv set up and the GUI closed:
+
+```
+# Safe first pass: read-only preflight, nothing through sudo, no radio.
+scripts/hw_test.sh <interface> --preflight-only
+
+# Full run: monitor-mode enable/restore, passive Discovery on each supported
+# band, RF cleanup, then the restore and a Final state check. Prompts once for
+# sudo (ADR-0002).
+scripts/hw_test.sh <interface> --allow-network-drop
+```
+
+`scripts/hw_test.sh` wraps `python -m aircommand.hwtest --adapter <interface>`.
+Run it as your normal user. Both refuse to run as root (ADR-0002) and ask for
+the sudo password themselves when a radio tier needs it.
+
+The harness adds no policy of its own; each rule comes from an existing ADR:
+
+- **Preflight is read-only.** It runs nothing through sudo, leaves the radio
+  alone and doesn't open the app database.
+- **The radio tiers stop NetworkManager system-wide** (ADR-0005), so they
+  refuse to run without `--allow-network-drop`, and also while the GUI or a
+  radio tool is already running.
+- **Nothing transmits.** The only Action is an opt-in passive capture
+  (`--capture-bssid`) against a BSSID that is already a Target in the app
+  database (ADR-0001). The harness never adds a Target and has no deauth
+  option.
+- **Durations are bounded** (`--discovery-seconds` 5 to 120,
+  `--capture-seconds` 5 to 300). `Engine.shutdown()` runs in a `finally` block
+  that Ctrl+C, SIGTERM and SIGHUP all reach, then a Final state tier checks the
+  real adapter and NetworkManager state and repairs what shutdown missed.
+  `kill -9`, an interpreter crash or a power cut skip all of that; recover by
+  hand as the usage doc describes.
+
+[`docs/hardware-testing.md`](hardware-testing.md) is the full how-to: every
+flag, what each tier checks, how to read a failure, what `--redact` replaces
+and what it leaves, and what to send back. The report folder never contains the
+app database or any capture file, only facts derived from them.
+
+This harness **collects evidence for** items 2 to 4 below (it is the real
+subprocess/adapter run the verification standard asks for); it does **not**
+replace the GUI click-throughs those items also call for. An opt-in pytest
+layer under `tests/hardware/` checks the harness against this real machine,
+read-only: `AIRCOMMAND_HW_TESTS=1 AIRCOMMAND_HW_ADAPTER=<interface> pytest
+tests/hardware` (add `AIRCOMMAND_HW_RADIO=1` for the real-adapter gate check).
+A plain `pytest` skips them.
+
 ## 0. There is no way to launch AirCommand yet — do this first [DONE]
 
 Found while first drafting this doc, not previously flagged anywhere: `App`
