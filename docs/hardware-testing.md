@@ -88,7 +88,10 @@ After the prompt, the tiers run in this order:
    drop. The harness puts the adapter in monitor mode through the app's own
    `start_monitor_mode()`, confirms it with `iw dev`, then switches back. The
    switch back runs `airmon-ng stop` and `systemctl restart NetworkManager`,
-   so you're briefly online again.
+   so you're briefly online again. When `airmon-ng stop` leaves an adapter
+   that switched in place still in monitor mode, as Mint's aircrack-ng 1.7
+   does with yours, the core switches it back itself
+   ([ADR-0022](adr/0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md)).
 3. **Discovery.** Starting a scan runs `check kill` again, and you go offline.
    Passive Discovery runs for `--discovery-seconds`, 25 by default, once per
    band choice. A dual-band adapter like yours gets three: 2.4 GHz, then
@@ -107,9 +110,9 @@ After the prompt, the tiers run in this order:
    the sudo keepalive. The Final state tier then checks the real machine: the
    adapter is back in managed mode, NetworkManager is in the state preflight
    recorded, and nothing the run started is still running. If shutdown missed
-   something, the harness repairs it with the same two commands, through
-   `sudo -n` while your password is still cached. Last, it runs `sudo -k` so
-   the cached password doesn't linger.
+   something, the harness repairs it with the same commands the core uses,
+   through `sudo -n` while your password is still cached. Last, it runs
+   `sudo -k` so the cached password doesn't linger.
 
 With the defaults on your adapter, you're offline from step 3 until step 6.
 That's 75 seconds of scanning plus teardown, so plan on two to three minutes.
@@ -189,10 +192,22 @@ To get back online by hand:
    [ADR-0016](adr/0016-radio-mode-desync-after-a-crash.md) recorded.
    `airmon-ng` can rename an interface on other hardware, `wlan0mon` for
    example, so use whatever name `iw dev` shows.
-3. Take it out of monitor mode:
+3. Take it out of monitor mode. If the name from step 2 is your adapter's own
+   name, switch it in place. `airmon-ng stop` alone doesn't work on your
+   adapter, because Mint's aircrack-ng 1.7 skips taking the link down first
+   ([ADR-0022](adr/0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md)):
 
    ```
-   sudo airmon-ng stop <interface from step 2>
+   sudo ip link set dev wlx5c628b9faa9d down
+   sudo iw dev wlx5c628b9faa9d set type managed
+   sudo ip link set dev wlx5c628b9faa9d up
+   ```
+
+   If it's a separate monitor interface such as `wlan0mon`, use airmon-ng,
+   which deletes it and brings back the managed one:
+
+   ```
+   sudo airmon-ng stop wlan0mon
    ```
 
 4. Restart NetworkManager:
@@ -203,9 +218,14 @@ To get back online by hand:
 
 5. Confirm. `iw dev wlx5c628b9faa9d info` should show `type managed`, and
    `nmcli device status` should show your connection back.
+6. If `iw` still shows `type monitor`, unplug the adapter and plug it back in.
+   The driver then creates a fresh interface in managed mode, and a running
+   NetworkManager picks it up.
 
-Steps 3 and 4 are the same two commands, in the same order, that the code's own
-restore runs. They live in `_stop_monitor_mode` in `aircommand/core/rf.py`.
+Steps 3 and 4 are the commands the code's own restore runs, in the same
+order. They live in `_stop_monitor_mode` in `aircommand/core/rf.py`, which
+runs `airmon-ng stop` first and the in-place switch only when the adapter is
+still in monitor mode afterwards.
 [ADR-0005](adr/0005-networkmanager-check-kill.md) records why a crash leaves
 NetworkManager down.
 
@@ -239,11 +259,11 @@ The harness ends by printing the report folder's full path and the path to its
    | `supported bands`, `monitor-mode capability` | `core-iw-phy`, `iw-phy-info` |
    | `NetworkManager / wpa_supplicant` | `nmcli-device-status` |
    | `rfkill` | `rfkill-list` |
-   | Monitor mode rows | `core-airmon-ng-check`, `core-airmon-ng-start`, `core-airmon-ng-stop`, `core-systemctl-restart`, `iw-dev-monitor`, `nmcli-after-restore` |
+   | Monitor mode rows | `core-airmon-ng-check`, `core-airmon-ng-start`, `core-airmon-ng-stop`, `core-systemctl-restart`, `iw-dev-monitor`, `nmcli-after-restore`, plus `core-ip-link` and `core-iw-dev` when the core had to switch the adapter back itself |
    | `restored to managed`, `adapter back to managed` | `iw-dev-adapter-managed` if it got there, `iw-dev-adapter-final` if not |
    | Discovery rows | `live-airodump-<band>`, for example `live-airodump-2-4GHz`, holds the running `airodump-ng` command line. `core-airodump-ng-band` holds its exit code and stderr. |
    | Capture rows | `core-airodump-ng-c`, `core-aircrack-ng-w` |
-   | `repair` | `repair-airmon-ng-stop`, `repair-systemctl-restart`, `repair-systemctl-start` |
+   | `repair` | `repair-airmon-ng-stop`, `repair-ip-link-down`, `repair-iw-type-managed`, `repair-ip-link-up`, `repair-systemctl-restart`, `repair-systemctl-start` |
 
 4. Compare the machine's state before and after, for example:
 
@@ -282,6 +302,15 @@ Results that look worse than they are, and results that need action:
   a known channel, or one of the requested bands heard nothing. A quiet band
   looks the same as a `--band` flag that didn't take effect, so compare with
   the `--band reached airodump-ng` row.
+- **Only a network or two heard.** Check what the place really has before
+  blaming the adapter. `nmcli -f CHAN,SIGNAL dev wifi list ifname wlo1
+  --rescan yes` lists what the internal card hears. With 250 ms per channel,
+  `airodump-ng` spends about 3.5 s on a 2.4 GHz lap, 11.75 s on a 5 GHz lap
+  and 15.25 s on a 2.4 + 5 GHz lap, so a 25 s scan visits each channel
+  between one and seven times, and a weak network can slip through. The CSV in the work
+  directory tells hopping apart from a stuck radio. A strong network logging a
+  few beacons per lap means the radio hops. One that logs about ten beacons a
+  second means the radio is sitting on its channel.
 - **`networks parsed` FAIL.** Networks showed up on channels outside the band
   that was asked for. The detail lists those channels.
 - **`unpinned channels` INFO.** `airodump-ng` reported channel -1 for some
@@ -294,7 +323,16 @@ Results that look worse than they are, and results that need action:
   harness did. Worth reporting even though you're back online: the core lost
   track of the radio's real state.
 - **`repair` FAIL.** You're not back online. Run the commands the detail and
-  the console list.
+  the console list. For an adapter that switched in place they're the
+  `ip link` and `iw ... set type managed` sequence from
+  [If a run is interrupted](#if-a-run-is-interrupted), and the last line
+  says to unplug the adapter if that doesn't take.
+- **`stop_monitor_mode()` FAIL with `still in monitor mode`, or `restored to
+  managed` FAIL.** The core ran `airmon-ng stop` and its own in-place switch,
+  and the adapter stayed in monitor mode anyway
+  ([ADR-0022](adr/0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md)).
+  `core-airmon-ng-stop`, `core-ip-link` and `core-iw-dev` hold each step's
+  exit code and stderr.
 - **`NetworkManager state` WARN.** NetworkManager was off before the run and is
   on now, because the core restarts it on every return to managed mode
   ([ADR-0005](adr/0005-networkmanager-check-kill.md)).

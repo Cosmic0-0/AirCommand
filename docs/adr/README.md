@@ -34,6 +34,7 @@ so files here are never renumbered, merged, or renamed.
 | [0019](0019-enumerate-binds-to-the-targets-bssid.md) | Enumerate binds to the Target's BSSID | Live | Makes Enumerate verify the adapter is actually joined to the Target's network before scanning. |
 | [0020](0020-appimage-packaging.md) | AppImage packaging | Live | Ships AirCommand as an AppImage that bundles Python, Tcl/Tk, and CustomTkinter, leaving the native tools (aircrack-ng suite, nmap, hashcat, hcxpcapngtool, iw) as host packages. |
 | [0021](0021-gui-toolkit-pyside6-qt-widgets.md) | GUI toolkit: PySide6 Qt Widgets | Live (conditional on the Kali VM run) | Ports the GUI from CustomTkinter to PySide6 Qt Widgets, rendering on the CPU raster engine so no GPU or QML is needed, with the event pump becoming a queued cross-thread Qt signal. |
+| [0022](0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md) | `airmon-ng stop` can leave an in-place adapter in monitor mode | Live (awaiting a hardware rerun) | Makes the radio's return to managed mode read the adapter's real type back, switch an in-place adapter itself when airmon-ng didn't, and raise if it still can't. |
 
 ## Chains
 
@@ -54,8 +55,9 @@ reading them in order.
   loops off stdout-gated polling and onto a wall-clock tick; 0009 added a
   crash-safe cleanup path around that loop and gave Crack a real exit-code
   check; 0014 hardened the same drain threads against a non-UTF-8 byte.
-- **Radio mode control (0005, 0016, 0017).** 0005 decided NetworkManager
+- **Radio mode control (0005, 0016, 0017, 0022).** 0005 decided NetworkManager
   handling around mode switches should be automatic; 0016 added a self-heal
   for the adapter's tracked mode drifting from its real state; 0017 added a
   second, manual entry point on the Management page, without changing
-  0005's automatic path.
+  0005's automatic path; 0022 stopped trusting `airmon-ng stop`'s report and
+  made the return to managed mode check the adapter's real type.

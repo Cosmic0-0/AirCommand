@@ -279,6 +279,13 @@ not a suggestion). Concretely:
       confirmed end to end, since this session had no interactive sudo to
       exercise it. The next real launch + Enumerate click is what closes
       that out, and is now also this checklist item's actual next step.**
+      **2026-10-30: the first full hardware harness run exercised that
+      switch, and it failed. `airmon-ng stop` exited 0 and left the adapter
+      in monitor mode, because Mint's aircrack-ng 1.7 retypes an in-place
+      adapter without taking its link down first. See
+      [ADR-0022](adr/0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md).
+      The core now switches the adapter back itself. Rerun the harness to
+      confirm, then do the Enumerate click-through.**
 - [ ] Cracking page (the old Crack tab, pre-redesign): pick the real
       Handshake from above, pick a real wordlist, run a crack to completion
       (use a small wordlist that you know contains the real key, to get a

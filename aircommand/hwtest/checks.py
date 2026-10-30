@@ -30,7 +30,15 @@ from aircommand.core.events import (
     NetworkSightingUpdated,
 )
 from aircommand.core.parse import parse_airodump_csv_line, parse_iw_dev_type, parse_iw_phy_interface_modes
-from aircommand.core.rf import AdapterBusy, BandUnavailable, NoAdapterSelected, RadioController
+from aircommand.core.rf import (
+    LAST_RESORT_HINT,
+    AdapterBusy,
+    BandUnavailable,
+    NoAdapterSelected,
+    RadioController,
+    in_place_restore_argvs,
+    manual_restore_commands,
+)
 from aircommand.hwtest import probe
 from aircommand.hwtest.report import Reporter, Status
 
@@ -606,9 +614,11 @@ def final_state_tier(reporter: Reporter, opts: HarnessOptions, pre: PreflightOut
     state knows about, so a Ctrl+C mid `airmon-ng start` or a raise after
     `check kill` can leave the adapter in monitor mode and NetworkManager
     stopped. When that happens this tier repairs it with the commands rf.py's
-    _stop_monitor_mode uses (`airmon-ng stop <iface>`, then a NetworkManager
-    restart), through `sudo -n` while the run's credential is still cached.
-    Returns the commands the operator still has to run by hand (empty if none)."""
+    _stop_monitor_mode uses (`airmon-ng stop <iface>`; if an in-place adapter
+    still reads as monitor, the switch from rf.in_place_restore_argvs, ADR-0022;
+    then a NetworkManager restart), through `sudo -n` while the run's credential
+    is still cached. Returns the commands the operator still has to run by hand
+    (empty if none), ending with the unplug hint when the radio is not back."""
     tier = "Final state"
     deadline = time.monotonic() + AIRMON_SETTLE_SECONDS
     while probe.airmon_ng_running() and time.monotonic() < deadline:
@@ -619,7 +629,8 @@ def final_state_tier(reporter: Reporter, opts: HarnessOptions, pre: PreflightOut
 
     state = _read_radio_state(reporter, opts, pre)
     _report_radio_state(reporter, tier, opts, pre, state, when="after shutdown")
-    manual: list[str] = []
+    manual: list[str] = []   # radio and NetworkManager commands, if the repair didn't finish the job
+    hint: list[str] = []     # the unplug hint, only while the adapter itself is still in monitor mode
     if not state.restored(pre):
         ran = _repair(reporter, opts, pre, state)
         after = _read_radio_state(reporter, opts, pre)
@@ -628,9 +639,10 @@ def final_state_tier(reporter: Reporter, opts: HarnessOptions, pre: PreflightOut
                          f"Engine.shutdown() left this unrestored; the harness ran {ran} and it is restored now")
         else:
             manual = _manual_commands(opts, pre, after)
+            hint = [f"# {LAST_RESORT_HINT}"] if _monitor_ifaces(opts, after) else []
             reporter.add(tier, "repair", Status.FAIL,
                          f"ran {ran or 'nothing'}; still not restored ({_describe(opts, after)}). "
-                         f"Run by hand: {'; '.join(manual)}")
+                         f"Run by hand: {'; '.join(manual + hint)}")
             _report_radio_state(reporter, tier, opts, pre, after, when="after repair")
 
     wpa_now = probe.service_state("wpa_supplicant")
@@ -643,16 +655,20 @@ def final_state_tier(reporter: Reporter, opts: HarnessOptions, pre: PreflightOut
     reporter.add(tier, "no stray tool processes", Status.PASS if sweep.is_clean else Status.FAIL,
                  "nothing started by this run is still running" if sweep.is_clean
                  else f"still running: {sweep.as_dict()}", **sweep.as_dict())
-    if not sweep.is_clean:
-        manual += [f"sudo kill {pid}" for pid in sorted(sweep.pids())]
-    return manual
+    kills = [f"sudo kill {pid}" for pid in sorted(sweep.pids())] if not sweep.is_clean else []
+    # The hint is a comment line, last, so pasting the whole list as one line stays safe.
+    return manual + kills + hint
+
+
+def _iw_type(iface: str) -> Optional[str]:
+    return parse_iw_dev_type(probe.run_command(["iw", "dev", iface, "info"], timeout=5.0).stdout)
 
 
 def _read_radio_state(reporter: Reporter, opts: HarnessOptions, pre: PreflightOutcome) -> _RadioState:
     adapter_type = _poll_iw_type(reporter, opts.adapter, want="managed")
     monitor = []
     for iface in probe.interfaces_on_phy(pre.phy) if pre.phy else [opts.adapter]:
-        if parse_iw_dev_type(probe.run_command(["iw", "dev", iface, "info"], timeout=5.0).stdout) == "monitor":
+        if _iw_type(iface) == "monitor":
             monitor.append(iface)
     nm = probe.service_state("NetworkManager")
     deadline = time.monotonic() + RESTORE_POLL_SECONDS
@@ -684,15 +700,27 @@ def _report_radio_state(reporter: Reporter, tier: str, opts: HarnessOptions, pre
     reporter.add(tier, f"NetworkManager state ({when})", status, detail, before=before, after=now)
 
 
-def _repair(reporter: Reporter, opts: HarnessOptions, pre: PreflightOutcome, state: _RadioState) -> str:
-    ran = []
+def _monitor_ifaces(opts: HarnessOptions, state: _RadioState) -> list[str]:
     ifaces = list(state.monitor_ifaces)
     if state.adapter_type == "monitor" and opts.adapter not in ifaces:
         ifaces.append(opts.adapter)
+    return ifaces
+
+
+def _repair(reporter: Reporter, opts: HarnessOptions, pre: PreflightOutcome, state: _RadioState) -> str:
+    ran = []
+    ifaces = _monitor_ifaces(opts, state)
     for iface in ifaces:
         reporter.run_and_record(["sudo", "-n", "airmon-ng", "stop", iface], label="repair-airmon-ng-stop",
                                 timeout=60.0)
         ran.append("airmon-ng stop")
+        # airmon-ng can exit 0 and leave an in-place adapter in monitor mode
+        # (ADR-0022); the same switch rf.py falls back to.
+        if iface == opts.adapter and _iw_type(iface) == "monitor":
+            for argv in in_place_restore_argvs(iface):
+                label = "repair-" + "-".join(a for a in argv if a not in (iface, "set", "dev"))
+                reporter.run_and_record(["sudo", "-n", *argv], label=label, timeout=30.0)
+            ran.append("ip link down, iw set type managed, ip link up")
     # Only bring NetworkManager back if it was running before the run; rf.py's
     # _stop_monitor_mode restarts it unconditionally, but the harness knows the
     # pre-run state and leaves a deliberately stopped NetworkManager alone.
@@ -706,9 +734,7 @@ def _repair(reporter: Reporter, opts: HarnessOptions, pre: PreflightOutcome, sta
 
 
 def _manual_commands(opts: HarnessOptions, pre: PreflightOutcome, state: _RadioState) -> list[str]:
-    commands = [f"sudo airmon-ng stop {iface}" for iface in state.monitor_ifaces]
-    if state.adapter_type == "monitor" and opts.adapter not in state.monitor_ifaces:
-        commands.append(f"sudo airmon-ng stop {opts.adapter}")
+    commands = [cmd for iface in _monitor_ifaces(opts, state) for cmd in manual_restore_commands(iface, opts.adapter)]
     if pre.networkmanager_state == "active":
         commands.append("sudo systemctl restart NetworkManager")
     return commands

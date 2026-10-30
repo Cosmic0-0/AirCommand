@@ -90,6 +90,12 @@ class _SimHandle:
 class _SimWorld:
     def __init__(self, tmp: Path) -> None:
         self.types = {ADAPTER: "managed"}     # iw interface type per interface
+        self.up = {ADAPTER: True}             # `ip link` admin state per interface
+        # The installed aircrack-ng 1.7 build on a driver without interface
+        # combinations (rtw88_8822bu, ADR-0022): `airmon-ng stop` retypes the
+        # interface without taking its link down first, mac80211 refuses, and
+        # airmon-ng still exits 0. False models current upstream airmon-ng.
+        self.airmon_stop_skips_link_down = False
         self.nm = "active"                    # systemctl is-active NetworkManager
         self.running: dict[int, list[str]] = {}
         self.gui_lines: list[str] = []
@@ -111,6 +117,11 @@ class _SimWorld:
             output = self._airmon(argv[1:])
         elif tool == "systemctl" and argv[1:] == ["restart", "NetworkManager"]:
             self.nm = "active"
+        elif tool == "ip" and argv[1:3] == ["link", "set"]:
+            self._ip_link(argv)
+        elif tool == "iw" and argv[1] == "dev" and argv[3:5] == ["set", "type"]:
+            return _SimHandle(self, argv, [], long_running=False,
+                              returncode=0 if self._set_type(argv[2], argv[5]) else 240)
         elif tool == "iw" and argv[1] == "phy":
             output = self.iw_phy.splitlines()
         elif tool == "iw" and argv[1] == "dev":
@@ -130,10 +141,23 @@ class _SimWorld:
             self.nm = "inactive"
         elif args[0] == "start":
             self.types[args[1]] = "monitor"
+            self.up[args[1]] = True
             return [f"(mac80211 monitor mode vif enabled for [phy9]{args[1]} on [phy9]{args[1]})"]
         elif args[0] == "stop":
-            self.types[args[1]] = "managed"
+            if not self.airmon_stop_skips_link_down:
+                self.up[args[1]] = False
+            self._set_type(args[1], "managed")
+            self.up[args[1]] = True
         return []
+
+    def _set_type(self, iface: str, new_type: str) -> bool:
+        if self.types.get(iface) == "monitor" and self.up.get(iface, False):
+            return False   # mac80211 refuses to retype a running monitor interface (-EBUSY)
+        self.types[iface] = new_type
+        return True
+
+    def _ip_link(self, argv: list[str]) -> None:   # ip link set dev <iface> up|down
+        self.up[argv[4]] = argv[5] == "up"
 
     def _iw_dev(self, iface: str) -> str:
         return f"Interface {iface}\n\ttype {self.types[iface]}\n" if iface in self.types else ""
@@ -167,6 +191,10 @@ class _SimWorld:
                 self._airmon(argv[3:])
             elif argv[2] == "systemctl":
                 self.nm = "active"
+            elif argv[2] == "ip":
+                self._ip_link(argv[2:])
+            elif argv[2] == "iw":
+                return result(rc=0 if self._set_type(argv[4], argv[7]) else 240)
             return result()
         if argv[:3] == ["nmcli", "device", "status"]:
             return result(f"DEVICE TYPE STATE CONNECTION\n{ADAPTER} wifi connected {SSID}\n")
@@ -195,6 +223,7 @@ def sim(tmp_path, monkeypatch) -> _SimWorld:
         "sim_driver" if str(path).startswith("/sys/class/net/") else real_readlink(path, *a, **k)))
     monkeypatch.setattr("aircommand.core.rf._phy_name", lambda iface: "phy9")
     monkeypatch.setattr("aircommand.core.rf._is_hard_blocked", lambda iface: False)
+    monkeypatch.setattr("aircommand.core.rf._is_monitor_interface", lambda iface: world.types.get(iface) == "monitor")
     # Fast clocks: every wait the tiers do is bounded by these.
     for name, value in (("LIVE_ARGV_DELAY_SECONDS", 0.1), ("ABRUPT_CANCEL_AFTER_SECONDS", 0.1),
                         ("REAP_PAUSE_SECONDS", 0.0), ("RESTORE_POLL_SECONDS", 0.3),
@@ -354,7 +383,57 @@ def test_final_state_prints_manual_recovery_when_the_repair_cannot_run(sim, tmp_
 
     repair = next(r for r in reporter.results if r.name == "repair")
     assert repair.status == Status.FAIL
-    assert manual == [f"sudo airmon-ng stop {ADAPTER}", "sudo systemctl restart NetworkManager"]
+    assert manual == [
+        f"sudo ip link set dev {ADAPTER} down",
+        f"sudo iw dev {ADAPTER} set type managed",
+        f"sudo ip link set dev {ADAPTER} up",
+        "sudo systemctl restart NetworkManager",
+        "# if iw still reports type monitor, unplug the USB adapter and plug it back in",
+    ]
+    assert "set type managed" in repair.detail and "unplug" in repair.detail
+
+
+def test_final_state_repair_switches_an_in_place_adapter_airmon_stop_leaves_in_monitor(sim, tmp_path):
+    """The 2026-10-30 hardware run (ADR-0022): airmon-ng stop exits 0 and the
+    adapter stays in monitor mode. The repair reads the type back and runs the
+    same in-place switch rf.py does, through sudo -n."""
+    sim.airmon_stop_skips_link_down = True
+    sim.types[ADAPTER] = "monitor"
+    sim.nm = "inactive"
+    reporter = Reporter(tmp_path / "r", redact=False)
+
+    manual = checks.final_state_tier(reporter, _opts(tmp_path), _pre())
+
+    rows = {r.name: r for r in reporter.results}
+    assert rows["repair"].status == Status.PASS
+    sudo = [a[2:] for a in sim.ran if a[:2] == ["sudo", "-n"]]
+    assert sudo[:4] == [
+        ["airmon-ng", "stop", ADAPTER],
+        ["ip", "link", "set", "dev", ADAPTER, "down"],
+        ["iw", "dev", ADAPTER, "set", "type", "managed"],
+        ["ip", "link", "set", "dev", ADAPTER, "up"],
+    ]
+    assert sim.types[ADAPTER] == "managed" and sim.up[ADAPTER] is True
+    assert manual == []
+
+
+def test_full_run_restores_an_adapter_whose_airmon_stop_does_not(harness_main, sim):
+    """End to end against the same airmon-ng: the core's own restore (Monitor
+    mode tier and Engine.shutdown()) switches the adapter back, so nothing is
+    left for the Final state repair."""
+    sim.airmon_stop_skips_link_down = True
+
+    rc, report, results = harness_main("--allow-network-drop")
+
+    assert [r for r in results if r["status"] == "FAIL"] == [] and rc == 0
+    monitor = _rows(results, "Monitor mode")
+    assert monitor["stop_monitor_mode()"]["status"] == "PASS"
+    assert monitor["restored to managed"]["status"] == "PASS"
+    final = _rows(results, "Final state")
+    assert final["adapter back to managed (after shutdown)"]["status"] == "PASS"
+    assert "repair" not in final
+    names = [p.name for p in (report / "commands").iterdir()]
+    assert any("core-ip-link" in n for n in names) and any("core-iw-dev" in n for n in names)
 
 
 def test_final_state_leaves_a_networkmanager_that_was_off_before_the_run_alone(sim, tmp_path):

@@ -382,6 +382,42 @@ def test_management_row_click_selects_the_adapter_and_updates_the_status_bar(moc
 
 
 @patch("aircommand.core.privilege.subprocess.run")
+def test_management_row_click_reports_an_adapter_that_will_not_leave_monitor_mode(
+        mock_run, qtbot, tmp_path, monkeypatch):
+    """Switching away from an adapter in monitor mode stops it first. When that
+    stop can't get it out of monitor mode (ADR-0022), select_adapter() raises a
+    RadioCommandFailed; the row click shows it and keeps the old adapter bound
+    instead of letting the exception escape the slot."""
+    mock_run.return_value = _completed(0)
+    monkeypatch.setattr(App, "_ask_sudo_password_dialog", lambda self, error=None: PASSWORD)
+    monkeypatch.setattr(
+        "aircommand.core.rf.glob.glob",
+        lambda pattern: ["/sys/class/net/wlan0/phy80211", "/sys/class/net/wlan1/phy80211"]
+        if pattern == "/sys/class/net/*/phy80211" else [],
+    )
+    monkeypatch.setattr("aircommand.core.rf._is_monitor_interface", lambda interface: interface == "wlan0")
+    proc = FakeProcRunner(script={
+        "airmon-ng": AIRMON_NO_RENAME_OUTPUT,
+        "iw": IW_DEV_MANAGED,
+        "ip": [],
+        "systemctl": ["Synchronizing state..."],
+    })
+    app = App(db_path=tmp_path / "test.db", work_dir=tmp_path, adapter="wlan0", proc=proc)
+    qtbot.addWidget(app)
+    try:
+        assert app.engine.radio.start_monitor_mode() == "wlan0"   # in place, no rename
+        rows = {row._name: row for row in _management_adapter_rows(app)}
+
+        qtbot.mouseClick(rows["wlan1"], Qt.MouseButton.LeftButton)
+
+        assert app.engine.radio.selected_adapter == "wlan0"
+        assert app.engine.radio.is_in_monitor_mode is True
+        assert "still in monitor mode" in app.management_view._last_action_label.text()
+    finally:
+        app.on_close()
+
+
+@patch("aircommand.core.privilege.subprocess.run")
 def test_management_buttons_are_disabled_with_no_adapter_selected(mock_run, qtbot, tmp_path, monkeypatch):
     """Check, Kill, and Start are gated on an adapter being selected; Stop is
     gated on monitor mode actually running. With no adapter, all four are off."""

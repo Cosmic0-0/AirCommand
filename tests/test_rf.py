@@ -1,15 +1,18 @@
 import pytest
 
 from aircommand.core.domain import Band, JobKind
+from aircommand.core.parse import parse_airmon_monitor_interface
 from aircommand.core.procutil import FakeProcRunner
 from aircommand.core.rf import (
     AdapterBusy,
     AdapterInfo,
     AdapterMode,
     BandUnavailable,
+    MonitorModeStuck,
     NoAdapterSelected,
     RadioCommandFailed,
     RadioController,
+    manual_restore_commands,
 )
 
 # Realistic (researched, not hardware-captured) airmon-ng rename-announcement
@@ -948,3 +951,238 @@ def test_stop_monitor_mode_runs_airmon_stop_and_restarts_network_manager():
         ["systemctl", "restart", "NetworkManager"],
     ]
     assert rf.is_in_monitor_mode is False
+
+
+# -- ADR-0022: airmon-ng stop that leaves an in-place adapter in monitor mode ----
+#
+# Real `airmon-ng start`/`stop` stdout, captured 2026-10-30 from a TP-Link Archer
+# T4U v3 (rtw88_8822bu, aircrack-ng 1:1.7+git20230807) on the project owner's
+# machine; only the interface name is changed to wlan0. No rename line: the driver
+# reports "interface combinations are not supported", so airmon-ng switches the
+# interface's type in place. The stop output claims success, exit code 0, and the
+# interface stayed in monitor mode (hardware-test-reports/20261030T190659Z).
+AIRMON_START_OUTPUT_IN_PLACE = [
+    "", "", "PHY\tInterface\tDriver\t\tChipset", "",
+    "phy8\twlan0\t\trtw88_8822bu\tTP-Link Archer T4U ver.3",
+    "\t\t(monitor mode enabled)", "",
+]
+AIRMON_STOP_OUTPUT_IN_PLACE = [
+    "", "PHY\tInterface\tDriver\t\tChipset", "",
+    "phy8\twlan0\t\trtw88_8822bu\tTP-Link Archer T4U ver.3",
+    "\t\t(monitor mode disabled)", "",
+]
+
+
+class _Machine:
+    """FakeProcRunner plus the one piece of kernel state ADR-0022 is about: each
+    interface's type, as /sys/class/net/<iface>/type reports it (monkeypatched
+    into rf._is_monitor_interface). `airmon_stop_works` picks which airmon-ng the
+    machine has: True switches the interface back, False is the installed 1.7
+    build's no-op on an in-place adapter. `iw ... set type managed` works only
+    after `ip link set ... down`, as mac80211 refuses a running monitor
+    interface (-EBUSY)."""
+
+    def __init__(self, monkeypatch, *, airmon_stop_works: bool, iw_set_type_works: bool = True,
+                 start_output: list[str] = AIRMON_START_OUTPUT_IN_PLACE) -> None:
+        self.types: dict[str, str] = {}
+        self.up: dict[str, bool] = {}
+        self.calls: list[tuple[list[str], bool]] = []
+        self._airmon_stop_works = airmon_stop_works
+        self._iw_set_type_works = iw_set_type_works
+        self._start_output = start_output
+        monkeypatch.setattr("aircommand.core.rf._is_monitor_interface",
+                            lambda iface: self.types.get(iface) == "monitor")
+
+    def spawn(self, argv, *, privileged):
+        self.calls.append((list(argv), privileged))
+        output: list[str] = []
+        if argv[:2] == ["airmon-ng", "start"]:
+            output = self._start_output
+            monitor = parse_airmon_monitor_interface("\n".join(output), fallback=argv[2])
+            self.types[monitor], self.up[monitor] = "monitor", True
+        elif argv[:2] == ["airmon-ng", "stop"]:
+            output = AIRMON_STOP_OUTPUT_IN_PLACE
+            if self._airmon_stop_works and argv[2].endswith("mon"):
+                del self.types[argv[2]]   # airmon-ng deletes a separate monitor interface
+            elif self._airmon_stop_works:
+                self.types[argv[2]] = "managed"
+        elif argv[:3] == ["ip", "link", "set"]:
+            self.up[argv[4]] = argv[5] == "up"
+        elif argv[:2] == ["iw", "dev"] and argv[3:5] == ["set", "type"]:
+            if self._iw_set_type_works and not self.up.get(argv[2], False):
+                self.types[argv[2]] = argv[5]
+        return FakeProcRunner(script={argv[0]: output}).spawn(argv, privileged=privileged)
+
+    def argvs(self) -> list[list[str]]:
+        return [argv for argv, _ in self.calls]
+
+
+IN_PLACE_START = [["airmon-ng", "check", "kill"], ["airmon-ng", "start", "wlan0"]]
+IN_PLACE_FALLBACK = [
+    ["ip", "link", "set", "dev", "wlan0", "down"],
+    ["iw", "dev", "wlan0", "set", "type", "managed"],
+    ["ip", "link", "set", "dev", "wlan0", "up"],
+]
+NM_RESTART = ["systemctl", "restart", "NetworkManager"]
+
+
+def test_in_place_adapter_left_in_monitor_by_airmon_stop_is_switched_back_by_the_fallback(monkeypatch):
+    """The 2026-10-30 hardware failure: airmon-ng stop reports success and changes
+    nothing. The core reads the real type back, sees monitor, and switches the
+    interface itself (link down, set type managed, link up), all privileged,
+    before restarting NetworkManager."""
+    machine = _Machine(monkeypatch, airmon_stop_works=False)
+    rf = RadioController("wlan0", machine)
+    assert rf.start_monitor_mode() == "wlan0"
+
+    rf.stop_monitor_mode()
+
+    assert machine.argvs() == IN_PLACE_START + [["airmon-ng", "stop", "wlan0"]] + IN_PLACE_FALLBACK + [NM_RESTART]
+    assert all(privileged for argv, privileged in machine.calls if argv in IN_PLACE_FALLBACK)
+    assert machine.types["wlan0"] == "managed" and machine.up["wlan0"] is True
+    assert rf.is_in_monitor_mode is False
+
+
+def test_no_fallback_runs_when_airmon_stop_really_restored_the_adapter(monkeypatch):
+    """An adapter airmon-ng handles correctly sees no new command: the check is a
+    sysfs read, not a spawn, so the restore sequence is exactly what it was."""
+    machine = _Machine(monkeypatch, airmon_stop_works=True)
+    rf = RadioController("wlan0", machine)
+    rf.start_monitor_mode()
+
+    rf.stop_monitor_mode()
+
+    assert machine.argvs() == IN_PLACE_START + [["airmon-ng", "stop", "wlan0"], NM_RESTART]
+    assert rf.is_in_monitor_mode is False
+
+
+def test_a_renamed_monitor_interface_that_airmon_stop_removed_needs_no_fallback(monkeypatch):
+    machine = _Machine(monkeypatch, airmon_stop_works=True, start_output=AIRMON_START_OUTPUT_RENAMES)
+    rf = RadioController("wlan0", machine)
+    assert rf.start_monitor_mode() == "wlan0mon"
+
+    rf.stop_monitor_mode()
+
+    assert machine.argvs()[-2:] == [["airmon-ng", "stop", "wlan0mon"], NM_RESTART]
+    assert rf.is_in_monitor_mode is False
+
+
+def test_a_renamed_monitor_interface_still_in_monitor_mode_is_reported_not_retyped(monkeypatch):
+    """The fallback is for the in-place case only. A separate monitor interface
+    (wlan0mon) is airmon-ng's to delete; the core never retypes or deletes it
+    itself. NetworkManager still comes back, then the failure is raised loudly,
+    and the core keeps believing what is true: the adapter is in monitor mode."""
+    machine = _Machine(monkeypatch, airmon_stop_works=False, start_output=AIRMON_START_OUTPUT_RENAMES)
+    rf = RadioController("wlan0", machine)
+    rf.start_monitor_mode()
+
+    with pytest.raises(MonitorModeStuck) as excinfo:
+        rf.stop_monitor_mode()
+
+    assert machine.argvs()[-2:] == [["airmon-ng", "stop", "wlan0mon"], NM_RESTART]
+    assert not [argv for argv in machine.argvs() if argv[0] in ("ip", "iw")]
+    assert excinfo.value.interface == "wlan0mon"
+    assert excinfo.value.recovery == ["sudo airmon-ng stop wlan0mon"]
+    assert isinstance(excinfo.value, RadioCommandFailed)   # every existing catch site covers it
+    assert rf.is_in_monitor_mode is True
+
+
+def test_in_place_adapter_the_fallback_cannot_switch_raises_with_the_manual_commands(monkeypatch):
+    machine = _Machine(monkeypatch, airmon_stop_works=False, iw_set_type_works=False)
+    rf = RadioController("wlan0", machine)
+    rf.start_monitor_mode()
+
+    with pytest.raises(MonitorModeStuck) as excinfo:
+        rf.stop_monitor_mode()
+
+    assert machine.argvs()[-5:] == [["airmon-ng", "stop", "wlan0"]] + IN_PLACE_FALLBACK + [NM_RESTART]
+    assert excinfo.value.recovery == [
+        "sudo ip link set dev wlan0 down",
+        "sudo iw dev wlan0 set type managed",
+        "sudo ip link set dev wlan0 up",
+    ]
+    message = str(excinfo.value)
+    assert "still in monitor mode" in message and "sudo iw dev wlan0 set type managed" in message
+    assert "unplug" in message
+    assert rf.is_in_monitor_mode is True
+
+    # Still tracked as monitor, so a second Stop click (or shutdown) tries again.
+    machine.calls.clear()
+    with pytest.raises(MonitorModeStuck):
+        rf.stop_monitor_mode()
+    assert machine.argvs()[0] == ["airmon-ng", "stop", "wlan0"]
+
+
+def test_reserve_managed_switches_an_in_place_adapter_back_through_the_fallback(monkeypatch):
+    """Enumerate's path (_ensure_mode), after Discovery left the adapter in
+    monitor mode: same fallback, and the managed reservation is handed out."""
+    machine = _Machine(monkeypatch, airmon_stop_works=False)
+    rf = RadioController("wlan0", machine)
+    rf.release(rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY))
+
+    reservation = rf.reserve(AdapterMode.MANAGED, JobKind.NMAP_SCAN)
+
+    assert reservation.adapter == "wlan0"
+    assert machine.argvs()[-5:] == [["airmon-ng", "stop", "wlan0"]] + IN_PLACE_FALLBACK + [NM_RESTART]
+    assert machine.types["wlan0"] == "managed"
+
+
+def test_release_to_managed_uses_the_fallback_too(monkeypatch):
+    """Engine.shutdown()'s path, the one the hardware run's Final state caught."""
+    machine = _Machine(monkeypatch, airmon_stop_works=False)
+    rf = RadioController("wlan0", machine)
+    rf.release(rf.reserve(AdapterMode.MONITOR_HOPPING, JobKind.DISCOVERY))
+
+    rf.release_to_managed()
+
+    assert machine.types["wlan0"] == "managed"
+    assert rf.is_in_monitor_mode is False
+
+
+def test_network_manager_failure_still_raises_after_a_successful_fallback(monkeypatch):
+    machine = _Machine(monkeypatch, airmon_stop_works=False)
+    rf = RadioController("wlan0", machine)
+    rf.start_monitor_mode()
+    real_spawn = machine.spawn
+
+    def spawn(argv, *, privileged):
+        if argv[0] == "systemctl":
+            machine.calls.append((list(argv), privileged))
+            return FakeProcRunner(script={"systemctl": []}, returncodes={"systemctl": 1}).spawn(
+                argv, privileged=privileged)
+        return real_spawn(argv, privileged=privileged)
+
+    machine.spawn = spawn
+    with pytest.raises(RadioCommandFailed) as excinfo:
+        rf.stop_monitor_mode()
+
+    assert excinfo.value.argv == NM_RESTART
+    assert machine.types["wlan0"] == "managed"
+    assert rf.is_in_monitor_mode is False
+
+
+def test_manual_restore_commands_for_an_in_place_and_a_renamed_monitor_interface():
+    assert manual_restore_commands("wlx5c628b9faa9d", "wlx5c628b9faa9d") == [
+        "sudo ip link set dev wlx5c628b9faa9d down",
+        "sudo iw dev wlx5c628b9faa9d set type managed",
+        "sudo ip link set dev wlx5c628b9faa9d up",
+    ]
+    assert manual_restore_commands("wlan0mon", "wlan0") == ["sudo airmon-ng stop wlan0mon"]
+
+
+def test_is_monitor_interface_reads_the_netdev_type_from_sysfs(tmp_path, monkeypatch):
+    """803 is ARPHRD_IEEE80211_RADIOTAP, the type mac80211 gives a monitor
+    interface (and the value airmon-ng itself checks). Anything else, or no such
+    interface, reads as not monitor."""
+    from aircommand.core import rf as rf_module
+
+    monkeypatch.undo()   # the suite-wide autouse stub; this test checks the real function
+    (tmp_path / "wlan0").mkdir()
+    (tmp_path / "wlan0" / "type").write_text("803\n")
+    (tmp_path / "wlan1").mkdir()
+    (tmp_path / "wlan1" / "type").write_text("1\n")
+    monkeypatch.setattr(rf_module, "_SYS_CLASS_NET", str(tmp_path))
+
+    assert rf_module._is_monitor_interface("wlan0") is True
+    assert rf_module._is_monitor_interface("wlan1") is False
+    assert rf_module._is_monitor_interface("wlan9") is False

@@ -87,6 +87,62 @@ class RadioBlocked(RadioCommandFailed):
         self.stderr_tail = []
 
 
+class MonitorModeStuck(RadioCommandFailed):
+    """The monitor-mode interface still reads as monitor after the whole
+    restore ran: `airmon-ng stop` and, for an in-place adapter, the core's own
+    switch (ADR-0022). NetworkManager has already been restarted by then.
+    Subclasses RadioCommandFailed, so every caller that already catches that
+    (Enumerate's start, the Management page, Engine.shutdown()) reports it.
+    `recovery` is the commands that switch it back by hand, from
+    manual_restore_commands()."""
+
+    def __init__(self, interface: str, recovery: list[str], returncode: int, stderr_tail: list[str]) -> None:
+        Exception.__init__(
+            self,
+            f"{interface} is still in monitor mode after `airmon-ng stop`. Switch it back by hand: "
+            f"{'; '.join(recovery)}; sudo systemctl restart NetworkManager ({LAST_RESORT_HINT})",
+        )
+        self.argv = ["airmon-ng", "stop", interface]
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+        self.interface = interface
+        self.recovery = recovery
+
+
+# How to finish a restore that still leaves the interface in monitor mode. A
+# USB adapter comes back from re-enumeration with a fresh interface in managed
+# mode, whatever state the old one was in.
+LAST_RESORT_HINT = "if iw still reports type monitor, unplug the USB adapter and plug it back in"
+
+
+def in_place_restore_argvs(interface: str) -> list[list[str]]:
+    """The switch back to managed mode for an interface that airmon-ng put in
+    monitor mode in place (same name, no separate monitor interface): what
+    current upstream airmon-ng does for drivers that report "interface
+    combinations are not supported". The link must be down first, because
+    mac80211 refuses to change the type of a running monitor interface
+    (-EBUSY). The installed aircrack-ng 1.7 build skips that step, so its
+    `airmon-ng stop` exits 0, prints "(monitor mode disabled)" and changes
+    nothing (ADR-0022). Every command needs root."""
+    return [
+        ["ip", "link", "set", "dev", interface, "down"],
+        ["iw", "dev", interface, "set", "type", "managed"],
+        ["ip", "link", "set", "dev", interface, "up"],
+    ]
+
+
+def manual_restore_commands(monitor_interface: str, adapter: str | None) -> list[str]:
+    """Shell commands that take `monitor_interface` out of monitor mode by hand,
+    for an error message or the hardware harness's handoff. An in-place
+    interface (`monitor_interface` is the adapter itself) gets the explicit
+    switch above. A separate monitor interface (wlan0mon) gets `airmon-ng stop`,
+    which deletes it and recreates the managed one; the core never does that
+    part itself. NetworkManager's restart is the caller's to add."""
+    if adapter is None or monitor_interface == adapter:
+        return ["sudo " + " ".join(argv) for argv in in_place_restore_argvs(monitor_interface)]
+    return [f"sudo airmon-ng stop {monitor_interface}"]
+
+
 class BandUnavailable(Exception):
     """Discovery can't be offered, or can't be started on, a band: either the
     adapter's supported bands couldn't be determined (no phy found, `iw` missing
@@ -107,6 +163,25 @@ def _phy_name(adapter: str) -> str | None:
             return f.read().strip() or None
     except OSError:
         return None
+
+
+_SYS_CLASS_NET = "/sys/class/net"
+# The netdev type mac80211 gives a monitor-mode interface. airmon-ng checks the
+# same sysfs value to decide whether an interface is in monitor mode.
+_ARPHRD_IEEE80211_RADIOTAP = "803"
+
+
+def _is_monitor_interface(interface: str) -> bool:
+    """True only if sysfs positively says `interface` is in monitor mode; a
+    missing interface (airmon-ng deleted it) or an unreadable path reads as
+    not. A plain file read rather than an `iw` spawn, so checking after every
+    `airmon-ng stop` adds no command to the restore. Module-level, like
+    _phy_name, so tests patch it (ADR-0022)."""
+    try:
+        with open(f"{_SYS_CLASS_NET}/{interface}/type") as f:
+            return f.read().strip() == _ARPHRD_IEEE80211_RADIOTAP
+    except OSError:
+        return False
 
 
 def _is_hard_blocked(adapter: str) -> bool:
@@ -173,7 +248,9 @@ class RadioController:
         # combination: MANAGED is requested while this still reads None. ADR-0016
         # confirmed this for real -- a prior AirCommand process that didn't exit
         # through Engine.shutdown() (force-killed, same as this repo's own
-        # ADR-0014 hang) left a real adapter in monitor mode; the next process
+        # ADR-0014 hang) left a real adapter in monitor mode (ADR-0022 found a
+        # second way to get there: an `airmon-ng stop` that exits 0 without
+        # switching an in-place adapter back); the next process
         # still defaulted to "assume managed", so reserve(MANAGED, ...)
         # (Enumerate) skipped the real mode switch entirely and then failed
         # reading an IP off an interface that was never going to have one --
@@ -515,16 +592,38 @@ class RadioController:
         return parse_airmon_monitor_interface(output, fallback=self._adapter)
 
     def _stop_monitor_mode(self) -> None:
-        handle = self._proc.spawn(["airmon-ng", "stop", self._monitor_adapter], privileged=True)
+        monitor = self._monitor_adapter
+        handle = self._proc.spawn(["airmon-ng", "stop", monitor], privileged=True)
         "\n".join(handle.lines())  # drain for the same reason _start_monitor_mode does; ignored
         stop_returncode = handle.wait()
         if stop_returncode != 0:
             logger.warning(
                 "airmon-ng stop %s exited %d (exit code not treated as authoritative — "
                 "see _start_monitor_mode's docstring); stderr: %s",
-                self._monitor_adapter, stop_returncode, handle.stderr_tail(),
+                monitor, stop_returncode, handle.stderr_tail(),
             )
-        self._monitor_adapter = None
+
+        # airmon-ng's own word is not proof: on the 2026-10-30 hardware run it
+        # printed "(monitor mode disabled)", exited 0, and left an in-place
+        # rtw88 adapter in monitor mode (ADR-0022). Read the real type back. Only
+        # an in-place interface (monitor == the adapter's own name) gets the
+        # core's own switch; a separate monitor interface is airmon-ng's to
+        # delete, and is only reported.
+        stuck = _is_monitor_interface(monitor)
+        if stuck and monitor == self._adapter:
+            logger.warning("airmon-ng stop %s left it in monitor mode; switching it to managed in place", monitor)
+            for argv in in_place_restore_argvs(monitor):
+                step = self._proc.spawn(argv, privileged=True)
+                "\n".join(step.lines())   # drain; ignored
+                if step.wait() != 0:   # logged only: the sysfs read below is what decides
+                    logger.warning("%s failed; stderr: %s", " ".join(argv), step.stderr_tail())
+            stuck = _is_monitor_interface(monitor)
+        if stuck:
+            # Kept as monitor: that is the truth, and it lets the next stop or
+            # Engine.shutdown() try again.
+            logger.error("%s is still in monitor mode after the restore", monitor)
+        else:
+            self._monitor_adapter = None
 
         # Restart NetworkManager the moment the adapter isn't needed for monitor
         # mode anymore -- not deferred to Engine.shutdown() -- so Enumerate can
@@ -538,6 +637,12 @@ class RadioController:
         if nm_returncode != 0:
             raise RadioCommandFailed(
                 ["systemctl", "restart", "NetworkManager"], nm_returncode, nm_handle.stderr_tail()
+            )
+        if stuck:
+            # After the NetworkManager restart, not before: the operator's other
+            # connections come back even when this adapter didn't.
+            raise MonitorModeStuck(
+                monitor, manual_restore_commands(monitor, self._adapter), stop_returncode, handle.stderr_tail()
             )
 
     def _check_kill(self) -> None:

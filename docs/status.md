@@ -20,7 +20,7 @@ reconciliation, SQLite persistence, sudo privilege elevation, and radio
 (adapter/monitor-mode) control. It is GUI-agnostic; the GUI calls into it
 and adds no logic of its own.
 
-As of 2026-10-30, `pytest` passes 587 tests, all against `FakeProcRunner`
+As of 2026-10-30, `pytest` passes 600 tests, all against `FakeProcRunner`
 (no real subprocess, root, or hardware).
 
 The real-hardware test harness (`aircommand/hwtest/`, run with
@@ -61,6 +61,12 @@ this; the summary below is a pointer, not a substitute.
 - Dual-band Discovery is implemented and passes the automated suite; on
   real hardware, only the adapter's band-capability check has run so far
   (see [ADR-0013](adr/0013-discovery-band-selection.md)).
+- The return to managed mode failed on the first full hardware harness run
+  (2026-10-30). On the TP-Link adapter, `airmon-ng stop` printed success and
+  left the adapter in monitor mode.
+  [ADR-0022](adr/0022-airmon-ng-stop-can-leave-an-in-place-adapter-in-monitor-mode.md)
+  makes the core and the harness check the real type and switch the adapter
+  back themselves. That fix has only run against fakes so far.
 - Nobody has verified the Management page's manual adapter selection and
   monitor-mode control on real hardware yet (see
   [ADR-0017](adr/0017-manual-radio-control-for-management-page.md) and
@@ -79,6 +85,8 @@ Short list; full detail and checkboxes live in
 collects evidence for most of these; see
 [`docs/hardware-testing.md`](hardware-testing.md) for how to run it.
 
+- Rerun the hardware harness to confirm ADR-0022's switch back to managed
+  mode on the real adapter.
 - Re-confirm Capture's Cancel button through the real GUI on real hardware.
 - Click through the real Cracking page for a full real handshake-to-password run.
 - Click through the real Enumerate panel, including the privileged

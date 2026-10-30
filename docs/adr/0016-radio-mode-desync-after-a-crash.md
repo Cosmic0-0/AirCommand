@@ -1,5 +1,11 @@
 # RadioController's in-memory mode tracking can desync from real hardware
 
+**See also ADR-0022 (2026-10-30).** The privileged restore this ADR left
+unconfirmed failed on the first full hardware harness run. The installed
+`airmon-ng stop` exits 0 without switching this adapter back, so the stuck
+adapter described below may have come from an ordinary shutdown rather than
+a crash. ADR-0022 adds the fix. The text below is left as written.
+
 **Status: implemented, fixed, confirmed against the real, currently-affected adapter on the project owner's own machine.**
 
 Reported: clicking Start Enumerate produces

@@ -224,7 +224,9 @@ class ManagementView(QWidget):
     def _on_adapter_row_clicked(self, name: str) -> None:
         try:
             self._app.engine.radio.select_adapter(name)
-        except AdapterBusy as e:
+        except (AdapterBusy, RadioCommandFailed) as e:
+            # RadioCommandFailed: taking the old adapter out of monitor mode
+            # failed (ADR-0022), so it stays bound.
             self._set_last_action(self._describe_error(e))
             return
         self._app.on_adapter_selected()   # fans out to the status bar now, Discovery's band menu in P2 (ADR-0017)
