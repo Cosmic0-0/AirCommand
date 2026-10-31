@@ -17,7 +17,7 @@ Decisions the owner made, which this plan builds on:
 
 This revision was drafted without the owner in the loop. Each choice below is the simplest option and is reversible.
 
-- The first draft of this file (commit `dd1102f`) is revised in place. Everything verified and still correct in it is kept. This revision changes the foundation split, the pytest-qt decision, and the hardware re-verification section.
+- The first draft of this file (commit `0813f28`) is revised in place. Everything verified and still correct in it is kept. This revision changes the foundation split, the pytest-qt decision, and the hardware re-verification section.
 - The foundation splits into three commits: bridge, then shared foundation (theme, shared widgets, generic table model), then shell. The first draft kept one commit and argued it could not be split without a red suite. The import map under "Why the foundation splits into three" shows it can.
 - pytest-qt is adopted, replacing the first draft's bare `QApplication` fixture. The basis is the fetched documentation and PyPI status, under "Test strategy for Qt".
 - At F1 every GUI test module except the rewritten `test_event_pump.py` goes into `collect_ignore`, including four that would still pass as Tk (`test_discovery_view`, `test_target_selector`, `test_status_bar`, `test_sudo_dialog`). That keeps any Tk window out of a process that holds a live `QApplication`. The ignore list can be tightened later if Tk and Qt prove to coexist in one pytest process.

@@ -57,7 +57,7 @@ both report 469.
 
 All boxes below are the doc's own wording and tick state. Nothing in
 `docs/status.md` or `git log --oneline -30` contradicts them; the log shows the
-redesign shipped (`0526b73`) and later GUI-polish fixes, but no commit closes a
+redesign shipped (`fec0f58`) and later GUI-polish fixes, but no commit closes a
 real-hardware box.
 
 Section 2, drive the real GUI end to end:
